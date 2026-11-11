@@ -43,11 +43,14 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         var folderByPK: [Int64: Folder] = [:]
         for row in folders {
             guard let pk = row.int("Z_PK"), let id = row.string("ZIDENTIFIER") else { continue }
+            // Deleted folders stay as rows until iCloud confirms; unfetched ones are placeholders.
+            // Notes.app shows neither, so neither is a folder to the user.
+            if row.int("ZMARKEDFORDELETION") == 1 || row.int("ZNEEDSINITIALFETCHFROMCLOUD") == 1 { continue }
             let name = row.string("ZTITLE2", "ZTITLE1", "ZTITLE", "ZNAME") ?? ""
             let parent = row.int("ZPARENT").flatMap { library.objects[$0]?.string("ZIDENTIFIER") }
             let deleted = row.int("ZFOLDERTYPE") == 1 || row.int("ZISRECENTLYDELETED", "ZISTRASH") == 1 || id.lowercased().contains("recentlydeleted")
             let smartQuery = row.string("ZSMARTFOLDERQUERYJSON")
-            folderByPK[pk] = Folder(id: id, name: name, accountID: account(row), parentID: parent, path: [], isSmartFolder: row.int("ZFOLDERTYPE") == 2 || !(smartQuery ?? "").isEmpty, isRecentlyDeleted: deleted, noteCount: 0, smartFolderQuery: smartQuery)
+            folderByPK[pk] = Folder(id: id, name: name, accountID: account(row), parentID: parent, path: [], isSmartFolder: row.int("ZFOLDERTYPE") == 2 || !(smartQuery ?? "").isEmpty, isRecentlyDeleted: deleted, noteCount: 0, smartFolderQuery: smartQuery, coreDataID: "x-coredata://\(library.storeUUID)/ICFolder/p\(pk)")
         }
         for pk in Array(folderByPK.keys) {
             var path: [String] = [], current: Int64? = pk, visited: Set<Int64> = [], inheritedAccount = ""

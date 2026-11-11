@@ -26,11 +26,13 @@ public struct Folder: Codable, Sendable, Hashable {
     public var isRecentlyDeleted: Bool
     public var noteCount: Int
     public var smartFolderQuery: String?
+    /// x-coredata://.../ICFolder/pN — the id Notes.app scripting understands.
+    public var coreDataID: String?
     public init(id: String, name: String, accountID: String, parentID: String?, path: [String],
-                isSmartFolder: Bool, isRecentlyDeleted: Bool, noteCount: Int, smartFolderQuery: String? = nil) {
+                isSmartFolder: Bool, isRecentlyDeleted: Bool, noteCount: Int, smartFolderQuery: String? = nil, coreDataID: String? = nil) {
         self.id = id; self.name = name; self.accountID = accountID; self.parentID = parentID
         self.path = path; self.isSmartFolder = isSmartFolder; self.isRecentlyDeleted = isRecentlyDeleted; self.noteCount = noteCount
-        self.smartFolderQuery = smartFolderQuery
+        self.smartFolderQuery = smartFolderQuery; self.coreDataID = coreDataID
     }
 }
 

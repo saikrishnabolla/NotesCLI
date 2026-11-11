@@ -64,13 +64,16 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
     private let runner: any ScriptRunning
     private let timeout: TimeInterval
     private let resolver: Resolver?
+    /// Maps folder UUIDs (ZIDENTIFIER) to x-coredata ids. Notes.app scripting only knows the latter,
+    /// so without this a UUID would be matched as a folder name and never resolve.
+    private let folderResolver: Resolver?
     private let verifier: Verifier?
     private let attachLocalImages: Bool
     private let permissionCheck: @Sendable () throws -> Void
     private let lock = NSRecursiveLock()
 
-    public init(timeout: TimeInterval = 30, resolver: Resolver? = nil, verifier: Verifier? = nil) {
-        self.runner = OSAScriptRunner(); self.timeout = timeout; self.resolver = resolver; self.verifier = verifier
+    public init(timeout: TimeInterval = 30, resolver: Resolver? = nil, folderResolver: Resolver? = nil, verifier: Verifier? = nil) {
+        self.runner = OSAScriptRunner(); self.timeout = timeout; self.resolver = resolver; self.folderResolver = folderResolver; self.verifier = verifier
         self.permissionCheck = { try NotesAutomationPermission.check() }
         let os = ProcessInfo.processInfo.operatingSystemVersion
         // Both documented AppleScript insertion forms duplicate images on 27.2.
@@ -78,15 +81,15 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
     }
 
     // Test injection is internal so production calls cannot accidentally skip consent checks.
-    init(runner: any ScriptRunning, timeout: TimeInterval = 30, resolver: Resolver? = nil,
+    init(runner: any ScriptRunning, timeout: TimeInterval = 30, resolver: Resolver? = nil, folderResolver: Resolver? = nil,
          verifier: Verifier? = nil, attachLocalImages: Bool = true, permissionCheck: @escaping @Sendable () throws -> Void = {}) {
-        self.runner = runner; self.timeout = timeout; self.resolver = resolver; self.verifier = verifier
+        self.runner = runner; self.timeout = timeout; self.resolver = resolver; self.folderResolver = folderResolver; self.verifier = verifier
         self.permissionCheck = permissionCheck
         self.attachLocalImages = attachLocalImages
     }
 
     public func createNote(title: String, markdown: String, folder: String? = nil) throws -> WriteResult {
-        try write("createNote", fields: ["title": title, "folder": folder], markdown: markdown)
+        try write("createNote", fields: ["title": title, "folder": try folderRef(folder)], markdown: markdown)
     }
     public func appendToNote(_ ref: String, markdown: String) throws -> WriteResult {
         try write("appendToNote", fields: ["ref": resolve(ref)], markdown: markdown, uuid: UUID(uuidString: ref)?.uuidString)
@@ -101,7 +104,7 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
         try write("renameNote", fields: ["ref": resolve(ref), "title": title], uuid: UUID(uuidString: ref)?.uuidString)
     }
     public func moveNote(_ ref: String, toFolder: String) throws -> WriteResult {
-        try write("moveNote", fields: ["ref": resolve(ref), "folder": toFolder], uuid: UUID(uuidString: ref)?.uuidString)
+        try write("moveNote", fields: ["ref": resolve(ref), "folder": try folderRef(toFolder)], uuid: UUID(uuidString: ref)?.uuidString)
     }
     /// On macOS 27.2.1 (26B131), live tests confirmed that `delete` moves the note
     /// to Recently Deleted. Notes still exposes it in app.notes, so each call
@@ -112,18 +115,18 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
     }
     public func createFolder(name: String, parent: String? = nil, account: String? = nil) throws -> WriteResult {
         try validateFolderName(name)
-        return try write("createFolder", fields: ["name": name, "parent": parent, "account": account])
+        return try write("createFolder", fields: ["name": name, "parent": try folderRef(parent), "account": account])
     }
     public func renameFolder(_ ref: String, name: String) throws -> WriteResult {
         try validateFolderName(name)
-        return try write("renameFolder", fields: ["ref": ref, "name": name])
+        return try write("renameFolder", fields: ["ref": try folderRef(ref), "name": name])
     }
     /// Deletes empty, non-system, unshared folders only; refuses recursive deletion.
     public func deleteFolder(_ ref: String) throws -> WriteResult {
-        try write("deleteFolder", fields: ["ref": ref])
+        try write("deleteFolder", fields: ["ref": try folderRef(ref)])
     }
     public func moveFolder(_ ref: String, toParent: String?, account: String? = nil) throws -> WriteResult {
-        try write("moveFolder", fields: ["ref": ref, "parent": toParent, "account": account])
+        try write("moveFolder", fields: ["ref": try folderRef(ref), "parent": try folderRef(toParent), "account": account])
     }
     public func prependToNote(_ ref: String, markdown: String, allowAttachmentLoss: Bool = false) throws -> WriteResult {
         let target = try resolve(ref), current = try editableHTML(target, allowAttachmentLoss: allowAttachmentLoss)
@@ -181,7 +184,7 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
         return body
     }
     public func validateFolderDelete(_ ref: String, expectedCount: Int) throws {
-        _ = try execute("validateFolderDelete", fields: ["ref": ref, "expectCount": String(expectedCount)], isWrite: false)
+        _ = try execute("validateFolderDelete", fields: ["ref": try folderRef(ref), "expectCount": String(expectedCount)], isWrite: false)
     }
     public func isDeletedViaScripting(_ ref: String) throws -> Bool {
         let reply = try execute("deletionStatus", fields: ["ref": ref], isWrite: false)
@@ -193,6 +196,11 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
         if ref.hasPrefix("x-coredata://") { return ref }
         if let mapped = try resolver?(ref), mapped.hasPrefix("x-coredata://") { return mapped }
         throw NotesError("note_not_found", "The note reference could not be resolved.", hint: "Supply an x-coredata ID or a resolver backed by NotesReading.")
+    }
+    /// Folder refs may be a name, "A > B" path, x-coredata id, or UUID; UUIDs become x-coredata ids.
+    private func folderRef(_ ref: String?) throws -> String? {
+        guard let ref, UUID(uuidString: ref) != nil, let mapped = try folderResolver?(ref), mapped.hasPrefix("x-coredata://") else { return ref }
+        return mapped
     }
     private func validateFolderName(_ name: String) throws {
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.contains(">") {

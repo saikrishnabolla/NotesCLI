@@ -7,7 +7,7 @@ import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, List.self, Show.self, Search.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, ReadList.self, IndexedSearch.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Link.self, Backlinks.self, AttachmentsCommand.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Link.self, Backlinks.self, AttachmentsCommand.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
     @OptionGroup var options: GlobalOptions
 
     static func main() {
@@ -341,32 +341,23 @@ struct DeleteFolder: ParsableCommand {
         let backend = try options.writable()
         guard let folder = try SafetyExecutor.folder(ref, reader: backend.reader) else { throw NotesError("folder_not_found", "Folder was not found.") }
         let writer = try backend.writer()
-        let descendants: [Folder]
-        let notes: [NoteSummary]
-        if let scripting = writer as? ScriptingNotesWriter {
-            let allActiveFolders = try scripting.listFoldersViaScripting()
-            let activeFolders = allActiveFolders.filter { $0.path == folder.path }
-            guard activeFolders.count == 1 else { throw NotesError("ambiguous_folder", "Folder must resolve uniquely in Notes.app.") }
-            descendants = allActiveFolders.filter {
-                $0.accountID == activeFolders[0].accountID && $0.path.starts(with: folder.path)
-            }.map {
-                Folder(id: $0.id, name: $0.path.last ?? "", accountID: $0.accountID, parentID: nil, path: $0.path,
-                       isSmartFolder: false, isRecentlyDeleted: false, noteCount: 0)
+        // Identify the subtree by stable ids and parent links, never by path: Notes allows
+        // sibling folders with the same name, so paths are ambiguous.
+        let allFolders = try backend.reader.folders(account: nil)
+        var subtreeIDs: Set<String> = [folder.id]
+        var grew = true
+        while grew {
+            grew = false
+            for item in allFolders where !subtreeIDs.contains(item.id) {
+                if let parent = item.parentID, subtreeIDs.contains(parent) { subtreeIDs.insert(item.id); grew = true }
             }
-            let activeNotes = try scripting.listViaScripting().filter {
-                $0.accountID == activeFolders[0].accountID && $0.folderPath.starts(with: folder.path)
-            }
-            notes = try activeNotes.map { try backend.reader.note($0.id).summary }
-        } else {
-            let matchingFolders = try backend.reader.folders(account: nil).filter { $0.accountID == folder.accountID && $0.path.starts(with: folder.path) }
-            var foldersByPath: [String: Folder] = [:]
-            for item in matchingFolders {
-                let key = item.path.joined(separator: " > ")
-                if foldersByPath[key] == nil || item.noteCount > foldersByPath[key]!.noteCount { foldersByPath[key] = item }
-            }
-            descendants = Array(foldersByPath.values)
-            notes = try backend.reader.notes(NoteQuery(includeDeleted: false)).filter {
-                $0.accountID == folder.accountID && $0.folderPath.starts(with: folder.path)
+        }
+        let descendants = allFolders.filter { subtreeIDs.contains($0.id) }
+        let notes = try backend.reader.notes(NoteQuery(includeDeleted: false)).filter { subtreeIDs.contains($0.folderID ?? "") }
+        if let scripting = writer as? ScriptingNotesWriter, let coreDataID = folder.coreDataID {
+            // Confirm Notes.app sees exactly this folder before deleting anything.
+            guard try scripting.listFoldersViaScripting().contains(where: { $0.id == coreDataID }) else {
+                throw NotesError("folder_not_found", "Notes.app does not show this folder.")
             }
         }
         if backend.isFake && expectCount == nil {
@@ -382,7 +373,7 @@ struct DeleteFolder: ParsableCommand {
         }
         if !write.dryRun { try confirm("Delete folder \(ref) and move \(notes.count) note(s) to Recently Deleted?", yes: yes) }
         if let scripting = writer as? ScriptingNotesWriter {
-            try scripting.validateFolderDelete(folder.path.joined(separator: " > "), expectedCount: notes.count)
+            try scripting.validateFolderDelete(folder.coreDataID ?? folder.path.joined(separator: " > "), expectedCount: notes.count)
         }
         var plans: [DryRunPlan] = []
         for summary in notes {

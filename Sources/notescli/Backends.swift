@@ -34,7 +34,11 @@ func makeWriter(reader: any NotesReading) throws -> any NotesWriting {
     return ScriptingNotesWriter(
         resolver: { ref in
             if ref.hasPrefix("x-coredata://") { return ref }
-            return try reader.note(ref).summary.id.coreDataID
+            return try reader.summary(ref).id.coreDataID
+        },
+        folderResolver: { ref in
+            try SQLiteNotesStore(refresh: true).folders(account: nil)
+                .first { $0.id.caseInsensitiveCompare(ref) == .orderedSame }?.coreDataID
         },
         verifier: verifier.verify)
 }

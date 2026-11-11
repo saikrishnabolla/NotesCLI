@@ -6,7 +6,7 @@ import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, List.self, Show.self, Search.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, List.self, Show.self, Search.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
     @OptionGroup var options: GlobalOptions
 
     static func main() {

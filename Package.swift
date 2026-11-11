@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .executable(name: "notescli", targets: ["notescli"]),
         .library(name: "NotesCore", targets: ["NotesCore"]),
+        .library(name: "NotesSync", targets: ["NotesSync"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
@@ -20,13 +21,18 @@ let package = Package(
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
         // MCP server over stdio, same operations as the CLI.
         .target(name: "NotesMCP", dependencies: ["NotesCore"]),
+        .target(name: "NotesSync", dependencies: ["NotesCore"], linkerSettings: [
+            .linkedLibrary("sqlite3"),
+            .linkedFramework("CoreServices"),
+        ]),
         .executableTarget(name: "notescli", dependencies: [
-            "NotesCore", "NotesStore", "NotesAutomation", "NotesMCP",
+            "NotesCore", "NotesStore", "NotesAutomation", "NotesMCP", "NotesSync",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ]),
         .testTarget(name: "NotesCoreTests", dependencies: ["NotesCore"]),
         .testTarget(name: "NotesStoreTests", dependencies: ["NotesStore", "NotesCore"]),
         .testTarget(name: "NotesAutomationTests", dependencies: ["NotesAutomation", "NotesCore"]),
         .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore"]),
+        .testTarget(name: "NotesSyncTests", dependencies: ["NotesSync", "NotesCore"]),
     ]
 )

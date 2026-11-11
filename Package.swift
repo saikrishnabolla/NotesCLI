@@ -16,7 +16,8 @@ let package = Package(
         // Pure Swift: model, protobuf decoding, renderers. No Apple frameworks, so it builds on Linux.
         .target(name: "NotesCore"),
         // macOS: read-only NoteStore.sqlite snapshot reader.
-        .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
+        .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3"), .linkedFramework("PDFKit")]),
+        .target(name: "NotesIndex", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
         // macOS: writes through Notes.app scripting, verified by reading back.
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
         // macOS: rich writes through NotesShared, loaded only at runtime.
@@ -29,11 +30,12 @@ let package = Package(
             .linkedFramework("CoreServices"),
         ]),
         .executableTarget(name: "notescli", dependencies: [
-            "NotesCore", "NotesStore", "NotesAutomation", "NotesNative", "NotesMCP", "NotesSync",
+            "NotesCore", "NotesStore", "NotesIndex", "NotesAutomation", "NotesNative", "NotesMCP", "NotesSync",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ]),
         .testTarget(name: "NotesCoreTests", dependencies: ["NotesCore"]),
         .testTarget(name: "NotesStoreTests", dependencies: ["NotesStore", "NotesCore"]),
+        .testTarget(name: "NotesIndexTests", dependencies: ["NotesIndex", "NotesStore", "NotesCore"]),
         .testTarget(name: "NotesAutomationTests", dependencies: ["NotesAutomation", "NotesCore"]),
         .testTarget(name: "NotesNativeTests", dependencies: ["NotesNative", "NotesAutomation", "NotesCore", "NotesStore"]),
         .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore"]),

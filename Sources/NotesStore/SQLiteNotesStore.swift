@@ -1,5 +1,6 @@
 import Foundation
 import NotesCore
+import PDFKit
 
 public final class SQLiteNotesStore: NotesReading, Sendable {
     public static var defaultDatabaseURL: URL {
@@ -11,6 +12,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     private let folderList: [Folder]
     private let summaries: [NoteSummary]
     private let notePKs: [String: Int64]
+    private let noteRows: [Int64: StoreRow]
     private let objectsByID: [String: StoreRow]
     private let attachmentRows: [Int64: [StoreRow]]
 
@@ -42,7 +44,8 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             let name = row.string("ZTITLE2", "ZTITLE1", "ZTITLE", "ZNAME") ?? ""
             let parent = row.int("ZPARENT").flatMap { library.objects[$0]?.string("ZIDENTIFIER") }
             let deleted = row.int("ZFOLDERTYPE") == 1 || row.int("ZISRECENTLYDELETED", "ZISTRASH") == 1 || id.lowercased().contains("recentlydeleted")
-            folderByPK[pk] = Folder(id: id, name: name, accountID: account(row), parentID: parent, path: [], isSmartFolder: !(row.string("ZSMARTFOLDERQUERYJSON") ?? "").isEmpty, isRecentlyDeleted: deleted, noteCount: 0)
+            let smartQuery = row.string("ZSMARTFOLDERQUERYJSON")
+            folderByPK[pk] = Folder(id: id, name: name, accountID: account(row), parentID: parent, path: [], isSmartFolder: row.int("ZFOLDERTYPE") == 2 || !(smartQuery ?? "").isEmpty, isRecentlyDeleted: deleted, noteCount: 0, smartFolderQuery: smartQuery)
         }
         for pk in Array(folderByPK.keys) {
             var path: [String] = [], current: Int64? = pk, visited: Set<Int64> = [], inheritedAccount = ""
@@ -63,9 +66,10 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             if let parent, noteKeys.contains(parent) { attachmentRows[parent, default: []].append(row) }
         }
         self.objectsByID = objectsByID; self.attachmentRows = attachmentRows
-        var summaries: [NoteSummary] = [], pks: [String: Int64] = [:]
+        var summaries: [NoteSummary] = [], pks: [String: Int64] = [:], noteRows: [Int64: StoreRow] = [:]
         for row in library.rows("ICNote") {
             guard let pk = row.int("Z_PK"), let uuid = row.string("ZIDENTIFIER") else { continue }
+            noteRows[pk] = row
             let folderPK = row.int("ZFOLDER"), folder = folderPK.flatMap { folderByPK[$0] }
             let deleted = row.int("ZMARKEDFORDELETION") == 1 || folder?.isRecentlyDeleted == true
             let attachments = attachmentRows[pk] ?? []
@@ -75,7 +79,16 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
                 return label.hasPrefix("#") ? String(label.dropFirst()) : label
             }).sorted()
             let coreDataID = "x-coredata://\(library.storeUUID)/ICNote/p\(pk)"
-            summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags))
+            func flag(_ name: String) -> Bool? { row.integers[name].map { $0 == 1 } }
+            let participantList = library.participants[pk]
+            let shared = !(participantList ?? []).isEmpty || row.data("ZSERVERSHAREDATA") != nil
+            let sync = NoteSyncState(needsInitialFetch: flag("ZNEEDSINITIALFETCHFROMCLOUD"),
+                                     needsFetch: flag("ZNEEDSTOBEFETCHEDFROMCLOUD"),
+                                     needsFetchAssets: flag("ZNEEDSTOFETCHUSERSPECIFICRECORDASSETS"),
+                                     needsSave: flag("ZNEEDSTOSAVEUSERSPECIFICRECORD"), hasChanges: flag("ZNOTEHASCHANGES"),
+                                     versionOutOfDate: flag("ZVERSIONOUTOFDATE"), cloudState: row.int("ZCLOUDSTATE").map(Int.init),
+                                     lastSyncDate: row.date("ZLASTSYNCDATE"))
+            summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags, hasChecklistInProgress: flag("ZHASCHECKLISTINPROGRESS"), lastOpened: row.date("ZLASTOPENEDDATE"), displayOrder: row.double("ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE"), isShared: shared, participants: participantList, syncState: sync, isSystemPaper: flag("ZISSYSTEMPAPER")))
             pks[uuid.lowercased()] = pk
             if !deleted, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
             else if folder?.isRecentlyDeleted == true, row.int("ZMARKEDFORDELETION") != 1, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
@@ -85,6 +98,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             return $0.id.uuid < $1.id.uuid
         }
         self.notePKs = pks
+        self.noteRows = noteRows
         self.folderList = folderByPK.values.sorted { $0.path.joined(separator: " > ").localizedStandardCompare($1.path.joined(separator: " > ")) == .orderedAscending }
     }
     public func accounts() throws -> [Account] { accountList }
@@ -114,24 +128,24 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
                     guard !summary.isLocked, let pk = notePKs[summary.id.uuid.lowercased()], library.bodies[pk] != nil else { continue }
                     let note = try self.note(summary.id.uuid)
                     let searchable = note.document?.plainText(attachments: note.attachments) ?? ""
-                    if !matches(searchable) && !note.attachments.contains(where: { matches($0.ocrText ?? "") }) { continue }
+                    if !matches(searchable) && !note.attachments.contains(where: { matches($0.searchableText) }) { continue }
                 }
             }
             result.append(summary)
-            if let limit = query.limit, result.count >= limit { break }
         }
-        return result
+        result.sort {
+            if $0.modified != $1.modified { return ($0.modified ?? .distantPast) > ($1.modified ?? .distantPast) }
+            return $0.id.uuid < $1.id.uuid
+        }
+        return Array(result.prefix(query.limit ?? result.count))
     }
+    public func summary(_ ref: String) throws -> NoteSummary { try resolve(ref) }
     public func note(_ ref: String) throws -> Note {
-        let byID = summaries.filter { $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame || $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame }
-        let matches = byID.isEmpty ? summaries.filter { $0.title == ref && !$0.isDeleted } : byID
-        guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }
-        let summary = matches[0]
+        let summary = try resolve(ref)
         // Do not read or decode encrypted payloads, including attachments.
         if summary.isLocked { return Note(summary: summary, document: nil, attachments: []) }
         guard let pk = notePKs[summary.id.uuid.lowercased()], let data = library.bodies[pk], !data.isEmpty else {
-            throw NotesError("body_unavailable", "The note body is not downloaded in this snapshot.", hint: "Open the note in Notes, wait for it to download, then refresh the snapshot.")
+            throw NotesError("body_unavailable", "The note body is not downloaded in this snapshot.", hint: "run notescli fetch")
         }
         var document: NoteDocument
         do { document = try NotesDecoder.decode(data) }
@@ -164,13 +178,109 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             } else { ref.url = row.string("ZURLSTRING") }
             document.runs[i].attachment = ref
         }
+        let deep = try self.attachments(summary.id.uuid)
+        let deepIDs = Set(deep.map(\.id))
+        attachments = deep + attachments.filter { !deepIDs.contains($0.id) }
         return Note(summary: summary, document: document, attachments: attachments)
+    }
+
+    private func resolve(_ ref: String) throws -> NoteSummary {
+        let byID = summaries.filter { $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame || $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame }
+        let matches = byID.isEmpty ? summaries.filter { $0.title == ref && !$0.isDeleted } : byID
+        guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
+        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }
+        return matches[0]
     }
     public func tags() throws -> [String: Int] {
         var counts: [String: Int] = [:]
         for note in summaries where !note.isDeleted { for tag in note.tags { counts[tag, default: 0] += 1 } }
         return counts
     }
+
+    public func attachments(_ ref: String) throws -> [Attachment] {
+        let summary = try resolve(ref)
+        guard !summary.isLocked, let pk = notePKs[summary.id.uuid.lowercased()] else { return [] }
+        var rows = attachmentRows[pk] ?? []
+        let parentPKs = Set(rows.compactMap { $0.int("Z_PK") })
+        rows += library.objects.values.filter { row in
+            guard let parent = row.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") else { return false }
+            return parentPKs.contains(parent)
+        }
+        var built: [Int64: Attachment] = [:]
+        for row in rows {
+            guard let rowPK = row.int("Z_PK") else { continue }
+            built[rowPK] = makeAttachment(row, accountID: summary.accountID)
+        }
+        for parentPK in parentPKs {
+            let childRows = rows.filter { $0.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") == parentPK }
+            guard var parent = built[parentPK], !childRows.isEmpty else { continue }
+            let childIDs = childRows.compactMap { $0.string("ZIDENTIFIER") }
+            let ordered = galleryOrder(noteRows[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") ?? library.objects[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA"), available: childIDs)
+            let byID = Dictionary(uniqueKeysWithValues: childRows.compactMap { row -> (String, StoreRow)? in row.string("ZIDENTIFIER").map { ($0, row) } })
+            let orderedRows = ordered.compactMap { byID[$0] } + childRows.filter { row in
+                guard let id = row.string("ZIDENTIFIER") else { return true }; return !ordered.contains(id)
+            }.sorted { ($0.double("ZSORTORDER", "ZCREATIONDATE") ?? 0) < ($1.double("ZSORTORDER", "ZCREATIONDATE") ?? 0) }
+            let childAttachments = orderedRows.compactMap { $0.int("Z_PK").flatMap { built[$0] } }
+            parent.childAttachmentIDs = childAttachments.map(\.id)
+            parent.pageImagePaths = childAttachments.compactMap(\.filePath)
+            if parent.filePath == nil, let original = childAttachments.first(where: { $0.kind == "audio" || $0.filename != nil }) {
+                parent.filePath = original.filePath; parent.filename = parent.filename ?? original.filename
+            }
+            built[parentPK] = parent
+        }
+        return parentPKs.compactMap { built[$0] }.sorted { $0.id < $1.id }
+    }
+
+    public func rawNote(_ ref: String) throws -> RawProtobufMessage {
+        let summary = try resolve(ref)
+        if summary.isLocked { throw NotesError("note_locked", "The note is locked.") }
+        guard let pk = notePKs[summary.id.uuid.lowercased()], let data = library.bodies[pk], !data.isEmpty else {
+            throw NotesError("body_unavailable", "The note body is not downloaded in this snapshot.", hint: "run notescli fetch")
+        }
+        do { return try ProtobufMessage(NotesInflate.decompressIfNeeded(data)).raw }
+        catch { throw NotesError("decode_invalidProtobuf", "Cannot decode the note body.") }
+    }
+
+    public func backlinks(_ ref: String) throws -> [NoteSummary] {
+        let target = try resolve(ref).id.uuid
+        let noteEntities = library.entities["ICNote"] ?? []
+        let pks = Set(library.rows("ICInlineAttachment").compactMap { row -> Int64? in
+            let uti = row.string("ZTYPEUTI1", "ZTYPEUTI") ?? ""
+            guard uti.contains("link"), row.string("ZTOKENCONTENTIDENTIFIER")?.caseInsensitiveCompare(target) == .orderedSame else { return nil }
+            return row.int("ZNOTE1", "ZNOTE")
+        })
+        return summaries.filter { summary in
+            guard let pk = notePKs[summary.id.uuid.lowercased()], noteEntities.contains(noteRows[pk]?.int("Z_ENT") ?? -1) else { return false }
+            return pks.contains(pk)
+        }
+    }
+
+    public func smartFolders(evaluate: Bool = false) throws -> [SmartFolderResult] {
+        let now = Date()
+        return folderList.filter(\.isSmartFolder).map { folder in
+            let rule = Self.smartRule(folder.smartFolderQuery)
+            let labels = rule.map(Self.ruleLabels) ?? []
+            let unsupported = rule.map(Self.unsupportedRules) ?? ["invalid query"]
+            let ids: [String]?
+            if evaluate, let rule, unsupported.isEmpty {
+                ids = summaries.filter { summary in
+                    let attachments = (try? self.attachments(summary.id.uuid)) ?? []
+                    let document = (try? self.note(summary.id.uuid))?.document
+                    return Self.matches(SmartNote(summary: summary, attachments: attachments, document: document), rule: rule, now: now)
+                }.map { $0.id.uuid }
+            } else { ids = nil }
+            return SmartFolderResult(folder: folder, rules: labels, unsupportedRules: unsupported, matchingNoteIDs: ids)
+        }
+    }
+
+    public func attachmentKindCounts() throws -> [String: Int] {
+        var counts: [String: Int] = [:]
+        for summary in summaries where !summary.isLocked {
+            for attachment in try attachments(summary.id.uuid) { counts[attachment.kind, default: 0] += 1 }
+        }
+        return counts
+    }
+
     private func makeAttachment(_ row: StoreRow, accountID: String) -> Attachment {
         let media = row.int("ZMEDIA").flatMap { library.objects[$0] }
         let id = row.string("ZIDENTIFIER") ?? ""
@@ -192,6 +302,9 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
                 }
                 candidates += [fallback.appendingPathComponent("FallbackImage.\(ext)"), root.appendingPathComponent("FallbackImages/\(id).\(ext)")]
             }
+            let pdf = root.appendingPathComponent("FallbackPDFs").appendingPathComponent(id)
+            if let generation = row.string("ZFALLBACKPDFGENERATION") { candidates.append(pdf.appendingPathComponent(generation).appendingPathComponent("FallbackPDF.pdf")) }
+            candidates += [root.appendingPathComponent("FallbackPDFs/\(id).pdf"), pdf.appendingPathComponent("FallbackPDF.pdf")]
         }
         let boundary = container.resolvingSymlinksInPath().standardizedFileURL.path + "/"
         let path = candidates.first { url in
@@ -199,7 +312,209 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             var isDirectory: ObjCBool = false
             return resolved.hasPrefix(boundary) && FileManager.default.fileExists(atPath: resolved, isDirectory: &isDirectory) && !isDirectory.boolValue
         }?.path
-        let ocr = [row.string("ZOCRSUMMARY"), row.string("ZHANDWRITINGSUMMARY"), row.string("ZADDITIONALINDEXABLETEXT")].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
-        return Attachment(id: id, typeUTI: row.string("ZTYPEUTI1", "ZTYPEUTI") ?? "public.data", filename: filename, filePath: path, title: row.string("ZTITLE", "ZFALLBACKTITLE", "ZALTTEXT", "ZDISPLAYTEXT"), url: row.string("ZURLSTRING", "ZREMOTEFILEURLSTRING"), ocrText: ocr.isEmpty ? nil : ocr)
+        let uti = row.string("ZTYPEUTI1", "ZTYPEUTI") ?? "public.data"
+        let recognized = row.string("ZOCRSUMMARY"), handwriting = row.string("ZHANDWRITINGSUMMARY"), extra = row.string("ZADDITIONALINDEXABLETEXT")
+        let raster = uti.lowercased().contains("drawing") || uti.lowercased().contains("paper") ? path : nil
+        let pdfText: String? = uti.lowercased().contains("pdf") ? path.flatMap { PDFDocument(url: URL(fileURLWithPath: $0))?.string } : nil
+        var words: [TranscriptWord]?, recording: RecordingMetadata?, transcript: String?
+        if let blob = row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA"), let decoded = try? NotesRecordingDecoder.decode(blob), !decoded.words.isEmpty || decoded.metadata.summary != nil || decoded.metadata.topLineSummary != nil {
+            words = decoded.words; recording = decoded.metadata; transcript = NotesRecordingDecoder.joined(decoded.words)
+        }
+        let lower = uti.lowercased(), token = row.string("ZTOKENCONTENTIDENTIFIER")
+        let isCalculation = lower.contains("math") || lower.contains("calculate")
+        let display = row.string("ZALTTEXT", "ZDISPLAYTEXT", "ZSTANDARDIZEDCONTENT", "ZFALLBACKTITLE")
+        return Attachment(id: id, typeUTI: uti, filename: filename, filePath: path,
+                          title: row.string("ZTITLE", "ZFALLBACKTITLE", "ZALTTEXT", "ZDISPLAYTEXT"),
+                          url: row.string("ZURLSTRING", "ZREMOTEFILEURLSTRING"), ocrText: recognized,
+                          handwritingText: handwriting, additionalIndexableText: extra,
+                          imageClassification: row.string("ZIMAGECLASSIFICATIONSUMMARY"), imageSummary: row.string("ZSUMMARY"),
+                          pdfText: pdfText, transcriptText: transcript, transcriptWords: words, recording: recording,
+                          duration: row.double("ZDURATION"), fallbackRasterPath: raster, displayText: display,
+                          participantID: lower.contains("mention") ? token : nil,
+                          targetNoteID: lower.contains("link") ? token : nil,
+                          mathExpression: isCalculation || lower.contains("graph") ? row.string("ZSTANDARDIZEDCONTENT", "ZALTTEXT") : nil,
+                          mathResult: isCalculation ? row.string("ZDISPLAYTEXT", "ZFALLBACKTITLE") : nil,
+                          graphExpression: lower.contains("graph") ? row.string("ZSTANDARDIZEDCONTENT", "ZALTTEXT") : nil,
+                          isDivider: lower.contains("divider") ? true : nil)
+    }
+
+    private func galleryOrder(_ data: Data?, available: [String]) -> [String] {
+        guard let data, let root0 = try? ProtobufMessage(NotesInflate.decompressIfNeeded(data)) else { return [] }
+        let root = ((root0.fields[3] ?? []).isEmpty ? (try? root0.message(2)?.message(3)) ?? nil : root0) ?? root0
+        guard let entries = try? root.messages(3) else { return [] }
+        var pairs: [(Int, String)] = [], currentID: String?, currentOrder: Int?
+        for entry in entries {
+            if let map = try? entry.message(13),
+               let items = try? map.messages(3), let item = items.first,
+               let value = try? item.message(2),
+               let id = value.string(4), available.contains(id) { currentID = id }
+            if let order = try? entry.message(9)?.message(1)?.int(2) { currentOrder = order }
+            if let id = currentID, let order = currentOrder { pairs.append((order, id)); currentID = nil; currentOrder = nil }
+        }
+        return pairs.sorted { $0.0 < $1.0 }.map(\.1)
+    }
+
+    private enum SmartFlag: String {
+        case deleted, checklist, checklistInProgress, checklistCompleted, attachment, pinned, systemPaper
+        case passwordProtected, shared, mention, tagged
+    }
+    private enum SmartDateField { case created, modified }
+    private indirect enum SmartRule {
+        case all([SmartRule]), any([SmartRule]), not(SmartRule)
+        case flag(SmartFlag, Bool), tag(String), folder(String), attachmentSection(Int)
+        case sharedParticipant(String), mentionParticipant(String)
+        case relativeDate(SmartDateField, type: Int, amount: Int?, unit: Int?)
+        case dateRange(SmartDateField, from: Date, to: Date)
+        case unsupported(String)
+    }
+    private struct SmartNote {
+        var summary: NoteSummary
+        var attachments: [Attachment]
+        var document: NoteDocument?
+    }
+
+    private static func smartRule(_ json: String?) -> SmartRule? {
+        guard let json, let data = json.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return smartRuleValue(object)
+    }
+
+    private static func smartRuleValue(_ value: Any) -> SmartRule {
+        guard let dictionary = value as? [String: Any] else { return .unsupported("non-object clause") }
+        if let type = dictionary["type"] { return smartRuleValue(type) }
+        if dictionary.count != 1 { return .all(dictionary.keys.sorted().map { smartRuleValue([$0: dictionary[$0]!]) }) }
+        let key = dictionary.keys.first!, value = dictionary[key]!
+        if key == "and" || key == "or" {
+            guard let values = value as? [Any] else { return .unsupported(key) }
+            let rules = values.map(smartRuleValue)
+            return key == "and" ? .all(rules) : .any(rules)
+        }
+        if key == "not" { return .not(smartRuleValue(value)) }
+        if let flag = SmartFlag(rawValue: key) {
+            guard let expected = value as? Bool else { return .unsupported(key) }
+            return .flag(flag, expected)
+        }
+        if key == "tag", let tag = value as? String { return .tag(tag) }
+        if key == "folder", let folder = value as? String { return .folder(folder) }
+        if key == "sharedParticipant", let id = value as? String { return .sharedParticipant(id) }
+        if key == "mentionParticipant", let id = value as? String { return .mentionParticipant(id) }
+        if key == "attachmentSection", let section = (value as? NSNumber)?.intValue { return .attachmentSection(section) }
+        if key == "creationDateRelativeRange" || key == "modificationDateRelativeRange",
+           let values = value as? [String: Any], let type = (values["type"] as? NSNumber)?.intValue {
+            let field: SmartDateField = key.hasPrefix("creation") ? .created : .modified
+            return .relativeDate(field, type: type, amount: (values["customAmount"] as? NSNumber)?.intValue,
+                                 unit: (values["customUnit"] as? NSNumber)?.intValue)
+        }
+        if key == "creationDateRange" || key == "modificationDateRange",
+           let values = value as? [String: Any], let from = (values["fromDate"] as? NSNumber)?.doubleValue,
+           let to = (values["toDate"] as? NSNumber)?.doubleValue {
+            let field: SmartDateField = key.hasPrefix("creation") ? .created : .modified
+            return .dateRange(field, from: Date(timeIntervalSinceReferenceDate: from), to: Date(timeIntervalSinceReferenceDate: to))
+        }
+        return .unsupported(key)
+    }
+
+    private static func ruleLabels(_ rule: SmartRule) -> [String] {
+        switch rule {
+        case .all(let rules): return rules.flatMap(ruleLabels)
+        case .any(let rules): return ["match any"] + rules.flatMap(ruleLabels)
+        case .not(let value): return ruleLabels(value).map { "not \($0)" }
+        case .flag(let flag, let expected): return ["\(flag.rawValue)=\(expected)"]
+        case .tag(let value): return ["tag=\(value)"]
+        case .folder(let value): return ["folder=\(value)"]
+        case .attachmentSection(let value): return ["attachmentSection=\(value)"]
+        case .sharedParticipant(let value): return ["sharedParticipant=\(value)"]
+        case .mentionParticipant(let value): return ["mentionParticipant=\(value)"]
+        case .relativeDate(let field, let type, let amount, let unit):
+            return ["\(field == .created ? "creation" : "modification")DateRelativeRange=\(type):\(amount.map(String.init) ?? ""): \(unit.map(String.init) ?? "")"]
+        case .dateRange(let field, let from, let to):
+            return ["\(field == .created ? "creation" : "modification")DateRange=\(from.timeIntervalSinceReferenceDate)...\(to.timeIntervalSinceReferenceDate)"]
+        case .unsupported(let key): return ["unsupported=\(key)"]
+        }
+    }
+
+    private static func unsupportedRules(_ rule: SmartRule) -> [String] {
+        switch rule {
+        case .all(let rules), .any(let rules): return Array(Set(rules.flatMap(unsupportedRules))).sorted()
+        case .not(let value): return unsupportedRules(value)
+        case .unsupported(let key): return [key]
+        default: return []
+        }
+    }
+
+    private static func matches(_ note: SmartNote, rule: SmartRule, now: Date) -> Bool {
+        switch rule {
+        case .all(let rules): return rules.allSatisfy { matches(note, rule: $0, now: now) }
+        case .any(let rules): return rules.contains { matches(note, rule: $0, now: now) }
+        case .not(let value): return !matches(note, rule: value, now: now)
+        case .flag(let flag, let expected):
+            let actual: Bool
+            switch flag {
+            case .deleted: actual = note.summary.isDeleted
+            case .checklist: actual = note.summary.hasChecklist
+            case .checklistInProgress:
+                actual = note.summary.hasChecklistInProgress ?? note.document?.runs.contains { $0.paragraph?.kind == .checklist && $0.paragraph?.checked != true } ?? false
+            case .checklistCompleted:
+                actual = note.document?.runs.contains { $0.paragraph?.kind == .checklist && $0.paragraph?.checked == true } ?? false
+            case .attachment: actual = note.summary.attachmentCount > 0
+            case .pinned: actual = note.summary.isPinned
+            case .systemPaper: actual = note.summary.isSystemPaper == true
+            case .passwordProtected: actual = note.summary.isLocked
+            case .shared: actual = note.summary.isShared == true
+            case .mention: actual = note.attachments.contains { $0.kind == "mention" }
+            case .tagged: actual = !note.summary.tags.isEmpty
+            }
+            return actual == expected
+        case .tag(let tag): return note.summary.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }
+        case .folder(let folder): return note.summary.folderID?.caseInsensitiveCompare(folder) == .orderedSame
+        case .sharedParticipant(let id):
+            return note.summary.participants?.contains { $0.participantID?.caseInsensitiveCompare(id) == .orderedSame || $0.userID?.caseInsensitiveCompare(id) == .orderedSame } == true
+        case .mentionParticipant(let id):
+            return note.attachments.contains { $0.participantID?.caseInsensitiveCompare(id) == .orderedSame }
+        case .attachmentSection(let section): return note.attachments.contains { attachmentMatchesSection($0, section: section) }
+        case .relativeDate(let field, let type, let amount, let unit):
+            guard let date = field == .created ? note.summary.created : note.summary.modified else { return false }
+            return dateMatchesRelativeRange(date, type: type, amount: amount, unit: unit, now: now)
+        case .dateRange(let field, let from, let to):
+            guard let date = field == .created ? note.summary.created : note.summary.modified else { return false }
+            return date >= from && date <= to
+        case .unsupported: return false
+        }
+    }
+
+    private static func attachmentMatchesSection(_ attachment: Attachment, section: Int) -> Bool {
+        let value = attachment.typeUTI.lowercased()
+        switch section {
+        case 1: return attachment.kind == "image" || value.contains("video") || value.contains("movie")
+        case 2: return attachment.kind == "drawing"
+        case 3: return value.contains("map")
+        case 4: return attachment.kind == "link"
+        case 5: return attachment.kind == "audio"
+        case 6: return attachment.kind == "pdf" || value.contains("document") || value.contains("text")
+        case 7: return attachment.kind == "scan"
+        default: return false
+        }
+    }
+
+    private static func dateMatchesRelativeRange(_ date: Date, type: Int, amount: Int?, unit: Int?, now: Date) -> Bool {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        switch type {
+        case 0: return date >= today && date <= now
+        case 1:
+            guard let start = calendar.date(byAdding: .day, value: -1, to: today) else { return false }
+            return date >= start && date < today
+        case 2, 3, 4, 5:
+            let component: Calendar.Component = type >= 4 ? .month : .day
+            let value = type == 2 ? -7 : type == 3 ? -30 : type == 4 ? -3 : -12
+            guard let start = calendar.date(byAdding: component, value: value, to: now) else { return false }
+            return date >= start && date <= now
+        case 6:
+            guard let amount, amount >= 0, let unit else { return false }
+            let component: Calendar.Component
+            switch unit { case 0: component = .hour; case 1: component = .day; case 2: component = .weekOfYear; case 3: component = .month; case 4: component = .year; default: return false }
+            guard let start = calendar.date(byAdding: component, value: -amount, to: now) else { return false }
+            return date >= start && date <= now
+        default: return false
+        }
     }
 }

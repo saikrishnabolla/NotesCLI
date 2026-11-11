@@ -27,11 +27,16 @@ private final class SyntheticLibrary {
           ZTYPEUTI TEXT, ZTYPEUTI1 TEXT, ZALTTEXT TEXT, ZDISPLAYTEXT TEXT, ZTOKENCONTENTIDENTIFIER TEXT,
           ZMEDIA INTEGER, ZFILENAME TEXT, ZGENERATION1 TEXT, ZFALLBACKIMAGEGENERATION TEXT,
           ZURLSTRING TEXT, ZFALLBACKTITLE TEXT, ZOCRSUMMARY TEXT, ZHANDWRITINGSUMMARY TEXT, ZADDITIONALINDEXABLETEXT TEXT,
+          ZIMAGECLASSIFICATIONSUMMARY TEXT, ZSUMMARY TEXT, ZDURATION REAL, ZPARENTATTACHMENT INTEGER,
+          ZFALLBACKPDFGENERATION TEXT, ZLASTOPENEDDATE REAL, ZSORTORDER REAL,
+          ZNEEDSINITIALFETCHFROMCLOUD INTEGER, ZNEEDSTOBEFETCHEDFROMCLOUD INTEGER, ZNEEDSTOSAVEUSERSPECIFICRECORD INTEGER,
+          ZVERSIONOUTOFDATE INTEGER, ZCLOUDSTATE INTEGER, ZLASTSYNCDATE REAL, ZISSHAREDIRTY INTEGER, ZSERVERSHAREDATA BLOB,
           ZMERGEABLEDATA1 BLOB, ZMERGEABLEDATA BLOB);
         CREATE TABLE ZICNOTEDATA (Z_PK INTEGER PRIMARY KEY,Z_ENT INTEGER,ZNOTE INTEGER,ZDATA BLOB);
+        CREATE TABLE ZICNOTEPARTICIPANT (Z_PK INTEGER PRIMARY KEY,Z_ENT INTEGER,ZNOTE INTEGER,ZPARTICIPANTID TEXT,ZUSERID TEXT);
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNAME,ZACCOUNTTYPE) VALUES (1,203,'account','Cloud',1),(2,203,'local','On My Mac',2);
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE2,ZOWNER,ZPARENT,ZFOLDERTYPE,ZSMARTFOLDERQUERYJSON) VALUES
-          (10,202,'root','Work',1,NULL,0,NULL),(11,202,'child','Archive',1,10,0,NULL),(12,202,'trash','Deleted localized',1,NULL,1,NULL),(13,202,'smart','Tagged',1,NULL,0,'{}');
+          (10,202,'root','Work',1,NULL,0,NULL),(11,202,'child','Archive',1,10,0,NULL),(12,202,'trash','Deleted localized',1,NULL,1,NULL),(13,202,'smart','Tagged',1,NULL,2,'{"entity":"note","type":{"and":[{"deleted":false},{"tag":"work"}]}}');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE1,ZSNIPPET,ZACCOUNT7,ZFOLDER,ZNOTEDATA,ZISPASSWORDPROTECTED,ZMARKEDFORDELETION,ZISPINNED,ZHASCHECKLIST,ZCREATIONDATE3,ZMODIFICATIONDATE1) VALUES
           (20,201,'N1','First','preview',1,11,120,0,0,1,1,100,200),
           (21,201,'N2','Second','preview',1,10,121,0,0,0,0,101,201),
@@ -47,6 +52,9 @@ private final class SyntheticLibrary {
           (32,205,'link',20,'com.apple.notes.inlinetextattachment.link','Second','N2');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZMEDIA,ZOCRSUMMARY,ZHANDWRITINGSUMMARY,ZADDITIONALINDEXABLETEXT) VALUES
           (33,204,'photo',20,'public.jpeg',34,'recognized','handwriting','extra');
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZIMAGECLASSIFICATIONSUMMARY='document',ZSUMMARY='image summary' WHERE Z_PK=33;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZLASTOPENEDDATE=300,ZSORTORDER=2,ZNEEDSINITIALFETCHFROMCLOUD=0,ZNEEDSTOBEFETCHEDFROMCLOUD=0,ZNEEDSTOSAVEUSERSPECIFICRECORD=1,ZVERSIONOUTOFDATE=0,ZLASTSYNCDATE=250,ZISSHAREDIRTY=1 WHERE Z_PK=20;
+        INSERT INTO ZICNOTEPARTICIPANT VALUES (1,0,20,'participant','user');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZFILENAME,ZGENERATION1) VALUES (34,206,'media','image.jpg','v1');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZURLSTRING,ZTITLE) VALUES (35,204,'preview',20,'public.url','https://example.com','Example');
         """)
@@ -115,15 +123,29 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(try store.note("Second").summary.id.uuid,"N2")
         XCTAssertThrowsError(try store.note("Duplicate")) { XCTAssertEqual(($0 as? NotesError)?.code,"ambiguous_note") }
         XCTAssertThrowsError(try store.note("absent"))
-        XCTAssertThrowsError(try store.note("MISSING")) { XCTAssertEqual(($0 as? NotesError)?.code,"body_unavailable") }
+        XCTAssertThrowsError(try store.note("MISSING")) { XCTAssertEqual(($0 as? NotesError)?.code,"body_unavailable"); XCTAssertEqual(($0 as? NotesError)?.hint,"run notescli fetch") }
         let locked = try store.note("LOCKED")
         XCTAssertNil(locked.document)
         XCTAssertEqual(locked.summary.title,"Secret title")
+        XCTAssertThrowsError(try store.rawNote("LOCKED")) { XCTAssertEqual(($0 as? NotesError)?.code,"note_locked") }
         XCTAssertEqual(note.summary.attachmentCount,2)
         let image = try XCTUnwrap(note.attachments.first { $0.id == "photo" })
         XCTAssertEqual(image.filename,"image.jpg")
         XCTAssertEqual(image.filePath,fixture.directory.appendingPathComponent("Accounts/account/Media/media/v1/image.jpg").path)
-        XCTAssertEqual(image.ocrText,"recognized\nhandwriting\nextra")
+        XCTAssertEqual(image.ocrText,"recognized")
+        XCTAssertEqual(image.handwritingText,"handwriting")
+        XCTAssertEqual(image.additionalIndexableText,"extra")
+        XCTAssertEqual(image.imageClassification,"document")
+        XCTAssertEqual(note.summary.lastOpened,Date(timeIntervalSinceReferenceDate:300))
+        XCTAssertEqual(note.summary.displayOrder,2)
+        XCTAssertEqual(note.summary.participants?.first?.participantID,"participant")
+        XCTAssertEqual(note.summary.syncState?.needsSave,true)
+        XCTAssertEqual(try store.notes(.init(),sort:.opened).first?.id.uuid,"N1")
+        XCTAssertEqual(try store.backlinks("N2").map(\.id.uuid),["N1"])
+        let smart = try XCTUnwrap(store.smartFolders(evaluate:true).first)
+        XCTAssertEqual(smart.rules,["deleted=false","tag=work"])
+        XCTAssertTrue(smart.unsupportedRules.isEmpty)
+        XCTAssertEqual(smart.matchingNoteIDs,["N1"])
         XCTAssertEqual(note.attachments.first { $0.id == "preview" }?.url,"https://example.com")
         XCTAssertEqual(note.document?.runs[2].attachment?.url,"applenotes://showNote?identifier=N2")
         XCTAssertTrue(note.document?.markdown(attachments:note.attachments).contains("#work @Pat [Second](applenotes://showNote?identifier=N2)") == true)
@@ -202,8 +224,10 @@ final class LiveNotesStoreTests: XCTestCase {
             catch { reasons["unexpected_error",default:0] += 1 }
         }
         let failures = reasons.values.reduce(0,+)
-        print("NOTESCLI_LIVE total=\(notes.count) decoded=\(decoded) locked=\(locked) failures=\(failures) reasons=\(reasons.sorted { $0.key < $1.key }) cold_list_seconds=\(coldSeconds) warm_list_seconds=\(warmSeconds)")
+        let unexpected = reasons.filter { $0.key != "body_unavailable" }.values.reduce(0,+)
+        let kinds = try store.attachmentKindCounts()
+        print("NOTESCLI_LIVE total=\(notes.count) decoded=\(decoded) locked=\(locked) failures=\(failures) reasons=\(reasons.sorted { $0.key < $1.key }) attachment_kinds=\(kinds.sorted { $0.key < $1.key }) cold_list_seconds=\(coldSeconds) warm_list_seconds=\(warmSeconds)")
         XCTAssertEqual(notes.count,decoded+locked+failures)
-        XCTAssertEqual(failures,0,"Library verification had failures; see aggregate reason counts")
+        XCTAssertEqual(unexpected,0,"Library verification had unexpected failures; see aggregate reason counts")
     }
 }

@@ -158,6 +158,7 @@ public enum NoteRenderer {
             }
         }
         let uti = ref.typeUTI.lowercased()
+        if a?.isDivider == true || uti.contains("divider") { return format == .html ? "<hr>" : "---" }
         if uti.contains("hashtag") || uti.contains("mention") {
             let prefix = uti.contains("hashtag") ? "#" : "@"
             let label = ref.displayText ?? a?.title ?? ref.id
@@ -165,10 +166,38 @@ public enum NoteRenderer {
         }
         let title = ref.displayText ?? a?.title ?? a?.filename ?? "attachment: \(ref.typeUTI)"
         let url = ref.url ?? a?.url ?? a?.filePath ?? "notescli-attachment:\(ref.id)"
-        if format == .plain { return title }
-        let image = a?.filePath != nil && (uti.contains("image") || ["public.jpeg", "public.png", "public.heic", "com.compuserve.gif", "public.tiff"].contains(uti))
-        if format == .markdown { return "\(image ? "!" : "")[\(escaped(title, .markdown))](\(destination(safeURL(url))))" }
-        return image ? "<img src=\"\(escaped(safeURL(url), .html))\" alt=\"\(escaped(title, .html))\">" : "<a href=\"\(escaped(safeURL(url), .html))\">\(escaped(title, .html))</a>"
+        let timing = a?.transcriptWords?.map { word in
+            let time = word.start.map { String(format: "%.2fs", $0) }
+            return [time.map { "[\($0)]" }, word.speaker.map { "\($0):" }, word.text].compactMap { $0 }.joined(separator: " ")
+        }.joined(separator: " ") ?? ""
+        let call = a?.recording.map { recording in
+            [recording.isCallRecording.map { "call=\($0)" }, recording.callType.map { "type=\($0)" },
+             recording.localSpeakerHandle.map { "local=\($0)" }, recording.remoteSpeakerHandle.map { "remote=\($0)" },
+             recording.startTime.map { "started=\(ISO8601DateFormatter().string(from: $0))" }].compactMap { $0 }.joined(separator: ", ")
+        } ?? ""
+        let details: [(String, String)] = [
+            ("Transcript", a?.transcriptText ?? ""), ("Recording summary", a?.recording?.summary ?? a?.recording?.topLineSummary ?? ""),
+            ("Word timing", timing), ("Call metadata", call), ("PDF text", a?.pdfText ?? ""),
+            ("Recognized text", a?.ocrText ?? ""), ("Handwriting", a?.handwritingText ?? ""),
+            ("Additional text", a?.additionalIndexableText ?? ""), ("Image labels", a?.imageClassification ?? ""),
+            ("Image summary", a?.imageSummary ?? ""), ("Math expression", a?.mathExpression ?? ""),
+            ("Math result", a?.mathResult ?? ""), ("Graph expression", a?.graphExpression ?? "")
+        ].filter { !$0.1.isEmpty }
+        let pages = a?.pageImagePaths ?? []
+        if format == .plain {
+            return ([title] + pages.enumerated().map { "Page \($0.offset + 1): \($0.element)" } + details.map { "\($0.0): \($0.1)" }).joined(separator: "\n")
+        }
+        let image = a?.filePath != nil && (uti.contains("image") || ["public.jpeg", "public.png", "public.heic", "com.compuserve.gif", "public.tiff"].contains(uti) || a?.kind == "drawing" || a?.kind == "scan")
+        if format == .markdown {
+            let base = pages.isEmpty
+                ? "\(image ? "!" : "")[\(escaped(title, .markdown))](\(destination(safeURL(url))))"
+                : pages.enumerated().map { "![\(escaped(title, .markdown)) page \($0.offset + 1)](\(destination(safeURL($0.element))))" }.joined(separator: "\n")
+            return base + details.map { "\n\n**\(escaped($0.0, .markdown)):** \(escaped($0.1, .markdown))" }.joined()
+        }
+        let base = pages.isEmpty
+            ? (image ? "<img src=\"\(escaped(safeURL(url), .html))\" alt=\"\(escaped(title, .html))\">" : "<a href=\"\(escaped(safeURL(url), .html))\">\(escaped(title, .html))</a>")
+            : pages.enumerated().map { "<img src=\"\(escaped(safeURL($0.element), .html))\" alt=\"\(escaped(title, .html)) page \($0.offset + 1)\">" }.joined()
+        return base + details.map { "<p><strong>\(escaped($0.0, .html)):</strong> \(escaped($0.1, .html))</p>" }.joined()
     }
     private static func htmlBlocks(_ lines: [Line]) -> String {
         func listKind(_ line: Line) -> String? {

@@ -1,5 +1,7 @@
 import Foundation
 import NotesCore
+import NotesStore
+import NotesAutomation
 
 struct Backends {
     let reader: any NotesReading
@@ -19,11 +21,32 @@ struct Backends {
 }
 
 func makeReader() throws -> any NotesReading {
-    throw NotesError("not_wired", "The Notes reader has not been wired in. Use --backend fake.")
+    try SQLiteNotesStore()
 }
+
+/// Real writer: refs resolve through the reader to x-coredata ids, and every write
+/// that names a note is read back from a fresh snapshot before it counts as verified.
 func makeWriter(reader: any NotesReading) throws -> any NotesWriting {
-    throw NotesError("not_wired", "The Notes writer has not been wired in. Use --backend fake.")
+    let started = Date()
+    return ScriptingNotesWriter(
+        resolver: { ref in
+            if ref.hasPrefix("x-coredata://") { return ref }
+            return try reader.note(ref).summary.id.coreDataID
+        },
+        verifier: { result in
+            guard let id = result.noteID?.coreDataID ?? result.noteID.map(\.uuid), !id.isEmpty else { return .unverified }
+            // Notes saves to its database asynchronously; poll fresh snapshots for up to ~5 seconds.
+            for attempt in 0..<10 {
+                if attempt > 0 { Thread.sleep(forTimeInterval: 0.5) }
+                guard let fresh = try? SQLiteNotesStore(refresh: true),
+                      let note = try? fresh.note(id) else { continue }
+                if note.summary.isDeleted { return .verified }
+                if let modified = note.summary.modified, modified >= started.addingTimeInterval(-2) { return .verified }
+            }
+            return .unverified
+        })
 }
+
 func openInNotes(_ id: NoteID) throws {
-    throw NotesError("not_wired", "Opening Notes.app has not been wired in. Use --backend fake.")
+    try ScriptingNotesWriter().showInNotes(id.coreDataID ?? id.uuid)
 }

@@ -11,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSManagedObjectContext *)sharedContext:(NSError **)error NS_SWIFT_NAME(sharedContext());
 + (nullable NSAttributedString *)bodyOfNote:(NSManagedObject *)note error:(NSError **)error NS_SWIFT_NAME(body(of:));
 + (nullable id)valueForKey:(NSString *)key ofObject:(id)object;
++ (BOOL)setValue:(nullable id)value forKey:(NSString *)key ofObject:(id)object error:(NSError **)error
+    NS_SWIFT_NAME(setValue(_:forKey:of:));
 + (nullable id)paragraphStyle:(NSInteger)style indent:(NSInteger)indent quote:(NSInteger)quote checked:(NSInteger)checked
                        basedOn:(nullable id)existing error:(NSError **)error
     NS_SWIFT_NAME(paragraphStyle(_:indent:quote:checked:basedOn:));
@@ -37,12 +39,20 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSManagedObject *)duplicateNote:(NSManagedObject *)note folder:(NSManagedObject *)folder error:(NSError **)error
     NS_SWIFT_NAME(duplicateNote(_:folder:));
 + (BOOL)saveContext:(NSManagedObjectContext *)context error:(NSError **)error NS_SWIFT_NAME(save(_:));
++ (nullable NSNumber *)checkedIntegerSelector:(NSString *)selector ofObject:(id)object error:(NSError **)error
+    NS_SWIFT_NAME(checkedInteger(_:of:));
++ (BOOL)requireInstanceSelectors:(NSArray<NSString *> *)selectors className:(NSString *)className error:(NSError **)error
+    NS_SWIFT_NAME(requireInstanceSelectors(_:className:));
++ (BOOL)requireSelectors:(NSArray<NSString *> *)selectors ofObject:(id)object error:(NSError **)error
+    NS_SWIFT_NAME(requireSelectors(_:of:));
 @end
 
 @interface NCBodyEditor : NSObject
 - (nullable instancetype)initWithNote:(NSManagedObject *)note error:(NSError **)error;
 @property(nonatomic, readonly) NSAttributedString *original;
 - (BOOL)begin:(NSError **)error NS_SWIFT_NAME(begin());
+- (BOOL)prepareWithOperations:(NSArray<NSString *> *)operations error:(NSError **)error NS_SWIFT_NAME(prepare(_:));
+- (BOOL)beginWithOperations:(NSArray<NSString *> *)operations error:(NSError **)error NS_SWIFT_NAME(begin(_:));
 - (BOOL)insert:(NSAttributedString *)text at:(NSUInteger)index error:(NSError **)error NS_SWIFT_NAME(insert(_:at:));
 - (BOOL)deleteRange:(NSRange)range error:(NSError **)error NS_SWIFT_NAME(delete(_:));
 - (BOOL)setAttributes:(NSDictionary<NSAttributedStringKey, id> *)attributes range:(NSRange)range error:(NSError **)error
@@ -53,9 +63,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface NCTableEditor : NSObject
 - (nullable instancetype)initWithAttachment:(NSManagedObject *)attachment error:(NSError **)error;
-@property(nonatomic, readonly) NSInteger rowCount;
-@property(nonatomic, readonly) NSInteger columnCount;
-- (NSString *)textAtColumn:(NSInteger)column row:(NSInteger)row NS_SWIFT_NAME(text(column:row:));
+- (nullable NSNumber *)rowCount:(NSError **)error NS_SWIFT_NAME(rowCount());
+- (nullable NSNumber *)columnCount:(NSError **)error NS_SWIFT_NAME(columnCount());
+- (nullable NSString *)textAtColumn:(NSInteger)column row:(NSInteger)row error:(NSError **)error NS_SWIFT_NAME(text(column:row:));
 - (BOOL)insertRow:(NSInteger)index error:(NSError **)error;
 - (BOOL)removeRow:(NSInteger)index error:(NSError **)error;
 - (BOOL)insertColumn:(NSInteger)index error:(NSError **)error;

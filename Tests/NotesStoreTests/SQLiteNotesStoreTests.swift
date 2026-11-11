@@ -93,6 +93,42 @@ private final class SyntheticLibrary {
 }
 
 final class SQLiteNotesStoreTests: XCTestCase {
+    func testNotesInDeletedFolderStayDeleted() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("""
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+          (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE2,ZOWNER,ZFOLDERTYPE,ZMARKEDFORDELETION)
+          VALUES (14,202,'deleted-folder','Gone',1,0,1);
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+          (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE1,ZACCOUNT7,ZFOLDER,ZNOTEDATA,ZISPASSWORDPROTECTED,ZMARKEDFORDELETION,ZISPINNED,ZHASCHECKLIST,ZCREATIONDATE3,ZMODIFICATIONDATE1)
+          VALUES (28,201,'IN-DELETED-FOLDER','Hidden child',1,14,128,0,0,0,0,108,208);
+        """)
+        try fixture.body(28, "Hidden body")
+
+        let store = try fixture.store()
+        XCTAssertFalse(try store.notes().contains { $0.id.uuid == "IN-DELETED-FOLDER" })
+        let deleted = try XCTUnwrap(store.notes(.init(includeDeleted: true)).first { $0.id.uuid == "IN-DELETED-FOLDER" })
+        XCTAssertTrue(deleted.isDeleted)
+        XCTAssertNil(deleted.folderID)
+    }
+
+    func testInitialFetchRowsAreHiddenUnlessExplicitlyIncluded() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("""
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+          (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE1,ZSNIPPET,ZACCOUNT7,ZFOLDER,ZNOTEDATA,ZISPASSWORDPROTECTED,ZMARKEDFORDELETION,ZISPINNED,ZHASCHECKLIST,ZCREATIONDATE3,ZMODIFICATIONDATE1,ZNEEDSINITIALFETCHFROMCLOUD)
+          VALUES (29,201,'CACHED-PLACEHOLDER','Cached title','Cached snippet',1,10,NULL,0,0,0,0,109,209,1);
+        """)
+
+        let store = try fixture.store()
+        XCTAssertEqual(store.placeholderCount, 1)
+        XCTAssertFalse(try store.notes(.init(includeDeleted: true)).contains { $0.id.uuid == "CACHED-PLACEHOLDER" })
+        XCTAssertEqual(
+            try store.notes(.init(includeDeleted: true), includePlaceholders: true).filter { $0.id.uuid == "CACHED-PLACEHOLDER" }.count,
+            1
+        )
+    }
+
     func testMetadataFiltersAndReferencesFromWAL() throws {
         let fixture = try SyntheticLibrary()
         let beforeDB = try Data(contentsOf: fixture.database)

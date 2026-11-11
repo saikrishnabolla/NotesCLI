@@ -14,11 +14,41 @@ static BOOL NCCatch(NSString *action, NSError **error, NS_NOESCAPE void (^block)
         return NO;
     }
 }
-static BOOL NCRequire(id target, NSString *selector, BOOL classMethod, NSError **error) {
-    SEL sel = NSSelectorFromString(selector);
-    BOOL available = classMethod ? [target respondsToSelector:sel] : [(Class)target instancesRespondToSelector:sel];
-    if (!available && error) *error = NCError([NSString stringWithFormat:@"required selector missing: %@ %@", target, selector]);
-    return available;
+static BOOL NCRequireObject(id target, NSArray<NSString *> *selectors, NSString *action, NSError **error) {
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (NSString *name in selectors) {
+        if (!target || ![target respondsToSelector:NSSelectorFromString(name)]) {
+            [missing addObject:[NSString stringWithFormat:@"-[%@ %@]", target ? NSStringFromClass([target class]) : @"nil", name]];
+        }
+    }
+    if (missing.count && error) {
+        *error = NCError([NSString stringWithFormat:@"required selectors missing for %@: %@", action, [missing componentsJoinedByString:@", "]]);
+    }
+    return missing.count == 0;
+}
+static BOOL NCRequireClass(Class cls, NSArray<NSString *> *selectors, NSString *action, NSError **error) {
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (NSString *name in selectors) {
+        if (!cls || ![cls respondsToSelector:NSSelectorFromString(name)]) {
+            [missing addObject:[NSString stringWithFormat:@"+[%@ %@]", cls ? NSStringFromClass(cls) : @"nil", name]];
+        }
+    }
+    if (missing.count && error) {
+        *error = NCError([NSString stringWithFormat:@"required selectors missing for %@: %@", action, [missing componentsJoinedByString:@", "]]);
+    }
+    return missing.count == 0;
+}
+static BOOL NCRequireInstanceClass(Class cls, NSArray<NSString *> *selectors, NSString *action, NSError **error) {
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (NSString *name in selectors) {
+        if (!cls || ![cls instancesRespondToSelector:NSSelectorFromString(name)]) {
+            [missing addObject:[NSString stringWithFormat:@"-[%@ %@]", cls ? NSStringFromClass(cls) : @"nil", name]];
+        }
+    }
+    if (missing.count && error) {
+        *error = NCError([NSString stringWithFormat:@"required selectors missing for %@: %@", action, [missing componentsJoinedByString:@", "]]);
+    }
+    return missing.count == 0;
 }
 
 @protocol NCNoteContextClass
@@ -108,7 +138,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *NCClassSelectors(void) {
     return @{
         @"ICNoteContext": @[@"startSharedContextWithOptions:", @"sharedContext"],
         @"ICInlineAttachment": @[@"newHashtagAttachmentWithIdentifier:hashtagText:creatingHashtagIfNecessary:note:parentAttachment:",
-                                  @"newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"],
+                                  @"newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:", @"reviveOrTouchHashtag:"],
         @"ICHashtag": @[@"renameHashtagsWithStandardizedContent:newDisplayText:context:"],
     };
 }
@@ -141,15 +171,18 @@ static void NCInstallTableStyleMethod(void) {
     Class stringClass = NSMutableAttributedString.class;
     if ([stringClass instancesRespondToSelector:selector]) return;
     IMP implementation = imp_implementationWithBlock(^(NSMutableAttributedString *string, NSRange range) {
-        Class styleClass = NSClassFromString(@"ICTTParagraphStyle");
-        if (!styleClass) return;
-        NSMutableArray *updates = [NSMutableArray array];
-        [string enumerateAttribute:@"TTStyle" inRange:range options:0 usingBlock:^(id value, NSRange run, BOOL *stop) {
-            id<NCParagraph> style = value ? [value mutableCopy] : [[styleClass alloc] init];
-            [style setStyle:3];
-            [updates addObject:@[[NSValue valueWithRange:run], style]];
-        }];
-        for (NSArray *update in updates) [string addAttribute:@"TTStyle" value:update[1] range:[update[0] rangeValue]];
+        @try {
+            Class styleClass = NSClassFromString(@"ICTTParagraphStyle");
+            if (!styleClass) return;
+            NSMutableArray *updates = [NSMutableArray array];
+            [string enumerateAttribute:@"TTStyle" inRange:range options:0 usingBlock:^(id value, NSRange run, BOOL *stop) {
+                id<NCParagraph> style = value ? [value mutableCopy] : [[styleClass alloc] init];
+                if (![(id)style respondsToSelector:@selector(setStyle:)]) return;
+                [style setStyle:3];
+                [updates addObject:@[[NSValue valueWithRange:run], style]];
+            }];
+            for (NSArray *update in updates) [string addAttribute:@"TTStyle" value:update[1] range:[update[0] rangeValue]];
+        } @catch (__unused NSException *exception) {}
     });
     class_addMethod(stringClass, selector, implementation, "v@:{_NSRange=QQ}");
 }
@@ -193,14 +226,14 @@ static void NCInstallTableStyleMethod(void) {
     if (context) return context;
     if (!NCLoad(error)) return nil;
     Class cls = NSClassFromString(@"ICNoteContext");
-    if (!cls || !NCRequire(cls, @"startSharedContextWithOptions:", YES, error) || !NCRequire(cls, @"sharedContext", YES, error)) return nil;
+    if (!NCRequireClass(cls, @[@"startSharedContextWithOptions:", @"sharedContext"], @"opening Notes context", error)) return nil;
     __block id shared = nil;
     if (!NCCatch(@"opening Notes context", error, ^{
         id<NCNoteContextClass> typed = (id<NCNoteContextClass>)cls;
         [typed startSharedContextWithOptions:0];
         shared = [typed sharedContext];
     })) return nil;
-    if (![shared respondsToSelector:@selector(persistentContainer)]) { if (error) *error = NCError(@"required selector missing: ICNoteContext persistentContainer"); return nil; }
+    if (!NCRequireObject(shared, @[@"persistentContainer"], @"opening Notes persistent container", error)) return nil;
     __block NSManagedObjectContext *found = nil;
     if (!NCCatch(@"opening Notes persistent container", error, ^{ found = [[(id<NCNoteContext>)shared persistentContainer] viewContext]; })) return nil;
     if (!found && error) *error = NCError(@"Notes shared context returned no view context");
@@ -209,12 +242,17 @@ static void NCInstallTableStyleMethod(void) {
 }
 
 + (id)valueForKey:(NSString *)key ofObject:(id)object { @try { return [object valueForKey:key]; } @catch (__unused NSException *e) { return nil; } }
++ (BOOL)setValue:(id)value forKey:(NSString *)key ofObject:(id)object error:(NSError **)error {
+    return NCCatch(@"setting private property", error, ^{ [object setValue:value forKey:key]; });
+}
 
 + (NSAttributedString *)bodyOfNote:(NSManagedObject *)note error:(NSError **)error {
     if (!NCLoad(error)) return nil;
-    if (![note respondsToSelector:@selector(mergeableString)]) { if (error) *error = NCError(@"required selector missing: ICNote mergeableString"); return nil; }
-    __block NSAttributedString *body = nil;
-    if (!NCCatch(@"reading note body", error, ^{ body = [[[(id<NCNote>)note mergeableString] attributedString] copy]; })) return nil;
+    if (!NCRequireObject(note, @[@"mergeableString"], @"reading note body", error)) return nil;
+    __block id mergeable = nil; __block NSAttributedString *body = nil;
+    if (!NCCatch(@"reading note body", error, ^{ mergeable = [(id<NCNote>)note mergeableString]; })) return nil;
+    if (!NCRequireObject(mergeable, @[@"attributedString"], @"reading note body", error)) return nil;
+    if (!NCCatch(@"reading note body", error, ^{ body = [[(id<NCMergeable>)mergeable attributedString] copy]; })) return nil;
     return body ?: [[NSAttributedString alloc] init];
 }
 
@@ -222,6 +260,13 @@ static void NCInstallTableStyleMethod(void) {
     if (!NCLoad(error)) return nil;
     Class cls = NSClassFromString(@"ICTTParagraphStyle"), todoClass = NSClassFromString(@"ICTTTodo");
     if (!cls || !todoClass) { if (error) *error = NCError(@"required class missing: ICTTParagraphStyle or ICTTTodo"); return nil; }
+    if (!NCRequireObject(existing ?: [cls alloc], @[@"setStyle:", @"setIndent:", @"setBlockQuoteLevel:", @"todo"], @"creating paragraph style", error)) return nil;
+    if (checked >= 0 && !NCRequireObject([todoClass alloc], @[@"initWithIdentifier:done:"], @"creating checklist state", error)) return nil;
+    if (checked >= 0 && existing) {
+        __block id prior = nil;
+        if (!NCCatch(@"reading checklist state", error, ^{ prior = [(id<NCParagraph>)existing todo]; })) return nil;
+        if (prior && !NCRequireObject(prior, @[@"todoWithDone:"], @"updating checklist state", error)) return nil;
+    }
     __block id result = nil;
     if (!NCCatch(@"creating paragraph style", error, ^{
         id<NCParagraph> made = existing ? [existing mutableCopy] : [[cls alloc] init];
@@ -245,65 +290,66 @@ static void NCInstallTableStyleMethod(void) {
 + (NSString *)markerType:(id)marker { id v = [self valueForKey:@"attachmentUTI" ofObject:marker]; return [v isKindOfClass:NSString.class] ? v : nil; }
 
 + (NSString *)makeTag:(NSString *)name inNote:(NSManagedObject *)note error:(NSError **)error {
-    Class cls = NSClassFromString(@"ICInlineAttachment"); SEL sel = NSSelectorFromString(@"newHashtagAttachmentWithIdentifier:hashtagText:creatingHashtagIfNecessary:note:parentAttachment:");
-    if (!cls || ![cls respondsToSelector:sel]) { if (error) *error = NCError(@"required selector missing: ICInlineAttachment tag creation"); return nil; }
+    Class cls = NSClassFromString(@"ICInlineAttachment");
+    if (!NCRequireClass(cls, @[@"newHashtagAttachmentWithIdentifier:hashtagText:creatingHashtagIfNecessary:note:parentAttachment:", @"reviveOrTouchHashtag:"], @"creating tag", error)) return nil;
     __block NSString *identifier = nil;
     if (!NCCatch(@"creating tag", error, ^{ id item = [(id<NCInlineClass>)cls newHashtagAttachmentWithIdentifier:NSUUID.UUID.UUIDString hashtagText:name creatingHashtagIfNecessary:YES note:note parentAttachment:nil]; identifier = [item valueForKey:@"identifier"]; })) return nil;
     return identifier;
 }
 
 + (NSString *)makeNoteLinkTo:(NSManagedObject *)target from:(NSManagedObject *)source text:(NSString *)text error:(NSError **)error {
-    Class cls = NSClassFromString(@"ICInlineAttachment"); SEL sel = NSSelectorFromString(@"newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:");
-    if (!cls || ![cls respondsToSelector:sel]) { if (error) *error = NCError(@"required selector missing: ICInlineAttachment note-link creation"); return nil; }
+    Class cls = NSClassFromString(@"ICInlineAttachment");
+    if (!NCRequireClass(cls, @[@"newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:"], @"creating note link", error)) return nil;
     __block NSString *identifier = nil;
     if (!NCCatch(@"creating note link", error, ^{ id item = [(id<NCInlineClass>)cls newLinkAttachmentWithIdentifier:NSUUID.UUID.UUIDString toNote:target fromNote:source parentAttachment:nil]; if (text.length) [item setValue:text forKey:@"altText"]; identifier = [item valueForKey:@"identifier"]; })) return nil;
     return identifier;
 }
 
 + (NSString *)addFile:(NSURL *)file toNote:(NSManagedObject *)note title:(NSString *)title type:(NSString **)type error:(NSError **)error {
-    if (![note respondsToSelector:@selector(addAttachmentWithFileURL:)]) { if (error) *error = NCError(@"required selector missing: ICNote addAttachmentWithFileURL:"); return nil; }
+    if (!NCRequireObject(note, @[@"setShouldAddMediaAsynchronously:", @"addAttachmentWithFileURL:"], @"adding file", error)) return nil;
     __block NSString *identifier = nil, *kind = nil;
-    if (!NCCatch(@"adding file", error, ^{ if ([note respondsToSelector:@selector(setShouldAddMediaAsynchronously:)]) [(id<NCNote>)note setShouldAddMediaAsynchronously:NO]; id item = [(id<NCNote>)note addAttachmentWithFileURL:file]; if (title.length) [item setValue:title forKey:@"userTitle"]; identifier = [item valueForKey:@"identifier"]; kind = [item valueForKey:@"typeUTI"]; })) return nil;
+    if (!NCCatch(@"adding file", error, ^{ [(id<NCNote>)note setShouldAddMediaAsynchronously:NO]; id item = [(id<NCNote>)note addAttachmentWithFileURL:file]; if (title.length) [item setValue:title forKey:@"userTitle"]; identifier = [item valueForKey:@"identifier"]; kind = [item valueForKey:@"typeUTI"]; })) return nil;
     if (type) *type = kind;
     return identifier;
 }
 
 + (BOOL)setPreferredImageSize:(NSString *)size attachment:(NSManagedObject *)attachment error:(NSError **)error {
     SEL sel = NSSelectorFromString(@"setPreferredViewSize:");
-    if (![attachment respondsToSelector:sel]) { if (error) *error = NCError(@"required selector missing: ICAttachment setPreferredViewSize:"); return NO; }
+    if (!NCRequireObject(attachment, @[@"setPreferredViewSize:"], @"setting image view size", error)) return NO;
     return NCCatch(@"setting image view size", error, ^{ ((void (*)(id, SEL, short))objc_msgSend)(attachment, sel, [size isEqualToString:@"small"] ? 1 : 0); });
 }
 
 + (BOOL)renameTag:(NSManagedObject *)tag to:(NSString *)name error:(NSError **)error {
-    Class cls = NSClassFromString(@"ICHashtag"); SEL sel = NSSelectorFromString(@"renameHashtagsWithStandardizedContent:newDisplayText:context:");
-    if (!cls || ![cls respondsToSelector:sel]) { if (error) *error = NCError(@"required selector missing: ICHashtag rename"); return NO; }
+    Class cls = NSClassFromString(@"ICHashtag");
+    if (!NCRequireClass(cls, @[@"renameHashtagsWithStandardizedContent:newDisplayText:context:"], @"renaming tag", error)) return NO;
     return NCCatch(@"renaming tag", error, ^{ [(id<NCInlineClass>)cls renameHashtagsWithStandardizedContent:[tag valueForKey:@"standardizedContent"] newDisplayText:name context:tag.managedObjectContext]; });
 }
 + (BOOL)reviveTagAttachment:(NSManagedObject *)attachment error:(NSError **)error {
-    Class cls = NSClassFromString(@"ICInlineAttachment"); SEL sel = NSSelectorFromString(@"reviveOrTouchHashtag:");
-    if (!cls || ![cls respondsToSelector:sel]) return YES;
+    Class cls = NSClassFromString(@"ICInlineAttachment");
+    if (!NCRequireClass(cls, @[@"reviveOrTouchHashtag:"], @"reviving tag", error)) return NO;
     return NCCatch(@"reviving tag", error, ^{ [(id<NCInlineClass>)cls reviveOrTouchHashtag:attachment]; });
 }
 + (BOOL)markForDeletion:(NSManagedObject *)object error:(NSError **)error {
-    if (![object respondsToSelector:@selector(markForDeletion)]) { if (error) *error = NCError(@"required selector missing: markForDeletion"); return NO; }
+    if (!NCRequireObject(object, @[@"markForDeletion"], @"marking object deleted", error)) return NO;
     return NCCatch(@"marking object deleted", error, ^{ [(id<NCSynced>)object markForDeletion]; });
 }
 + (BOOL)unmarkForDeletion:(NSManagedObject *)object error:(NSError **)error {
-    if (![object respondsToSelector:@selector(unmarkForDeletion)]) { if (error) *error = NCError(@"required selector missing: unmarkForDeletion"); return NO; }
+    if (!NCRequireObject(object, @[@"unmarkForDeletion", @"updateChangeCountWithReason:"], @"restoring object", error)) return NO;
     return NCCatch(@"restoring object", error, ^{ [(id<NCSynced>)object unmarkForDeletion]; [(id<NCSynced>)object updateChangeCountWithReason:@"Restored"]; });
 }
 + (BOOL)setPinned:(BOOL)pinned note:(NSManagedObject *)note error:(NSError **)error {
-    if (![note respondsToSelector:@selector(setIsPinned:)]) { if (error) *error = NCError(@"required selector missing: ICNote setIsPinned:"); return NO; }
+    if (!NCRequireObject(note, @[@"setIsPinned:", @"updateChangeCountWithReason:"], @"changing pin", error)) return NO;
     return NCCatch(@"changing pin", error, ^{ [(id<NCNote>)note setIsPinned:pinned]; [(id<NCSynced>)note updateChangeCountWithReason:pinned ? @"Pinned note" : @"Unpinned note"]; });
 }
 + (BOOL)moveFolder:(NSManagedObject *)folder parent:(NSManagedObject *)parent error:(NSError **)error {
+    if (!NCRequireObject(folder, @[@"updateChangeCountWithReason:"], @"moving folder", error)) return NO;
     return NCCatch(@"moving folder", error, ^{ [folder setValue:parent forKey:@"parent"]; [folder setValue:NSDate.date forKey:@"parentModificationDate"]; [(id<NCSynced>)folder updateChangeCountWithReason:@"Moved folder"]; });
 }
 + (NSManagedObject *)duplicateNote:(NSManagedObject *)note folder:(NSManagedObject *)folder error:(NSError **)error {
     dlerror();
     if (!dlopen("/System/Library/PrivateFrameworks/NotesUI.framework/NotesUI", RTLD_NOW | RTLD_LOCAL)) { if (error) *error = NCError(@"cannot load NotesUI for duplicate"); return nil; }
     Class cls = NSClassFromString(@"ICNote"); SEL sel = NSSelectorFromString(@"duplicateNote:intoFolder:isPasswordProtected:removeOriginalNote:");
-    if (!cls || ![cls respondsToSelector:sel]) { if (error) *error = NCError(@"required selector missing: ICNote duplicateNote"); return nil; }
+    if (!NCRequireClass(cls, @[@"duplicateNote:intoFolder:isPasswordProtected:removeOriginalNote:"], @"duplicating note", error)) return nil;
     __block NSManagedObject *copy = nil;
     if (!NCCatch(@"duplicating note", error, ^{ copy = ((id (*)(id, SEL, id, id, BOOL, BOOL))objc_msgSend)(cls, sel, note, folder, NO, NO); })) return nil;
     return copy;
@@ -313,63 +359,132 @@ static void NCInstallTableStyleMethod(void) {
     if (!NCCatch(@"saving Notes context", error, ^{ ok = [context save:error]; })) return NO;
     return ok;
 }
++ (NSNumber *)checkedIntegerSelector:(NSString *)selector ofObject:(id)object error:(NSError **)error {
+    if (!NCRequireObject(object, @[selector], @"reading private integer property", error)) return nil;
+    __block NSInteger value = 0;
+    SEL sel = NSSelectorFromString(selector);
+    if (!NCCatch(@"reading private integer property", error, ^{ value = ((NSInteger (*)(id, SEL))objc_msgSend)(object, sel); })) return nil;
+    return @(value);
+}
++ (BOOL)requireInstanceSelectors:(NSArray<NSString *> *)selectors className:(NSString *)className error:(NSError **)error {
+    return NCRequireInstanceClass(NSClassFromString(className), selectors, className, error);
+}
++ (BOOL)requireSelectors:(NSArray<NSString *> *)selectors ofObject:(id)object error:(NSError **)error {
+    return NCRequireObject(object, selectors, NSStringFromClass([object class]), error);
+}
 @end
 
 @implementation NCBodyEditor { NSManagedObject *_note; id<NCMergeable> _mergeable; }
 - (instancetype)initWithNote:(NSManagedObject *)note error:(NSError **)error {
     if (!(self = [super init])) return nil;
-    __block id value = nil; __block NSAttributedString *body = nil;
-    if (!NCCatch(@"opening note body", error, ^{ value = [[(id<NCNote>)note document] mergeableString]; body = [[(id<NCMergeable>)value attributedString] copy]; })) return nil;
+    if (!NCRequireObject(note, @[@"document"], @"opening note body", error)) return nil;
+    __block id document = nil, value = nil; __block NSAttributedString *body = nil;
+    if (!NCCatch(@"opening note body", error, ^{ document = [(id<NCNote>)note document]; })) return nil;
+    if (!NCRequireObject(document, @[@"mergeableString"], @"opening note body", error)) return nil;
+    if (!NCCatch(@"opening note body", error, ^{ value = [(id<NCNote>)document mergeableString]; })) return nil;
+    if (!NCRequireObject(value, @[@"attributedString"], @"opening note body", error)) return nil;
+    if (!NCCatch(@"opening note body", error, ^{ body = [[(id<NCMergeable>)value attributedString] copy]; })) return nil;
     if (!value || !body) { if (error) *error = NCError(@"note has no editable body"); return nil; }
     _note = note; _mergeable = value; _original = body; return self;
 }
-- (BOOL)begin:(NSError **)error { return NCCatch(@"beginning body edit", error, ^{ [(id<NCNote>)self->_note beginEditing]; }); }
+- (BOOL)begin:(NSError **)error { if (!NCRequireObject(_note, @[@"beginEditing"], @"beginning body edit", error)) return NO; return NCCatch(@"beginning body edit", error, ^{ [(id<NCNote>)self->_note beginEditing]; }); }
+- (BOOL)prepareWithOperations:(NSArray<NSString *> *)operations error:(NSError **)error {
+    NSMutableArray<NSString *> *noteSelectors = [NSMutableArray arrayWithArray:@[@"beginEditing", @"endEditing", @"saveNoteData"]];
+    NSMutableArray<NSString *> *mergeableSelectors = [NSMutableArray array];
+    if ([operations containsObject:@"insert"]) { [mergeableSelectors addObject:@"insertAttributedString:atIndex:"]; [noteSelectors addObject:@"edited:range:changeInLength:"]; }
+    if ([operations containsObject:@"delete"]) { [mergeableSelectors addObject:@"deleteCharactersInRange:"]; [noteSelectors addObject:@"edited:range:changeInLength:"]; }
+    if ([operations containsObject:@"attributes"]) { [mergeableSelectors addObject:@"setAttributes:range:"]; [noteSelectors addObject:@"edited:range:changeInLength:"]; }
+    if (!NCRequireObject(_note, noteSelectors, @"preparing body edit", error)) return NO;
+    if (mergeableSelectors.count && !NCRequireObject(_mergeable, mergeableSelectors, @"preparing body edit", error)) return NO;
+    return YES;
+}
+- (BOOL)beginWithOperations:(NSArray<NSString *> *)operations error:(NSError **)error {
+    if (![self prepareWithOperations:operations error:error]) return NO;
+    return NCCatch(@"beginning body edit", error, ^{ [(id<NCNote>)self->_note beginEditing]; });
+}
 - (BOOL)insert:(NSAttributedString *)text at:(NSUInteger)index error:(NSError **)error {
     if (!text.length) return YES;
+    if (!NCRequireObject(_mergeable, @[@"insertAttributedString:atIndex:"], @"inserting body text", error) || !NCRequireObject(_note, @[@"edited:range:changeInLength:"], @"inserting body text", error)) return NO;
     return NCCatch(@"inserting body text", error, ^{ [self->_mergeable insertAttributedString:text atIndex:index]; [(id<NCNote>)self->_note edited:3 range:NSMakeRange(index, text.length) changeInLength:(NSInteger)text.length]; });
 }
 - (BOOL)deleteRange:(NSRange)range error:(NSError **)error {
     if (!range.length) return YES;
+    if (!NCRequireObject(_mergeable, @[@"deleteCharactersInRange:"], @"deleting body text", error) || !NCRequireObject(_note, @[@"edited:range:changeInLength:"], @"deleting body text", error)) return NO;
     return NCCatch(@"deleting body text", error, ^{ [self->_mergeable deleteCharactersInRange:range]; [(id<NCNote>)self->_note edited:3 range:NSMakeRange(range.location, 0) changeInLength:-(NSInteger)range.length]; });
 }
 - (BOOL)setAttributes:(NSDictionary *)attributes range:(NSRange)range error:(NSError **)error {
     if (!range.length) return YES;
+    if (!NCRequireObject(_mergeable, @[@"setAttributes:range:"], @"formatting body text", error) || !NCRequireObject(_note, @[@"edited:range:changeInLength:"], @"formatting body text", error)) return NO;
     return NCCatch(@"formatting body text", error, ^{ [self->_mergeable setAttributes:attributes range:range]; [(id<NCNote>)self->_note edited:1 range:range changeInLength:0]; });
 }
 - (NSString *)addTable:(NSString *)text error:(NSError **)error {
     NCInstallTableStyleMethod(); __block NSString *identifier = nil;
-    if (![(id) _note respondsToSelector:@selector(addTableAttachmentWithText:)]) { if (error) *error = NCError(@"required selector missing: ICNote addTableAttachmentWithText:"); return nil; }
+    if (!NCRequireObject(_note, @[@"addTableAttachmentWithText:"], @"adding table", error)) return nil;
+    Class styleClass = NSClassFromString(@"ICTTParagraphStyle");
+    if (!styleClass || !NCRequireObject([styleClass alloc], @[@"setStyle:"], @"adding table", error)) return nil;
     if (!NCCatch(@"adding table", error, ^{ id table = [(id<NCNote>)self->_note addTableAttachmentWithText:[[NSAttributedString alloc] initWithString:text]]; identifier = [table valueForKey:@"identifier"]; })) return nil;
     return identifier;
 }
 - (BOOL)finish:(NSError **)error {
+    if (!NCRequireObject(_note, @[@"endEditing", @"saveNoteData"], @"finishing body edit", error)) return NO;
     return NCCatch(@"finishing body edit", error, ^{ [self->_note setValue:NSDate.date forKey:@"modificationDate"]; [(id<NCNote>)self->_note endEditing]; [(id<NCNote>)self->_note saveNoteData]; });
 }
 @end
 
 @implementation NCTableEditor { NSManagedObject *_attachment; id<NCTableModel> _model; id<NCTable> _table; }
+- (BOOL)prepareToSave:(NSError **)error {
+    return NCRequireObject(_model, @[@"setMergeableDataDirty:", @"writeMergeableData"], @"saving table", error) &&
+           NCRequireObject(_attachment, @[@"updateChangeCountWithReason:"], @"saving table", error);
+}
 - (instancetype)initWithAttachment:(NSManagedObject *)attachment error:(NSError **)error {
     if (!(self = [super init])) return nil;
     __block id model = nil, table = nil;
-    if (!NCCatch(@"opening table", error, ^{ model = [(id<NCSynced>)attachment attachmentModel]; table = [(id<NCTableModel>)model table]; })) return nil;
+    if (!NCRequireObject(attachment, @[@"attachmentModel"], @"opening table", error)) return nil;
+    if (!NCCatch(@"opening table", error, ^{ model = [(id<NCSynced>)attachment attachmentModel]; })) return nil;
+    if (!NCRequireObject(model, @[@"table"], @"opening table", error)) return nil;
+    if (!NCCatch(@"opening table", error, ^{ table = [(id<NCTableModel>)model table]; })) return nil;
     if (!model || !table) { if (error) *error = NCError(@"table attachment has no editable table"); return nil; }
     _attachment = attachment; _model = model; _table = table; return self;
 }
-- (NSInteger)rowCount { return (NSInteger)[_table rowCount]; }
-- (NSInteger)columnCount { return (NSInteger)[_table columnCount]; }
-- (NSString *)textAtColumn:(NSInteger)column row:(NSInteger)row { __block NSString *text = @""; NCCatch(@"reading table cell", NULL, ^{ text = NCPlain([self->_table stringForColumnIndex:(NSUInteger)column rowIndex:(NSUInteger)row]); }); return text; }
-- (BOOL)insertRow:(NSInteger)index error:(NSError **)error { return NCCatch(@"inserting table row", error, ^{ [self->_table insertRowAtIndex:(NSUInteger)index]; }); }
-- (BOOL)removeRow:(NSInteger)index error:(NSError **)error { return NCCatch(@"removing table row", error, ^{ [self->_table removeRowAtIndex:(NSUInteger)index]; }); }
-- (BOOL)insertColumn:(NSInteger)index error:(NSError **)error { return NCCatch(@"inserting table column", error, ^{ [self->_table insertColumnAtIndex:(NSUInteger)index]; }); }
-- (BOOL)removeColumn:(NSInteger)index error:(NSError **)error { return NCCatch(@"removing table column", error, ^{ [self->_table removeColumnAtIndex:(NSUInteger)index]; }); }
+- (NSNumber *)rowCount:(NSError **)error {
+    if (!NCRequireObject(_table, @[@"rowCount"], @"reading table row count", error)) return nil;
+    __block NSInteger count = 0;
+    if (!NCCatch(@"reading table row count", error, ^{ count = (NSInteger)[self->_table rowCount]; })) return nil;
+    return @(count);
+}
+- (NSNumber *)columnCount:(NSError **)error {
+    if (!NCRequireObject(_table, @[@"columnCount"], @"reading table column count", error)) return nil;
+    __block NSInteger count = 0;
+    if (!NCCatch(@"reading table column count", error, ^{ count = (NSInteger)[self->_table columnCount]; })) return nil;
+    return @(count);
+}
+- (NSString *)textAtColumn:(NSInteger)column row:(NSInteger)row error:(NSError **)error {
+    if (!NCRequireObject(_table, @[@"stringForColumnIndex:rowIndex:"], @"reading table cell", error)) return nil;
+    __block NSString *text = @"";
+    if (!NCCatch(@"reading table cell", error, ^{ text = NCPlain([self->_table stringForColumnIndex:(NSUInteger)column rowIndex:(NSUInteger)row]); })) return nil;
+    return text;
+}
+- (BOOL)insertRow:(NSInteger)index error:(NSError **)error { if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"insertRowAtIndex:"], @"inserting table row", error)) return NO; return NCCatch(@"inserting table row", error, ^{ [self->_table insertRowAtIndex:(NSUInteger)index]; }); }
+- (BOOL)removeRow:(NSInteger)index error:(NSError **)error { if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"removeRowAtIndex:"], @"removing table row", error)) return NO; return NCCatch(@"removing table row", error, ^{ [self->_table removeRowAtIndex:(NSUInteger)index]; }); }
+- (BOOL)insertColumn:(NSInteger)index error:(NSError **)error { if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"insertColumnAtIndex:"], @"inserting table column", error)) return NO; return NCCatch(@"inserting table column", error, ^{ [self->_table insertColumnAtIndex:(NSUInteger)index]; }); }
+- (BOOL)removeColumn:(NSInteger)index error:(NSError **)error { if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"removeColumnAtIndex:"], @"removing table column", error)) return NO; return NCCatch(@"removing table column", error, ^{ [self->_table removeColumnAtIndex:(NSUInteger)index]; }); }
 - (BOOL)setCellColumn:(NSInteger)column row:(NSInteger)row text:(NSString *)text style:(id)style error:(NSError **)error {
+    if (![self prepareToSave:error]) return NO;
+    NSArray *readSelectors = @[@"identifierForColumnAtIndex:", @"identifierForRowAtIndex:", @"mergeableStringForColumnID:rowID:", @"stringForColumnIndex:rowIndex:"];
+    if (!NCRequireObject(_table, readSelectors, @"editing table cell", error)) return NO;
+    __block id columnID = nil, rowID = nil, cell = nil; __block NSString *old = @"";
+    if (!NCCatch(@"reading table cell", error, ^{
+        columnID = [self->_table identifierForColumnAtIndex:(NSUInteger)column]; rowID = [self->_table identifierForRowAtIndex:(NSUInteger)row];
+        cell = columnID && rowID ? [self->_table mergeableStringForColumnID:columnID rowID:rowID] : nil;
+        old = NCPlain([self->_table stringForColumnIndex:(NSUInteger)column rowIndex:(NSUInteger)row]);
+    })) return NO;
+    if (!cell || old.length == 0) {
+        if (!NCRequireObject(_table, @[@"setAttributedString:columnIndex:rowIndex:"], @"editing table cell", error)) return NO;
+    } else if (!NCRequireObject(cell, @[@"beginEditing", @"deleteCharactersInRange:", @"insertString:atIndex:", @"endEditing"], @"editing table cell", error)) return NO;
     return NCCatch(@"editing table cell", error, ^{
-        id columnID = [self->_table identifierForColumnAtIndex:(NSUInteger)column], rowID = [self->_table identifierForRowAtIndex:(NSUInteger)row];
-        id<NCMergeable> cell = columnID && rowID ? [self->_table mergeableStringForColumnID:columnID rowID:rowID] : nil;
-        NSString *old = NCPlain([self->_table stringForColumnIndex:(NSUInteger)column rowIndex:(NSUInteger)row]);
         if (!cell || old.length == 0) { [self->_table setAttributedString:[[NSAttributedString alloc] initWithString:text attributes:@{@"TTStyle": style}] columnIndex:(NSUInteger)column rowIndex:(NSUInteger)row]; return; }
-        [cell beginEditing]; @try { if (old.length) [cell deleteCharactersInRange:NSMakeRange(0, old.length)]; if (text.length) [cell insertString:text atIndex:0]; } @finally { [cell endEditing]; }
+        [(id<NCMergeable>)cell beginEditing]; @try { if (old.length) [(id<NCMergeable>)cell deleteCharactersInRange:NSMakeRange(0, old.length)]; if (text.length) [(id<NCMergeable>)cell insertString:text atIndex:0]; } @finally { [(id<NCMergeable>)cell endEditing]; }
     });
 }
-- (BOOL)save:(NSError **)error { return NCCatch(@"saving table", error, ^{ [self->_model setMergeableDataDirty:YES]; [self->_model writeMergeableData]; [(id<NCSynced>)self->_attachment updateChangeCountWithReason:@"Edited table"]; }); }
+- (BOOL)save:(NSError **)error { if (![self prepareToSave:error]) return NO; return NCCatch(@"saving table", error, ^{ [self->_model setMergeableDataDirty:YES]; [self->_model writeMergeableData]; [(id<NCSynced>)self->_attachment updateChangeCountWithReason:@"Edited table"]; }); }
 @end

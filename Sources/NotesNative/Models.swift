@@ -23,6 +23,13 @@ public struct NativeVerification: Codable, Sendable {
 public struct NativeWriteResult: Codable, Sendable {
     public var writeResult: WriteResult
     public var verification: NativeVerification
+    public var operationID: String?
+
+    public init(writeResult: WriteResult, verification: NativeVerification, operationID: String? = nil) {
+        self.writeResult = writeResult
+        self.verification = verification
+        self.operationID = operationID
+    }
 }
 
 public struct ChecklistItem: Codable, Sendable, Equatable {

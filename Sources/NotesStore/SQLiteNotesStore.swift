@@ -11,6 +11,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     private let accountList: [Account]
     private let folderList: [Folder]
     private let summaries: [NoteSummary]
+    private let placeholderIDs: Set<String>
     /// Unfetched cloud placeholder rows that are hidden from every listing.
     public let placeholderCount: Int
     private let notePKs: [String: Int64]
@@ -40,6 +41,17 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             return ""
         }
         let folders = library.rows("ICFolder")
+        var deletedFolderPKs = Set(folders.compactMap { row in
+            row.int("ZMARKEDFORDELETION") == 1 ? row.int("Z_PK") : nil
+        })
+        var changed = true
+        while changed {
+            changed = false
+            for row in folders {
+                guard let pk = row.int("Z_PK"), let parent = row.int("ZPARENT"), deletedFolderPKs.contains(parent) else { continue }
+                changed = deletedFolderPKs.insert(pk).inserted || changed
+            }
+        }
         var folderByPK: [Int64: Folder] = [:]
         for row in folders {
             guard let pk = row.int("Z_PK"), let id = row.string("ZIDENTIFIER") else { continue }
@@ -72,12 +84,12 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         }
         self.objectsByID = objectsByID; self.attachmentRows = attachmentRows
         var summaries: [NoteSummary] = [], pks: [String: Int64] = [:], noteRows: [Int64: StoreRow] = [:]
-        var placeholders = 0
+        var placeholders = Set<String>()
         for row in library.rows("ICNote") {
             guard let pk = row.int("Z_PK"), let uuid = row.string("ZIDENTIFIER") else { continue }
             noteRows[pk] = row
             let folderPK = row.int("ZFOLDER"), folder = folderPK.flatMap { folderByPK[$0] }
-            let deleted = row.int("ZMARKEDFORDELETION") == 1 || folder?.isRecentlyDeleted == true
+            let deleted = row.int("ZMARKEDFORDELETION") == 1 || folder?.isRecentlyDeleted == true || folderPK.map(deletedFolderPKs.contains) == true
             let attachments = attachmentRows[pk] ?? []
             let tags = Set(attachments.compactMap { item -> String? in
                 guard (item.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("hashtag") else { return nil }
@@ -94,19 +106,14 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
                                      needsSave: flag("ZNEEDSTOSAVEUSERSPECIFICRECORD"), hasChanges: flag("ZNOTEHASCHANGES"),
                                      versionOutOfDate: flag("ZVERSIONOUTOFDATE"), cloudState: row.int("ZCLOUDSTATE").map(Int.init),
                                      lastSyncDate: row.date("ZLASTSYNCDATE"))
-            // Cloud placeholders: rows Notes created for records it never fetched. They have no title,
-            // dates, or body, and Notes.app does not show them, so they are not notes to the user.
-            if sync.needsInitialFetch == true, row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE") == nil,
-               (row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "").isEmpty, row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE") == nil {
-                placeholders += 1
-                continue
-            }
+            if sync.needsInitialFetch == true { placeholders.insert(uuid.lowercased()) }
             summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags, hasChecklistInProgress: flag("ZHASCHECKLISTINPROGRESS"), lastOpened: row.date("ZLASTOPENEDDATE"), displayOrder: row.double("ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE"), isShared: shared, participants: participantList, syncState: sync, isSystemPaper: flag("ZISSYSTEMPAPER")))
             pks[uuid.lowercased()] = pk
-            if !deleted, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
+            if !deleted, !placeholders.contains(uuid.lowercased()), let folderPK { folderByPK[folderPK]?.noteCount += 1 }
             else if folder?.isRecentlyDeleted == true, row.int("ZMARKEDFORDELETION") != 1, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
         }
-        self.placeholderCount = placeholders
+        self.placeholderCount = placeholders.count
+        self.placeholderIDs = placeholders
         self.summaries = summaries.sorted {
             if $0.modified != $1.modified { return ($0.modified ?? .distantPast) > ($1.modified ?? .distantPast) }
             return $0.id.uuid < $1.id.uuid
@@ -122,6 +129,9 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         return folderList.filter { ids.contains($0.accountID) }
     }
     public func notes(_ query: NoteQuery = NoteQuery()) throws -> [NoteSummary] {
+        try notes(query, includePlaceholders: false)
+    }
+    public func notes(_ query: NoteQuery, includePlaceholders: Bool) throws -> [NoteSummary] {
         if let limit = query.limit, limit < 0 { throw NotesError("invalid_limit", "The limit must be zero or greater.") }
         if query.limit == 0 { return [] }
         let accountIDs = query.account.map { account in Set(accountList.filter { $0.id.caseInsensitiveCompare(account) == .orderedSame || $0.name == account }.map(\.id)) }
@@ -129,6 +139,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         let tag = query.tag.map { $0.hasPrefix("#") ? String($0.dropFirst()) : $0 }
         var result: [NoteSummary] = []
         for summary in summaries {
+            if !includePlaceholders && placeholderIDs.contains(summary.id.uuid.lowercased()) { continue }
             if !query.includeDeleted && summary.isDeleted { continue }
             if query.pinnedOnly && !summary.isPinned { continue }
             if let ids = accountIDs, !ids.contains(summary.accountID) { continue }
@@ -199,15 +210,16 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     }
 
     private func resolve(_ ref: String) throws -> NoteSummary {
-        let byID = summaries.filter { $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame || $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame }
-        let matches = byID.isEmpty ? summaries.filter { $0.title == ref && !$0.isDeleted } : byID
+        let visible = summaries.filter { !placeholderIDs.contains($0.id.uuid.lowercased()) }
+        let byID = visible.filter { $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame || $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame }
+        let matches = byID.isEmpty ? visible.filter { $0.title == ref && !$0.isDeleted } : byID
         guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
         guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }
         return matches[0]
     }
     public func tags() throws -> [String: Int] {
         var counts: [String: Int] = [:]
-        for note in summaries where !note.isDeleted { for tag in note.tags { counts[tag, default: 0] += 1 } }
+        for note in summaries where !note.isDeleted && !placeholderIDs.contains(note.id.uuid.lowercased()) { for tag in note.tags { counts[tag, default: 0] += 1 } }
         return counts
     }
 
@@ -264,6 +276,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             return row.int("ZNOTE1", "ZNOTE")
         })
         return summaries.filter { summary in
+            guard !placeholderIDs.contains(summary.id.uuid.lowercased()) else { return false }
             guard let pk = notePKs[summary.id.uuid.lowercased()], noteEntities.contains(noteRows[pk]?.int("Z_ENT") ?? -1) else { return false }
             return pks.contains(pk)
         }
@@ -278,6 +291,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             let ids: [String]?
             if evaluate, let rule, unsupported.isEmpty {
                 ids = summaries.filter { summary in
+                    guard !placeholderIDs.contains(summary.id.uuid.lowercased()) else { return false }
                     let attachments = (try? self.attachments(summary.id.uuid)) ?? []
                     let document = (try? self.note(summary.id.uuid))?.document
                     return Self.matches(SmartNote(summary: summary, attachments: attachments, document: document), rule: rule, now: now)
@@ -289,7 +303,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
 
     public func attachmentKindCounts() throws -> [String: Int] {
         var counts: [String: Int] = [:]
-        for summary in summaries where !summary.isLocked {
+        for summary in summaries where !summary.isLocked && !placeholderIDs.contains(summary.id.uuid.lowercased()) {
             for attachment in try attachments(summary.id.uuid) { counts[attachment.kind, default: 0] += 1 }
         }
         return counts

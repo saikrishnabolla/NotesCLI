@@ -19,7 +19,7 @@ Notes CLIs and MCP servers (see PARITY.md), then do better on fidelity and safet
 
 ## Rules
 - Reads never write to NoteStore.sqlite. Copy db + wal + shm to a private temp dir, open read-only there, delete the copy after. Do not open the live DB with write flags.
-- Writes go only through Notes.app scripting. Never write SQLite.
+- Default writes go through Notes.app scripting. Native writes use Notes' own NotesShared framework only when the user opts in. Nothing writes to NoteStore.sqlite with SQL.
 - Every write is read back from a fresh snapshot and reported as `verified`, `unverified`, or `unknown` (timeouts). Never retry a write whose outcome is unknown.
 - Delete means move to Recently Deleted. No hard delete.
 - Live write tests touch real iCloud data: they run ONLY inside a folder named `notescli-test` in the default account, use titles prefixed `notescli-test-`, and delete what they create. Live tests are opt-in via `NOTESCLI_LIVE_TESTS=1`; default `swift test` must not touch Notes.

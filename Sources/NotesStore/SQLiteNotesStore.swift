@@ -11,6 +11,8 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     private let accountList: [Account]
     private let folderList: [Folder]
     private let summaries: [NoteSummary]
+    /// Unfetched cloud placeholder rows that are hidden from every listing.
+    public let placeholderCount: Int
     private let notePKs: [String: Int64]
     private let noteRows: [Int64: StoreRow]
     private let objectsByID: [String: StoreRow]
@@ -67,6 +69,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         }
         self.objectsByID = objectsByID; self.attachmentRows = attachmentRows
         var summaries: [NoteSummary] = [], pks: [String: Int64] = [:], noteRows: [Int64: StoreRow] = [:]
+        var placeholders = 0
         for row in library.rows("ICNote") {
             guard let pk = row.int("Z_PK"), let uuid = row.string("ZIDENTIFIER") else { continue }
             noteRows[pk] = row
@@ -88,11 +91,19 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
                                      needsSave: flag("ZNEEDSTOSAVEUSERSPECIFICRECORD"), hasChanges: flag("ZNOTEHASCHANGES"),
                                      versionOutOfDate: flag("ZVERSIONOUTOFDATE"), cloudState: row.int("ZCLOUDSTATE").map(Int.init),
                                      lastSyncDate: row.date("ZLASTSYNCDATE"))
+            // Cloud placeholders: rows Notes created for records it never fetched. They have no title,
+            // dates, or body, and Notes.app does not show them, so they are not notes to the user.
+            if sync.needsInitialFetch == true, row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE") == nil,
+               (row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "").isEmpty, row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE") == nil {
+                placeholders += 1
+                continue
+            }
             summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags, hasChecklistInProgress: flag("ZHASCHECKLISTINPROGRESS"), lastOpened: row.date("ZLASTOPENEDDATE"), displayOrder: row.double("ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE"), isShared: shared, participants: participantList, syncState: sync, isSystemPaper: flag("ZISSYSTEMPAPER")))
             pks[uuid.lowercased()] = pk
             if !deleted, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
             else if folder?.isRecentlyDeleted == true, row.int("ZMARKEDFORDELETION") != 1, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
         }
+        self.placeholderCount = placeholders
         self.summaries = summaries.sorted {
             if $0.modified != $1.modified { return ($0.modified ?? .distantPast) > ($1.modified ?? .distantPast) }
             return $0.id.uuid < $1.id.uuid

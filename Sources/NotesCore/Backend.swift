@@ -11,9 +11,11 @@ public struct NoteQuery: Sendable {
     public var modifiedBefore: Date?
     public var limit: Int?
     public init(folder: String? = nil, account: String? = nil, text: String? = nil, includeDeleted: Bool = false,
-                pinnedOnly: Bool = false, tag: String? = nil, modifiedAfter: Date? = nil, modifiedBefore: Date? = nil, limit: Int? = nil) {
+                pinnedOnly: Bool = false, tag: String? = nil, modifiedAfter: Date? = nil, modifiedBefore: Date? = nil,
+                limit: Int? = nil) {
         self.folder = folder; self.account = account; self.text = text; self.includeDeleted = includeDeleted
-        self.pinnedOnly = pinnedOnly; self.tag = tag; self.modifiedAfter = modifiedAfter; self.modifiedBefore = modifiedBefore; self.limit = limit
+        self.pinnedOnly = pinnedOnly; self.tag = tag; self.modifiedAfter = modifiedAfter; self.modifiedBefore = modifiedBefore
+        self.limit = limit
     }
 }
 
@@ -25,6 +27,63 @@ public protocol NotesReading: Sendable {
     /// Accepts a uuid, x-coredata id, or exact title (title must be unique).
     func note(_ ref: String) throws -> Note
     func tags() throws -> [String: Int]
+    func notes(_ query: NoteQuery, sort: NoteSort) throws -> [NoteSummary]
+    func summary(_ ref: String) throws -> NoteSummary
+    func attachments(_ ref: String) throws -> [Attachment]
+    func rawNote(_ ref: String) throws -> RawProtobufMessage
+    func backlinks(_ ref: String) throws -> [NoteSummary]
+    func smartFolders(evaluate: Bool) throws -> [SmartFolderResult]
+    func attachmentKindCounts() throws -> [String: Int]
+}
+
+public extension NotesReading {
+    func notes(_ query: NoteQuery, sort: NoteSort) throws -> [NoteSummary] {
+        var query = query
+        let limit = query.limit
+        query.limit = nil
+        var result = try notes(query)
+        result.sort { lhs, rhs in
+            switch sort {
+            case .modified: return (lhs.modified ?? .distantPast, lhs.id.uuid) > (rhs.modified ?? .distantPast, rhs.id.uuid)
+            case .created: return (lhs.created ?? .distantPast, lhs.id.uuid) > (rhs.created ?? .distantPast, rhs.id.uuid)
+            case .opened: return (lhs.lastOpened ?? .distantPast, lhs.modified ?? .distantPast, lhs.id.uuid) > (rhs.lastOpened ?? .distantPast, rhs.modified ?? .distantPast, rhs.id.uuid)
+            case .title:
+                let order = lhs.title.localizedStandardCompare(rhs.title)
+                return order == .orderedSame ? lhs.id.uuid < rhs.id.uuid : order == .orderedAscending
+            case .display: return (lhs.displayOrder ?? .greatestFiniteMagnitude, lhs.id.uuid) < (rhs.displayOrder ?? .greatestFiniteMagnitude, rhs.id.uuid)
+            }
+        }
+        return Array(result.prefix(limit ?? result.count))
+    }
+    func summary(_ ref: String) throws -> NoteSummary {
+        let notes = try notes(NoteQuery(includeDeleted: true))
+        let ids = notes.filter { $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame || $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame }
+        let matches = ids.isEmpty ? notes.filter { $0.title == ref } : ids
+        guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
+        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }
+        return matches[0]
+    }
+    func attachments(_ ref: String) throws -> [Attachment] { try note(ref).attachments }
+    func rawNote(_ ref: String) throws -> RawProtobufMessage {
+        throw NotesError("unsupported_read", "Raw protobuf is not available from this backend.")
+    }
+    func backlinks(_ ref: String) throws -> [NoteSummary] {
+        let target = try summary(ref).id.uuid
+        return try notes(NoteQuery()).filter { candidate in
+            guard let note = try? note(candidate.id.uuid) else { return false }
+            return note.document?.runs.contains { $0.attachment?.url?.contains(target) == true } == true
+        }
+    }
+    func smartFolders(evaluate: Bool = false) throws -> [SmartFolderResult] {
+        try folders(account: nil).filter(\.isSmartFolder).map { SmartFolderResult(folder: $0, rules: []) }
+    }
+    func attachmentKindCounts() throws -> [String: Int] {
+        var counts: [String: Int] = [:]
+        for summary in try notes(NoteQuery(includeDeleted: true)) where !summary.isLocked {
+            for attachment in (try? attachments(summary.id.uuid)) ?? [] { counts[attachment.kind, default: 0] += 1 }
+        }
+        return counts
+    }
 }
 
 public enum WriteOutcome: String, Codable, Sendable { case verified, unverified, unknown }

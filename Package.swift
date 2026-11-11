@@ -15,17 +15,19 @@ let package = Package(
         // Pure Swift: model, protobuf decoding, renderers. No Apple frameworks, so it builds on Linux.
         .target(name: "NotesCore"),
         // macOS: read-only NoteStore.sqlite snapshot reader.
-        .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
+        .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3"), .linkedFramework("PDFKit")]),
+        .target(name: "NotesIndex", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
         // macOS: writes through Notes.app scripting, verified by reading back.
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
         // MCP server over stdio, same operations as the CLI.
         .target(name: "NotesMCP", dependencies: ["NotesCore"]),
         .executableTarget(name: "notescli", dependencies: [
-            "NotesCore", "NotesStore", "NotesAutomation", "NotesMCP",
+            "NotesCore", "NotesStore", "NotesIndex", "NotesAutomation", "NotesMCP",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ]),
         .testTarget(name: "NotesCoreTests", dependencies: ["NotesCore"]),
         .testTarget(name: "NotesStoreTests", dependencies: ["NotesStore", "NotesCore"]),
+        .testTarget(name: "NotesIndexTests", dependencies: ["NotesIndex", "NotesStore", "NotesCore"]),
         .testTarget(name: "NotesAutomationTests", dependencies: ["NotesAutomation", "NotesCore"]),
         .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore"]),
     ]

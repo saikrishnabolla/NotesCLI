@@ -68,6 +68,45 @@ public struct ProtobufMessage: Sendable {
     func required(_ field: Int) throws -> ProtobufMessage {
         guard let value = try message(field) else { throw DecodeError.missingField }; return value
     }
+
+    public var raw: RawProtobufMessage {
+        raw(depth: 0)
+    }
+
+    private func raw(depth: Int) -> RawProtobufMessage {
+        RawProtobufMessage(fields: fields.keys.sorted().flatMap { number in
+            (fields[number] ?? []).map { value in
+                switch value {
+                case .varint(let value): return RawProtobufField(number: number, wireType: "varint", value: String(value))
+                case .fixed64(let value): return RawProtobufField(number: number, wireType: "fixed64", value: String(value))
+                case .fixed32(let value): return RawProtobufField(number: number, wireType: "fixed32", value: String(value))
+                case .bytes(let data):
+                    let text = String(data: data, encoding: .utf8).flatMap { value in
+                        value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) || [10, 13, 9].contains(Int($0.value)) } ? value : nil
+                    }
+                    let nested = depth < 16 ? (try? ProtobufMessage(data))?.raw(depth: depth + 1) : nil
+                    return RawProtobufField(number: number, wireType: "bytes", value: data.base64EncodedString(),
+                                            utf8: text, message: nested)
+                }
+            }
+        })
+    }
+}
+
+public struct RawProtobufMessage: Codable, Sendable, Equatable {
+    public var fields: [RawProtobufField]
+    public init(fields: [RawProtobufField]) { self.fields = fields }
+}
+
+public struct RawProtobufField: Codable, Sendable, Equatable {
+    public var number: Int
+    public var wireType: String
+    public var value: String
+    public var utf8: String?
+    public var message: RawProtobufMessage?
+    public init(number: Int, wireType: String, value: String, utf8: String? = nil, message: RawProtobufMessage? = nil) {
+        self.number = number; self.wireType = wireType; self.value = value; self.utf8 = utf8; self.message = message
+    }
 }
 
 public enum DecodeError: String, Error, Sendable {

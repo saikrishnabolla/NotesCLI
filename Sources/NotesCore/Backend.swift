@@ -51,6 +51,37 @@ public protocol NotesWriting: Sendable {
     func createFolder(name: String, parent: String?, account: String?) throws -> WriteResult
     func renameFolder(_ ref: String, name: String) throws -> WriteResult
     func deleteFolder(_ ref: String) throws -> WriteResult
+    func replaceBody(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult
+    func prependToNote(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult
+    func insertUnderHeading(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult
+    func replaceSection(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult
+    func replaceText(_ ref: String, find: String, replacement: String, allowAttachmentLoss: Bool) throws -> WriteResult
+    func moveFolder(_ ref: String, toParent: String?, account: String?) throws -> WriteResult
+    func htmlBody(_ ref: String) throws -> String
+}
+
+public extension NotesWriting {
+    func replaceBody(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        return try replaceBody(ref, markdown: markdown)
+    }
+    func prependToNote(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        throw NotesError("unsupported_operation", "This writer does not support HTML-preserving prepend.")
+    }
+    func insertUnderHeading(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        throw NotesError("unsupported_operation", "This writer does not support heading insertion.")
+    }
+    func replaceSection(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        throw NotesError("unsupported_operation", "This writer does not support section replacement.")
+    }
+    func replaceText(_ ref: String, find: String, replacement: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        throw NotesError("unsupported_operation", "This writer does not support text replacement.")
+    }
+    func moveFolder(_ ref: String, toParent: String?, account: String?) throws -> WriteResult {
+        throw NotesError("unsupported_operation", "This writer does not support folder reparenting.")
+    }
+    func htmlBody(_ ref: String) throws -> String {
+        throw NotesError("unsupported_operation", "This writer cannot read the Notes.app HTML body.")
+    }
 }
 
 public struct NotesError: Error, Codable, Sendable, CustomStringConvertible {

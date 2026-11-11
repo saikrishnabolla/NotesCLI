@@ -15,6 +15,20 @@ public enum MarkdownToNotesHTML {
         return NotesHTML(html: html, localImagePaths: parser.images, downgraded: parser.downgrades.sorted())
     }
 
+    public static func plainText(_ markdown: String) -> String { plainText(html: convert(markdown).html) }
+
+    public static func plainText(html: String) -> String {
+        var value = html
+        for tag in ["br", "/div", "/p", "/h1", "/h2", "/h3", "/li", "/pre", "/blockquote"] {
+            value = value.replacingOccurrences(of: "<\\s*\(tag)\\s*/?>", with: "\n", options: [.regularExpression, .caseInsensitive])
+        }
+        value = value.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        let entities = ["&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'", "&amp;": "&"]
+        for (entity, character) in entities { value = value.replacingOccurrences(of: entity, with: character) }
+        return value.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
     public static func escape(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")

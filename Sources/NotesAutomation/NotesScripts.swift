@@ -99,7 +99,7 @@ enum NotesScripts {
                 activeFolder(f);
                 const n = app.make({new: 'note', at: f, withProperties: {body: '<h1>' + plainEscape(p.title) + '</h1>' + p.html}});
                 changed = true;
-                result = {id: id(n), folderID: id(f)};
+                result = {id: id(n), folderID: id(f), folderPath: path(f)};
                 break;
             }
             case 'appendToNote': {
@@ -107,22 +107,34 @@ enum NotesScripts {
                 // Replacing rich content through HTML can lose embedded attachments.
                 if (n.attachments().length !== 0) fail('attachments_would_be_lost');
                 const body = n.body();
-                result = {id: id(n), folderID: id(n.container())};
+                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container())};
                 n.body = body + p.html;
                 changed = true;
                 break;
             }
             case 'replaceBody': {
                 const n = note(p.ref); writable(n);
-                result = {id: id(n), folderID: id(n.container())};
+                if (n.attachments().length !== 0 && p.allowAttachmentLoss !== 'true') fail('attachments_would_be_lost');
+                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container())};
                 const title = n.name();
                 n.body = '<h1>' + plainEscape(title) + '</h1>' + p.html;
                 changed = true;
                 break;
             }
+            case 'prependToNote':
+            case 'insertUnderHeading':
+            case 'replaceSection':
+            case 'replaceText': {
+                const n = note(p.ref); writable(n);
+                if (n.attachments().length !== 0 && p.allowAttachmentLoss !== 'true') fail('attachments_would_be_lost');
+                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container())};
+                n.body = p.html;
+                changed = true;
+                break;
+            }
             case 'renameNote': {
                 const n = note(p.ref); writable(n);
-                result = {id: id(n), folderID: id(n.container())};
+                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container())};
                 n.name = p.title;
                 changed = true;
                 break;
@@ -130,7 +142,7 @@ enum NotesScripts {
             case 'moveNote': {
                 const n = note(p.ref); writable(n);
                 const f = folder(p.folder); activeFolder(f);
-                result = {id: id(n), folderID: id(f)};
+                result = {id: id(n), folderID: id(f), folderPath: path(f)};
                 app.move(n, {to: f});
                 changed = true;
                 result.id = id(n);
@@ -156,7 +168,7 @@ enum NotesScripts {
                 if (children(parent).some(f => sameName(f.name(), p.name))) fail('folder_exists');
                 const f = app.make({new: 'folder', at: parent, withProperties: {name: p.name}});
                 changed = true;
-                result = {folderID: id(f)};
+                result = {folderID: id(f), folderPath: path(f)};
                 break;
             }
             case 'renameFolder':
@@ -164,15 +176,33 @@ enum NotesScripts {
                 const f = folder(p.ref); activeFolder(f);
                 if (f.shared()) fail('shared_folder');
                 if (app.accounts().some(a => id(a.defaultFolder()) === id(f))) fail('protected_folder');
-                result = {folderID: id(f)};
+                result = {folderID: id(f), folderPath: path(f)};
                 if (p.operation === 'deleteFolder') {
                     if (f.notes().length !== 0 || children(f).length !== 0) fail('folder_not_empty');
                     app.delete(f);
                 } else {
                     if (children(f.container()).some(other => id(other) !== id(f) && sameName(other.name(), p.name))) fail('folder_exists');
                     f.name = p.name;
+                    result.folderPath = path(f);
                 }
                 changed = true;
+                break;
+            }
+            case 'moveFolder': {
+                const a = account(p.account);
+                const f = folder(p.ref, a); activeFolder(f);
+                if (f.shared()) fail('shared_folder');
+                if (app.accounts().some(a => id(a.defaultFolder()) === id(f))) fail('protected_folder');
+                const parent = p.parent ? folder(p.parent, a) : a;
+                if (p.parent) {
+                    activeFolder(parent);
+                    if (!folders(a).some(item => id(item) === id(parent))) fail('account_mismatch');
+                    if (id(parent) === id(f) || path(parent).slice(0, path(f).length).every((part, i) => sameName(part, path(f)[i]))) fail('invalid_parent');
+                }
+                if (children(parent).some(other => id(other) !== id(f) && sameName(other.name(), f.name()))) fail('folder_exists');
+                app.move(f, {to: parent});
+                changed = true;
+                result = {folderID: id(f), folderPath: path(f)};
                 break;
             }
             case 'show': {
@@ -184,9 +214,35 @@ enum NotesScripts {
                 result = {id: id(n), title: n.name(), folderID: id(n.container()), body: n.passwordProtected() ? null : n.body(), attachmentCount: n.attachments().length};
                 break;
             }
+            case 'deletionStatus': {
+                const n = unique(app.notes.whose({id: p.ref})(), 'note_not_found', 'ambiguous_note');
+                result = {id: id(n), isDeleted: isTrash(n.container())};
+                break;
+            }
             case 'folderInfo': {
                 const f = folder(p.ref);
                 result = {folderID: id(f), name: f.name(), noteCount: f.notes().length, childCount: children(f).length};
+                break;
+            }
+            case 'validateFolderDelete': {
+                const root = folder(p.ref);
+                var count = 0;
+                function inspect(f) {
+                    activeFolder(f);
+                    if (f.shared()) fail('shared_folder');
+                    if (app.accounts().some(a => id(a.defaultFolder()) === id(f))) fail('protected_folder');
+                    f.notes().forEach(n => {
+                        writable(n);
+                        if (n.shared()) fail('shared_note');
+                        const owner = app.accounts().find(a => folders(a).some(candidate => id(candidate) === id(n.container())));
+                        if (!owner || !owner.upgraded()) fail('unsupported_account');
+                        count += 1;
+                    });
+                    children(f).forEach(inspect);
+                }
+                inspect(root);
+                if (String(count) !== p.expectCount) fail('stale_folder');
+                result = {folderID: id(root), noteCount: count};
                 break;
             }
             case 'list': {
@@ -206,6 +262,16 @@ enum NotesScripts {
                     });
                 });
                 result = {notes: items};
+                break;
+            }
+            case 'listFolders': {
+                const items = [];
+                app.accounts().forEach(a => {
+                    folders(a).forEach(f => {
+                        if (!isTrash(f)) items.push({id: id(f), path: path(f), accountID: id(a)});
+                    });
+                });
+                result = {folders: items};
                 break;
             }
             default: fail('invalid_operation');

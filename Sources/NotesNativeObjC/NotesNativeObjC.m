@@ -66,9 +66,13 @@ static BOOL NCRequireInstanceClass(Class cls, NSArray<NSString *> *selectors, NS
 - (void)saveNoteData;
 - (void)edited:(NSUInteger)mask range:(NSRange)range changeInLength:(NSInteger)delta;
 - (id)addAttachmentWithFileURL:(NSURL *)url;
+- (id)addURLAttachmentWithURL:(NSURL *)url;
 - (id)addTableAttachmentWithText:(NSAttributedString *)text;
 - (void)setShouldAddMediaAsynchronously:(BOOL)value;
 - (void)setIsPinned:(BOOL)value;
+@end
+@protocol NCNoteClass
++ (id)newEmptyNoteInFolder:(id)folder;
 @end
 @protocol NCMergeable
 - (NSAttributedString *)attributedString;
@@ -255,6 +259,14 @@ static void NCInstallTableStyleMethod(void) {
     if (!NCCatch(@"reading note body", error, ^{ body = [[(id<NCMergeable>)mergeable attributedString] copy]; })) return nil;
     return body ?: [[NSAttributedString alloc] init];
 }
++ (NSManagedObject *)newNoteInFolder:(NSManagedObject *)folder error:(NSError **)error {
+    Class cls = NSClassFromString(@"ICNote");
+    if (!NCRequireClass(cls, @[@"newEmptyNoteInFolder:"], @"creating note", error)) return nil;
+    __block NSManagedObject *note = nil;
+    if (!NCCatch(@"creating note", error, ^{ note = (NSManagedObject *)[(id<NCNoteClass>)cls newEmptyNoteInFolder:folder]; })) return nil;
+    if (!note && error) *error = NCError(@"NotesShared created no note");
+    return note;
+}
 
 + (id)paragraphStyle:(NSInteger)style indent:(NSInteger)indent quote:(NSInteger)quote checked:(NSInteger)checked basedOn:(id)existing error:(NSError **)error {
     if (!NCLoad(error)) return nil;
@@ -312,6 +324,13 @@ static void NCInstallTableStyleMethod(void) {
     if (type) *type = kind;
     return identifier;
 }
++ (NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {
+    if (!NCRequireObject(note, @[@"addURLAttachmentWithURL:"], @"adding URL preview", error)) return nil;
+    __block NSString *identifier = nil, *kind = nil;
+    if (!NCCatch(@"adding URL preview", error, ^{ id item = [(id<NCNote>)note addURLAttachmentWithURL:url]; identifier = [item valueForKey:@"identifier"]; kind = [item valueForKey:@"typeUTI"]; })) return nil;
+    if (type) *type = kind;
+    return identifier;
+}
 
 + (BOOL)setPreferredImageSize:(NSString *)size attachment:(NSManagedObject *)attachment error:(NSError **)error {
     SEL sel = NSSelectorFromString(@"setPreferredViewSize:");
@@ -344,6 +363,31 @@ static void NCInstallTableStyleMethod(void) {
 + (BOOL)moveFolder:(NSManagedObject *)folder parent:(NSManagedObject *)parent error:(NSError **)error {
     if (!NCRequireObject(folder, @[@"updateChangeCountWithReason:"], @"moving folder", error)) return NO;
     return NCCatch(@"moving folder", error, ^{ [folder setValue:parent forKey:@"parent"]; [folder setValue:NSDate.date forKey:@"parentModificationDate"]; [(id<NCSynced>)folder updateChangeCountWithReason:@"Moved folder"]; });
+}
++ (NSString *)createSmartFolder:(NSString *)name tags:(NSArray<NSManagedObject *> *)tags matchAll:(BOOL)matchAll account:(NSManagedObject *)account error:(NSError **)error {
+    Class selection = NSClassFromString(@"ICTagSelection"), query = NSClassFromString(@"ICQueryObjC"), folders = NSClassFromString(@"ICFolder");
+    SEL make = NSSelectorFromString(@"initWithManagedObjectContext:includedObjectIDs:excludedObjectIDs:tagOperator:");
+    SEL ask = NSSelectorFromString(@"objc_queryForNotesMatchingTagSelection:");
+    SEL smart = NSSelectorFromString(@"objc_smartFolderWithQuery:account:");
+    if (!selection || !query || !folders || ![selection instancesRespondToSelector:make] || ![query respondsToSelector:ask] || ![folders respondsToSelector:smart]) {
+        if (error) *error = NCError(@"NotesShared cannot create smart folders in this version of macOS");
+        return nil;
+    }
+    __block NSString *identifier = nil;
+    if (!NCCatch(@"creating smart folder", error, ^{
+        NSSet *ids = [NSSet setWithArray:[tags valueForKey:@"objectID"]];
+        id chosen = ((id (*)(id, SEL, id, id, id, NSInteger))objc_msgSend)([selection alloc], make, account.managedObjectContext, ids, [NSSet set], matchAll ? 1 : 0);
+        id rule = ((id (*)(id, SEL, id))objc_msgSend)(query, ask, chosen);
+        NSManagedObject *folder = ((id (*)(id, SEL, id, id))objc_msgSend)(folders, smart, rule, account);
+        [folder setValue:name forKey:@"title"];
+        identifier = [folder valueForKey:@"identifier"];
+    })) return nil;
+    if (!identifier && error) *error = NCError(@"NotesShared created no smart folder");
+    return identifier;
+}
++ (BOOL)renameFolder:(NSManagedObject *)folder name:(NSString *)name error:(NSError **)error {
+    if (!NCRequireObject(folder, @[@"updateChangeCountWithReason:"], @"renaming folder", error)) return NO;
+    return NCCatch(@"renaming folder", error, ^{ [folder setValue:name forKey:@"title"]; [folder setValue:NSDate.date forKey:@"dateForLastTitleModification"]; [(id<NCSynced>)folder updateChangeCountWithReason:@"Renamed folder"]; });
 }
 + (NSManagedObject *)duplicateNote:(NSManagedObject *)note folder:(NSManagedObject *)folder error:(NSError **)error {
     dlerror();

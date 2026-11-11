@@ -3,6 +3,7 @@ import Foundation
 import NotesAutomation
 import NotesCore
 import NotesSafety
+import NotesStore
 
 struct WriteOptions: ParsableArguments {
     @Flag(help: "Print the operation and resulting HTML without writing.") var dryRun = false
@@ -11,6 +12,13 @@ struct WriteOptions: ParsableArguments {
     @Option(help: "Write only if the note's modified date equals this ISO 8601 value.") var ifModified: String?
     @Option(help: "Write only if the note revision equals this SHA-256 token.") var expectRevision: String?
     @Flag(help: "Permit an HTML body rewrite that can remove attachments.") var allowAttachmentLoss = false
+    @Flag(help: "Permit a native write after Notes confirms shared-note write access.") var allowShared = false
+    @Flag(help: "Wait for the new local note version to reach iCloud.") var waitSync = false
+    @Option(help: "Seconds to wait with --wait-sync.") var syncTimeout: Double = 30
+
+    func validate() throws {
+        guard syncTimeout >= 0 else { throw ValidationError("--sync-timeout must be nonnegative.") }
+    }
 }
 
 struct DryRunPlan: Codable {
@@ -74,6 +82,12 @@ enum SafetyExecutor {
         }
         for path in allowedPaths { try guardrail.require(path) }
         if let note { try ConcurrencyGuard.require(note, ifModified: options.ifModified, expectRevision: options.expectRevision) }
+        if let note, note.summary.isShared == true {
+            guard options.allowShared else { throw NotesError("shared_write_refused", "The note is shared. Pass --allow-shared to confirm the write.") }
+            guard plan.engine == "native" else {
+                throw NotesError("native_required", "Shared-note writes require the native engine so Notes can check write permission.", hint: "Pass --engine native with --allow-shared.")
+            }
+        }
         if options.dryRun {
             if emitDryRun && CommandLine.arguments.contains("--json") { try Output.json(plan) }
             else if emitDryRun {
@@ -99,7 +113,12 @@ enum SafetyExecutor {
             throw NotesError("idempotent_write_failed", begun.entry.message ?? "The recorded write failed.")
         }
         do {
-            let result = try action()
+            let started = Date().addingTimeInterval(-1)
+            var result = try action()
+            if result.operationID == nil { result.operationID = begun.entry.id }
+            if options.waitSync, result.outcome == .verified, let noteID = result.noteID?.uuid, !noteID.isEmpty {
+                result.syncPending = !((try? NoteSyncWaiter.wait(noteID: noteID, modifiedAfter: started, timeout: options.syncTimeout)) ?? false)
+            }
             let outcome = JournalOutcome(rawValue: result.outcome.rawValue) ?? .failed
             let noteID = result.noteID.flatMap { $0.uuid.isEmpty ? $0.coreDataID : $0.uuid }
             try journal.finish(begun.entry.id, outcome: outcome, noteID: noteID, result: result, message: result.message)

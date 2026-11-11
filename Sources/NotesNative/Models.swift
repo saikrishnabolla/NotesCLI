@@ -83,6 +83,19 @@ public struct NativeAttachmentResult: Codable, Sendable {
     public var attachmentID: String
     public var typeUTI: String
     public var position: Int
+    public var sourceSHA256: String?
+    public var storedSHA256: String?
+    public var write: NativeWriteResult
+    public init(attachmentID: String, typeUTI: String, position: Int, sourceSHA256: String? = nil,
+                storedSHA256: String? = nil, write: NativeWriteResult) {
+        self.attachmentID = attachmentID; self.typeUTI = typeUTI; self.position = position
+        self.sourceSHA256 = sourceSHA256; self.storedSHA256 = storedSHA256; self.write = write
+    }
+}
+
+public struct NativeCreateResult: Codable, Sendable {
+    public var attachmentIDs: [String]
+    public var attachmentSHA256: [String: String]
     public var write: NativeWriteResult
 }
 
@@ -106,8 +119,8 @@ public protocol NotesNativeWriting {
     func setPinned(_ ref: String, pinned: Bool, allowShared: Bool) throws -> NativeWriteResult
     func addTag(_ ref: String, tag: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func removeTag(_ ref: String, tag: String, allowShared: Bool) throws -> NativeWriteResult
-    func renameTag(_ tag: String, to: String, expectedCount: Int) throws -> NativeWriteResult
-    func deleteTag(_ tag: String, expectedCount: Int) throws -> NativeWriteResult
+    func renameTag(_ tag: String, to: String, expectedCount: Int, allowShared: Bool) throws -> NativeWriteResult
+    func deleteTag(_ tag: String, expectedCount: Int, allowShared: Bool) throws -> NativeWriteResult
     func insertNoteLink(_ ref: String, target: String, text: String?, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func links(_ ref: String) throws -> [NativeNoteLink]
     func backlinks(_ ref: String) throws -> [NativeNoteLink]
@@ -118,6 +131,9 @@ public protocol NotesNativeWriting {
     func setParagraphStyle(_ ref: String, range: UTF16Range, style: NativeParagraphStyle, indent: Int?, allowShared: Bool) throws -> NativeWriteResult
     func setInlineFormat(_ ref: String, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult
     func insertFile(_ ref: String, file: URL, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
+    func insertFrozenFile(_ ref: String, frozen: FrozenAttachmentInput, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
+    func createNote(title: String, markdown: String, folder: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult
+    func insertURL(_ ref: String, url: URL, card: Bool, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func deleteAttachment(_ ref: String, attachmentID: String, allowShared: Bool) throws -> NativeWriteResult
     func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func editTable(_ ref: String, attachmentID: String, row: Int, column: Int, text: String, allowShared: Bool) throws -> NativeWriteResult
@@ -125,5 +141,8 @@ public protocol NotesNativeWriting {
     func duplicate(_ ref: String, title: String?, allowShared: Bool) throws -> NativeWriteResult
     func restore(_ ref: String, folder: String?, allowShared: Bool) throws -> NativeWriteResult
     func moveFolder(_ ref: String, parent: String?, allowShared: Bool) throws -> NativeWriteResult
+    func createSmartFolder(name: String, tags: [String], matchAll: Bool) throws -> NativeWriteResult
+    func renameSmartFolder(_ ref: String, name: String, expectedCount: Int) throws -> NativeWriteResult
+    func deleteSmartFolder(_ ref: String, expectedCount: Int) throws -> NativeWriteResult
     func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult
 }

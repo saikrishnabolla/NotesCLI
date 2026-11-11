@@ -4,6 +4,7 @@ import NotesCore
 import NotesMCP
 import NotesNative
 import NotesSafety
+import NotesStore
 
 enum MCPClient: String, CaseIterable, ExpressibleByArgument {
     case claudeCode = "claude-code"
@@ -41,6 +42,7 @@ struct MCPRoot: ParsableCommand {
         let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1) } : nil
         let server = MCPServer(reader: backend.reader, writer: selectedWriter, readOnly: options.readOnly,
                                allowNative: allowNative, nativeHandler: handler,
+                               syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
                                stateRoot: NotesSafetyPaths.applicationSupport)
         server.run()
     }
@@ -58,51 +60,71 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
         try MCPNativeResult(result: value.writeResult, operationID: value.operationID, value: value)
     }
     let writer = NativeNotesWriter()
+    let allowShared = boolean("allow_shared") ?? false
     switch tool {
+    case "create_note":
+        let paths = arguments["attachments"] as? [String] ?? []
+        let frozen = try paths.map { try FrozenAttachmentInput(file: URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)) }
+        let value = try writer.createNote(title: string("title")!, markdown: string("body")!, folder: string("folder"), attachments: frozen, allowShared: allowShared)
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "update_note", "write_markdown":
+        return try result(writer.writeMarkdown(ref(), markdown: string("body")!, dryRun: false, backup: false, allowShared: allowShared))
+    case "attach_pasteboard":
+        let value = try writer.insertFrozenFile(ref(), frozen: frozenPasteboardInput(), position: integer("position"), imageView: string("view"), allowShared: allowShared)
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "add_url":
+        guard let url = URL(string: string("url") ?? "") else { throw NotesError("invalid_url", "The URL is invalid.") }
+        return try result(writer.insertURL(ref(), url: url, card: boolean("card") ?? false, position: integer("position"), allowShared: allowShared))
+    case "smart_folder_create":
+        return try result(writer.createSmartFolder(name: string("name")!, tags: arguments["tags"] as! [String], matchAll: string("match") == "all"))
+    case "smart_folder_rename":
+        return try result(writer.renameSmartFolder(ref(), name: string("name")!, expectedCount: integer("expected_count")!))
+    case "smart_folder_delete":
+        return try result(writer.deleteSmartFolder(ref(), expectedCount: integer("expected_count")!))
     case "checklist_list": return try MCPNativeResult(value: writer.checklistItems(ref()))
-    case "checklist_add": return try result(writer.insertChecklist(ref(), text: string("text")!, position: integer("position"), allowShared: false))
+    case "checklist_add": return try result(writer.insertChecklist(ref(), text: string("text")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "checklist_toggle":
         let selection: ChecklistSelection
         if let index = integer("index") { selection = .index(index) }
         else if let text = string("text") { selection = .text(text) }
         else { throw NotesError("invalid_arguments", "index or text is required.") }
-        return try result(writer.toggleChecklist(ref(), selection: selection, done: boolean("done"), allowShared: false))
-    case "checklist_check_all": return try result(writer.setAllChecklist(ref(), done: true, allowShared: false))
-    case "checklist_uncheck_all": return try result(writer.setAllChecklist(ref(), done: false, allowShared: false))
-    case "checklist_clear_done": return try result(writer.deleteCompleted(ref(), allowShared: false))
-    case "pin_note": return try result(writer.setPinned(ref(), pinned: true, allowShared: false))
-    case "unpin_note": return try result(writer.setPinned(ref(), pinned: false, allowShared: false))
-    case "tag_add": return try result(writer.addTag(ref(), tag: string("tag")!, position: integer("position"), allowShared: false))
-    case "tag_remove": return try result(writer.removeTag(ref(), tag: string("tag")!, allowShared: false))
-    case "tag_rename": return try result(writer.renameTag(string("tag")!, to: string("new_name")!, expectedCount: integer("expected_count")!))
-    case "tag_delete": return try result(writer.deleteTag(string("tag")!, expectedCount: integer("expected_count")!))
-    case "link_add": return try result(writer.insertNoteLink(ref(), target: string("target")!, text: string("text"), position: integer("position"), allowShared: false))
+        return try result(writer.toggleChecklist(ref(), selection: selection, done: boolean("done"), allowShared: (boolean("allow_shared") ?? false)))
+    case "checklist_check_all": return try result(writer.setAllChecklist(ref(), done: true, allowShared: (boolean("allow_shared") ?? false)))
+    case "checklist_uncheck_all": return try result(writer.setAllChecklist(ref(), done: false, allowShared: (boolean("allow_shared") ?? false)))
+    case "checklist_clear_done": return try result(writer.deleteCompleted(ref(), allowShared: (boolean("allow_shared") ?? false)))
+    case "pin_note": return try result(writer.setPinned(ref(), pinned: true, allowShared: (boolean("allow_shared") ?? false)))
+    case "unpin_note": return try result(writer.setPinned(ref(), pinned: false, allowShared: (boolean("allow_shared") ?? false)))
+    case "tag_add": return try result(writer.addTag(ref(), tag: string("tag")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
+    case "tag_remove": return try result(writer.removeTag(ref(), tag: string("tag")!, allowShared: (boolean("allow_shared") ?? false)))
+    case "tag_rename": return try result(writer.renameTag(string("tag")!, to: string("new_name")!, expectedCount: integer("expected_count")!, allowShared: boolean("allow_shared") ?? false))
+    case "tag_delete": return try result(writer.deleteTag(string("tag")!, expectedCount: integer("expected_count")!, allowShared: boolean("allow_shared") ?? false))
+    case "link_add": return try result(writer.insertNoteLink(ref(), target: string("target")!, text: string("text"), position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "link_list": return try MCPNativeResult(value: writer.links(ref()))
     case "text_find": return try MCPNativeResult(value: writer.searchOffsets(ref(), text: string("text")!, caseInsensitive: boolean("case_insensitive") ?? false))
-    case "text_insert": return try result(writer.insertText(ref(), text: string("text")!, position: integer("position")!, allowShared: false))
-    case "text_delete": return try result(writer.deleteRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), allowShared: false))
-    case "text_replace": return try result(writer.replaceRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), text: string("text")!, allowShared: false))
+    case "text_insert": return try result(writer.insertText(ref(), text: string("text")!, position: integer("position")!, allowShared: (boolean("allow_shared") ?? false)))
+    case "text_delete": return try result(writer.deleteRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), allowShared: (boolean("allow_shared") ?? false)))
+    case "text_replace": return try result(writer.replaceRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), text: string("text")!, allowShared: (boolean("allow_shared") ?? false)))
     case "format_paragraph":
         guard let style = NativeParagraphStyle(rawValue: string("style") ?? "") else { throw NotesError("invalid_style", "Unknown paragraph style.") }
-        return try result(writer.setParagraphStyle(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), style: style, indent: integer("indent"), allowShared: false))
+        return try result(writer.setParagraphStyle(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), style: style, indent: integer("indent"), allowShared: (boolean("allow_shared") ?? false)))
     case "format_inline":
         let format = InlineFormat(bold: boolean("bold"), italic: boolean("italic"), underline: boolean("underline"), strike: boolean("strike"),
                                   link: string("link"), clearLink: boolean("clear_link") ?? false, color: string("color"), clearColor: boolean("clear_color") ?? false)
-        return try result(writer.setInlineFormat(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format, allowShared: false))
+        return try result(writer.setInlineFormat(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format, allowShared: (boolean("allow_shared") ?? false)))
     case "attach_file":
-        let value = try writer.insertFile(ref(), file: URL(fileURLWithPath: string("path")!), position: integer("position"), imageView: string("view"), allowShared: false)
+        let value = try writer.insertFile(ref(), file: URL(fileURLWithPath: string("path")!), position: integer("position"), imageView: string("view"), allowShared: (boolean("allow_shared") ?? false))
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
-    case "delete_attachment": return try result(writer.deleteAttachment(ref(), attachmentID: string("attachment_id")!, allowShared: false))
+    case "delete_attachment": return try result(writer.deleteAttachment(ref(), attachmentID: string("attachment_id")!, allowShared: (boolean("allow_shared") ?? false)))
     case "table_create":
         guard let rows = arguments["rows"] as? [[String]] else { throw NotesError("invalid_arguments", "rows must be an array of string arrays.") }
-        return try result(writer.createTable(ref(), rows: rows, position: integer("position"), allowShared: false))
-    case "table_set": return try result(writer.editTable(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!, text: string("text")!, allowShared: false))
+        return try result(writer.createTable(ref(), rows: rows, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
+    case "table_set": return try result(writer.editTable(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!, text: string("text")!, allowShared: (boolean("allow_shared") ?? false)))
     case "table_add_row", "table_remove_row", "table_add_column", "table_remove_column":
         let axis = tool.contains("row") ? "row" : "column", add = tool.contains("add")
-        return try result(writer.resizeTable(ref(), attachmentID: string("attachment_id")!, axis: axis, index: integer("index")!, add: add, allowShared: false))
-    case "duplicate_note": return try result(writer.duplicate(ref(), title: string("title"), allowShared: false))
-    case "restore_note": return try result(writer.restore(ref(), folder: string("folder"), allowShared: false))
-    case "move_folder": return try result(writer.moveFolder(ref(), parent: string("parent"), allowShared: false))
+        return try result(writer.resizeTable(ref(), attachmentID: string("attachment_id")!, axis: axis, index: integer("index")!, add: add, allowShared: (boolean("allow_shared") ?? false)))
+    case "duplicate_note": return try result(writer.duplicate(ref(), title: string("title"), allowShared: (boolean("allow_shared") ?? false)))
+    case "restore_note": return try result(writer.restore(ref(), folder: string("folder"), allowShared: (boolean("allow_shared") ?? false)))
+    case "move_folder": return try result(writer.moveFolder(ref(), parent: string("parent"), allowShared: (boolean("allow_shared") ?? false)))
     default: throw NotesError("unknown_tool", "Unknown native MCP tool.")
     }
 }

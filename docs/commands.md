@@ -50,6 +50,7 @@ notescli open <ref>
 
 ```text
 notescli add [<title>] [--folder <folder>] [--body <body> | --stdin | --file <file>]
+             [--attach <file> ...]
 notescli append <ref> [--body <body> | --stdin]
 notescli edit <ref>
 notescli rename <ref> <title>
@@ -62,7 +63,7 @@ notescli replace-text <ref> <find> <replacement>
 notescli clip <url> [--folder <folder>]
 ```
 
-`add` opens `$EDITOR` when no body source is given. `edit` replaces the note body and may reduce rich Notes content to the supported Markdown subset. `delete` moves notes to Recently Deleted.
+`add` opens `$EDITOR` when no body source is given. `add --attach` requires `--engine native` and creates the note and attachments in one save. Native `edit` preserves attachments named by `notescli-attachment:ID`; scripting `edit` still refuses attachment loss. `delete` moves notes to Recently Deleted.
 
 ## Folder writes
 
@@ -72,6 +73,9 @@ notescli folder rename <ref> <name>
 notescli folder move <ref> [<parent>] [--account <account>]
 notescli folder delete <ref> [--yes] [--expect-count <count>]
 notescli folder exists <path>
+notescli smart-folder create <name> --tags <a,b> --match any|all
+notescli smart-folder rename <ref> <name> --expected-count <count>
+notescli smart-folder delete <ref> --expected-count <count>
 ```
 
 Deleting a folder moves its notes to Recently Deleted.
@@ -85,10 +89,11 @@ notescli checklist add|toggle|check-all|uncheck-all|clear-done|list ...
 notescli pin <ref>
 notescli unpin <ref>
 notescli tag add|remove|rename|delete ...
-notescli link add|list ...
+notescli link add|add-url|list ...
 notescli text insert|delete|replace|find ...
 notescli format paragraph|inline ...
 notescli attach <ref> <path> [--position <position>] [--view <view>]
+notescli attach <ref> --pasteboard [--position <position>] [--view <view>]
 notescli attachment delete <ref> <attachment-id>
 notescli table create|set|add-row|add-column|remove-row|remove-column ...
 notescli duplicate <ref> [--title <title>]
@@ -96,9 +101,9 @@ notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`write` uses scripting by default. Restore and folder moves require native opt-in. Write results include the selected `engine`; native results include `operationID` when available.
+`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
-All write commands accept `--dry-run`, `--idempotency-key`, `--write-folders`, `--if-modified`, and `--expect-revision`. Body rewrites also accept `--allow-attachment-loss`.
+All write commands accept `--dry-run`, `--idempotency-key`, `--write-folders`, `--if-modified`, `--expect-revision`, `--allow-shared`, `--wait-sync`, and `--sync-timeout`. Shared-note writes require native mode and Notes write permission. A sync timeout leaves the write verified and returns `syncPending: true`. Body rewrites also accept `--allow-attachment-loss`.
 
 ## Safety and sync
 

@@ -83,7 +83,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
                     folderID: operation.folderID,
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)"
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
                 operationID: operation.id
@@ -117,7 +118,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
                     folderID: operation.folderID,
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)"
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
                 operationID: operation.id
@@ -142,7 +144,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 writeResult: WriteResult(
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)"
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
                 operationID: operation.id
@@ -231,8 +234,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
         if !allowTrash, let folder = value(note, "folder") as? NSManagedObject, value(folder, "folderType") as? Int == 1 {
             throw NotesError("note_in_trash", "Restore the note before changing its contents.")
         }
-        if isShared(note) && !allowShared { throw NotesError("shared_write_refused", "The note is shared. Pass --allow-shared to confirm the write.") }
-        if value(note, "isSharedReadOnly") as? Bool == true { throw NotesError("shared_read_only", "The shared note is read-only.") }
+        if isShared(note) {
+            guard allowShared else { throw NotesError("shared_write_refused", "The note is shared. Pass --allow-shared to confirm the write.") }
+            guard let readOnly = value(note, "isSharedReadOnly") as? Bool else {
+                throw NotesError("shared_permission_unknown", "Notes did not expose the current participant's write role; nothing was changed.")
+            }
+            if readOnly { throw NotesError("shared_read_only", "The current participant has read-only access to this shared note.") }
+        }
     }
 
     fileprivate func guardFolderSelectors(_ folder: NSManagedObject) throws {
@@ -353,14 +361,16 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let id = operation?.id
             return NativeWriteResult(
                 writeResult: WriteResult(outcome: .unknown, noteID: noteID.map { NoteID(uuid: $0) },
-                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError?.localizedDescription ?? "unknown error")"),
+                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError?.localizedDescription ?? "unknown error")",
+                                         operationID: id),
                 verification: NativeVerification(nativeReadback: native, sqliteReadback: nil), operationID: id
             )
         }
         let verified = nativeVerified && !native.isEmpty && (sqlite == nil || sqliteEvidence != nil)
         let resultMessage = verified ? message : (mismatch ?? message ?? "Readback did not match the requested change.")
         return NativeWriteResult(writeResult: WriteResult(outcome: verified ? .verified : .unverified,
-                                                           noteID: noteID.map { NoteID(uuid: $0) }, message: resultMessage),
+                                                           noteID: noteID.map { NoteID(uuid: $0) }, message: resultMessage,
+                                                           operationID: operation?.id),
                                  verification: NativeVerification(nativeReadback: native, sqliteReadback: sqliteEvidence),
                                  operationID: operation?.id)
     }
@@ -385,13 +395,15 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let id = operation?.id
             return NativeWriteResult(
                 writeResult: WriteResult(outcome: .unknown, folderID: folderID,
-                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError?.localizedDescription ?? "unknown error")"),
+                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError?.localizedDescription ?? "unknown error")",
+                                         operationID: id),
                 verification: NativeVerification(nativeReadback: native, sqliteReadback: nil), operationID: id
             )
         }
         let verified = nativeVerified && !native.isEmpty && (sqlite == nil || sqliteEvidence != nil)
         return NativeWriteResult(writeResult: WriteResult(outcome: verified ? .verified : .unverified, folderID: folderID,
-                                                           message: verified ? message : (message ?? "Readback did not match the requested change.")),
+                                                           message: verified ? message : (message ?? "Readback did not match the requested change."),
+                                                           operationID: operation?.id),
                                  verification: NativeVerification(nativeReadback: native, sqliteReadback: sqliteEvidence),
                                  operationID: operation?.id)
     }
@@ -572,6 +584,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             try insertMarker(editor, original: editor.original, id: attachmentID, type: "com.apple.notes.inlinetextattachment.hashtag", position: position)
             try editor.finish(); try NCNotesRuntime.save(context); operation?.committed = true; operation?.noteID = id(note)
             if let attachment = try fetch("ICInlineAttachment", predicate: NSPredicate(format: "identifier == %@", attachmentID), in: context, limit: 1).first { try NCNotesRuntime.reviveTagAttachment(attachment) }
+            _ = try hashtag(name, context: context)
             try save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
         return result(id(note), native: ["tag": name], sqlite: { $0.summary.tags.contains { $0.caseInsensitiveCompare(name) == .orderedSame } ? ["tag": name] : nil })
@@ -603,22 +616,44 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     fileprivate func hashtag(_ name: String, context: NSManagedObjectContext) throws -> NSManagedObject {
         var rows = try fetch("ICHashtag", predicate: NSPredicate(value: true), in: context).filter { tag in
-            guard value(tag, "markedForDeletion") as? Bool != true else { return false }
-            return [value(tag, "displayText") as? String, value(tag, "standardizedContent") as? String]
-                .compactMap { $0?.trimmingCharacters(in: CharacterSet(charactersIn: "#")) }
+            return tag.entity.attributesByName.keys.compactMap { value(tag, $0) as? String }
+                .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "#")) }
                 .contains { $0.caseInsensitiveCompare(name) == .orderedSame }
         }
         if rows.isEmpty {
-            let inline = try fetch("ICInlineAttachment", predicate: NSPredicate(format: "altText ==[c] %@ OR altText ==[c] %@", name, "#" + name), in: context)
-            rows = inline.flatMap { attachment in
-                attachment.entity.relationshipsByName.keys.compactMap { key in
-                    (value(attachment, key) as? NSManagedObject).flatMap { $0.entity.name == "ICHashtag" ? $0 : nil }
+            let tagged = (try? SQLiteNotesStore(refresh: true).notes(NoteQuery(tag: name))) ?? []
+            for summary in tagged {
+                guard let taggedNote = try? note(summary.id.uuid, in: context) else { continue }
+                for (attachment, _) in try inlineMatches(taggedNote, type: "com.apple.notes.inlinetextattachment.hashtag", label: nil) {
+                    for (key, relationship) in attachment.entity.relationshipsByName where relationship.destinationEntity?.name == "ICHashtag" {
+                        if let object = value(attachment, key) as? NSManagedObject { rows.append(object) }
+                        else if let objects = value(attachment, key) as? Set<NSManagedObject> { rows += objects }
+                    }
                 }
             }
+        }
+        if rows.isEmpty {
+            let inline = try fetch("ICInlineAttachment", predicate: NSPredicate(value: true), in: context).filter { attachment in
+                guard value(attachment, "markedForDeletion") as? Bool != true,
+                      value(attachment, "typeUTI") as? String == "com.apple.notes.inlinetextattachment.hashtag" else { return false }
+                return [value(attachment, "altText") as? String, value(attachment, "displayText") as? String,
+                        value(attachment, "standardizedContent") as? String]
+                    .compactMap { $0?.trimmingCharacters(in: CharacterSet(charactersIn: "#")) }
+                    .contains { $0.caseInsensitiveCompare(name) == .orderedSame }
+            }
+            rows = inline.flatMap { attachment in
+                attachment.entity.relationshipsByName.compactMap { key, relationship -> [NSManagedObject]? in
+                    guard relationship.destinationEntity?.name == "ICHashtag" else { return nil }
+                    if let object = value(attachment, key) as? NSManagedObject { return [object] }
+                    if let objects = value(attachment, key) as? Set<NSManagedObject> { return Array(objects) }
+                    return nil
+                }
+            }.flatMap { $0 }
         }
         guard !rows.isEmpty else { throw NotesError("tag_not_found", "No native tag matches.") }
         let standardized = Set(rows.compactMap { (value($0, "standardizedContent") as? String)?.lowercased() })
         guard standardized.count <= 1 else { throw NotesError("ambiguous_tag", "Several native tags match.") }
+        if value(rows[0], "markedForDeletion") as? Bool == true { try NCNotesRuntime.unmarkForDeletion(rows[0]) }
         return rows[0]
     }
     fileprivate func tagUses(_ name: String, context: NSManagedObjectContext) throws -> [(NSManagedObject, NSManagedObject, NSRange)] {
@@ -638,11 +673,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return result
     }
 
-    public func renameTag(_ tag: String, to: String, expectedCount: Int) throws -> NativeWriteResult {
+    public func renameTag(_ tag: String, to: String, expectedCount: Int, allowShared: Bool = false) throws -> NativeWriteResult {
         try performWrite { context in
         let old = try normalizedTag(tag), new = try normalizedTag(to), uses = try tagUses(old, context: context)
         guard uses.count == expectedCount else { throw NotesError("expected_count_mismatch", "Tag is used by \(uses.count) notes/items, not \(expectedCount).") }
-        guard !uses.contains(where: { isShared($0.0) }) else { throw NotesError("shared_write_refused", "Global tag changes refuse shared notes.") }
+        for note in Dictionary(grouping: uses, by: { id($0.0) }).values.compactMap({ $0.first?.0 }) {
+            try guardWritable(note, allowShared: allowShared)
+        }
         for note in Dictionary(grouping: uses, by: { id($0.0) }).values.compactMap({ $0.first?.0 }) { try refreshIfStale(note) }
         do { try NCNotesRuntime.renameTag(try hashtag(old, context: context), to: new); try save(context, notes: Array(Dictionary(grouping: uses, by: { id($0.0) }).values.compactMap { $0.first?.0 })) }
         catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
@@ -657,13 +694,12 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
-    public func deleteTag(_ tag: String, expectedCount: Int) throws -> NativeWriteResult {
+    public func deleteTag(_ tag: String, expectedCount: Int, allowShared: Bool = false) throws -> NativeWriteResult {
         try performWrite { context in
         let name = try normalizedTag(tag), uses = try tagUses(name, context: context)
         guard uses.count == expectedCount else { throw NotesError("expected_count_mismatch", "Tag is used \(uses.count) times, not \(expectedCount).") }
-        guard !uses.contains(where: { isShared($0.0) || value($0.0, "isPasswordProtected") as? Bool == true }) else { throw NotesError("unsafe_global_tag_delete", "A use is shared or locked; nothing changed.") }
         let grouped = Dictionary(grouping: uses, by: { id($0.0) })
-        for note in grouped.values.compactMap({ $0.first?.0 }) { try refreshIfStale(note) }
+        for note in grouped.values.compactMap({ $0.first?.0 }) { try guardWritable(note, allowShared: allowShared); try refreshIfStale(note) }
         do {
             for rows in grouped.values { guard let note = rows.first?.0 else { continue }; let editor = try NCBodyEditor(note: note); try editor.begin(["delete"]); for row in rows.sorted(by: { $0.2.location > $1.2.location }) { try editor.delete(row.2); try NCNotesRuntime.markForDeletion(row.1) }; try editor.finish() }
             try save(context, notes: grouped.values.compactMap { $0.first?.0 })
@@ -853,14 +889,28 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func insertFile(_ ref: String, file: URL, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult {
+        try insertFrozenFile(ref, frozen: FrozenAttachmentInput(file: file), position: position, imageView: imageView, allowShared: allowShared)
+    }
+
+    fileprivate func storedAttachmentHash(noteID: String, attachmentID: String, expected: String) -> String? {
+        for attempt in 0..<12 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.5) }
+            guard let attachment = try? SQLiteNotesStore(refresh: true).attachments(noteID).first(where: { $0.id == attachmentID }),
+                  let path = attachment.filePath,
+                  let hash = try? FrozenAttachmentInput.hash(file: URL(fileURLWithPath: path)) else { continue }
+            if hash == expected { return hash }
+        }
+        return nil
+    }
+
+    public func insertFrozenFile(_ ref: String, frozen: FrozenAttachmentInput, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult {
         try performAttachmentWrite { context in
-        var directory: ObjCBool = false; guard FileManager.default.fileExists(atPath: file.path, isDirectory: &directory), !directory.boolValue, FileManager.default.isReadableFile(atPath: file.path) else { throw NotesError("invalid_file", "The file is not readable.") }
         let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
         var attachmentID = "", kind: NSString?, at = 0
         do {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["insert"]); at = position ?? editor.original.length
             if imageView != nil { try NCNotesRuntime.requireInstanceSelectors(["setPreferredViewSize:"], className: "ICAttachment") }
-            attachmentID = try NCNotesRuntime.addFile(file, to: note, title: file.lastPathComponent, type: &kind)
+            attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
             operation?.attachmentID = attachmentID
             operation?.attachmentType = kind as String? ?? "public.data"
             operation?.attachmentPosition = at
@@ -869,8 +919,125 @@ public final class NativeNotesWriter: NotesNativeWriting {
             try insertMarker(editor, original: editor.original, id: attachmentID, type: kind as String? ?? "public.data", position: position); try editor.finish(); try save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
         let count = attachmentMarkers(try body(try self.note(id(note), in: context))).filter { $0.2 == attachmentID }.count
-        let write = result(id(note), native: ["attachmentID": attachmentID, "placements": "\(count)"], nativeVerified: NativeVerificationRules.attachment(Array(repeating: attachmentID, count: count), id: attachmentID), sqlite: { n in NativeVerificationRules.attachment(n.attachments.map(\.id), id: attachmentID) ? ["attachmentID": attachmentID, "placements": "1"] : nil }, mismatch: "Attachment \(attachmentID) was not present exactly once.")
-        return NativeAttachmentResult(attachmentID: attachmentID, typeUTI: kind as String? ?? "public.data", position: at, write: write)
+        let stored = storedAttachmentHash(noteID: id(note), attachmentID: attachmentID, expected: frozen.sha256)
+        let native = ["attachmentID": attachmentID, "placements": "\(count)", "sourceSHA256": frozen.sha256, "storedSHA256": stored ?? ""]
+        let write = result(id(note), native: native,
+                           nativeVerified: NativeVerificationRules.attachment(Array(repeating: attachmentID, count: count), id: attachmentID) && stored == frozen.sha256,
+                           sqlite: { n in
+            NativeVerificationRules.attachment(n.attachments.map(\.id), id: attachmentID) && stored == frozen.sha256
+                ? ["attachmentID": attachmentID, "placements": "1", "storedSHA256": stored!] : nil
+        }, mismatch: "Attachment \(attachmentID) was not present exactly once with the frozen input bytes.")
+        return NativeAttachmentResult(attachmentID: attachmentID, typeUTI: kind as String? ?? "public.data", position: at,
+                                      sourceSHA256: frozen.sha256, storedSHA256: stored, write: write)
+        }
+    }
+
+    fileprivate func destinationFolder(_ ref: String?, in context: NSManagedObjectContext) throws -> NSManagedObject {
+        if let ref, !ref.isEmpty {
+            if ref.contains(">") {
+                let path = ref.split(separator: ">").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                let matches = try SQLiteNotesStore(refresh: true).folders(account: nil).filter { $0.path == path }
+                guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "folder_not_found" : "ambiguous_folder", "Folder must resolve uniquely.") }
+                return try folder(matches[0].id, in: context)
+            }
+            return try folder(ref, in: context)
+        }
+        let rows = try fetch("ICFolder", predicate: NSPredicate(format: "markedForDeletion == NO AND folderType == 0"), in: context)
+        guard let destination = rows.first(where: { (value($0, "title") as? String) == "Notes" }) ?? rows.first else {
+            throw NotesError("folder_not_found", "No writable Notes folder was found.")
+        }
+        return destination
+    }
+
+    public func createNote(title: String, markdown: String, folder folderRef: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult {
+        let write = try performWrite { context in
+            let destination = try destinationFolder(folderRef, in: context)
+            try guardFolderSelectors(destination)
+            if isSharedFolder(destination) {
+                guard allowShared else { throw NotesError("shared_write_refused", "The destination folder is shared. Pass --allow-shared.") }
+                guard let readOnly = value(destination, "isSharedReadOnly") as? Bool else {
+                    throw NotesError("shared_permission_unknown", "Notes did not expose the current participant's write role; nothing was changed.")
+                }
+                if readOnly { throw NotesError("shared_read_only", "The current participant has read-only access to this shared folder.") }
+            }
+            var noteID = "", attachmentIDs: [String] = []
+            do {
+                let note = try NCNotesRuntime.newNote(in: destination)
+                try NCNotesRuntime.setValue(title, forKey: "title", of: note)
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                let source = "# " + title + (markdown.isEmpty ? "" : "\n" + markdown)
+                let built = try MarkdownNativeWriter(owner: self).attributed(markdown: source, note: note, context: context,
+                                                                                 editor: editor, existing: [:]).0
+                for frozen in attachments {
+                    var kind: NSString?
+                    let attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
+                    let marker = try NCNotesRuntime.attachmentMarker(id: attachmentID, type: kind as String? ?? "public.data")
+                    if built.length > 0 { built.append(NSAttributedString(string: "\n")) }
+                    built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("NSAttachment"): marker]))
+                    attachmentIDs.append(attachmentID)
+                }
+                try editor.begin(["insert"])
+                try editor.insert(built, at: 0)
+                try editor.finish()
+                try save(context, notes: [note])
+                noteID = id(note)
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            var hashes: [String: String] = [:]
+            for (index, attachmentID) in attachmentIDs.enumerated() {
+                if let hash = storedAttachmentHash(noteID: noteID, attachmentID: attachmentID, expected: attachments[index].sha256) {
+                    hashes[attachmentID] = hash
+                }
+            }
+            return result(noteID, native: ["title": title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)"],
+                          nativeVerified: attachmentIDs.count == attachments.count && hashes.count == attachments.count,
+                          sqlite: { note in
+                guard note.summary.title == title,
+                      Set(attachmentIDs).isSubset(of: Set(note.attachments.map(\.id))),
+                      hashes.count == attachments.count else { return nil }
+                return ["title": note.summary.title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)"]
+            }, mismatch: "The created note or frozen attachment bytes did not match.")
+        }
+        let noteID = write.writeResult.noteID?.uuid ?? ""
+        let note = try? SQLiteNotesStore(refresh: true).note(noteID)
+        let ids = note?.attachments.map(\.id) ?? []
+        var hashes: [String: String] = [:]
+        for attachment in note?.attachments ?? [] {
+            if let path = attachment.filePath, let hash = try? FrozenAttachmentInput.hash(file: URL(fileURLWithPath: path)) { hashes[attachment.id] = hash }
+        }
+        return NativeCreateResult(attachmentIDs: ids, attachmentSHA256: hashes, write: write)
+    }
+
+    public func insertURL(_ ref: String, url: URL, card: Bool, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { throw NotesError("invalid_url", "Use an http or https URL.") }
+            let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
+            var attachmentID: String?
+            do {
+                let editor = try NCBodyEditor(note: note); try editor.prepare(["insert"])
+                let at = position ?? editor.original.length
+                guard (0...editor.original.length).contains(at) else { throw NotesError("invalid_range", "Position exceeds the note length.") }
+                if card {
+                    var kind: NSString?
+                    let id = try NCNotesRuntime.addURL(url, to: note, type: &kind)
+                    attachmentID = id
+                    try insertMarker(editor, original: editor.original, id: id, type: kind as String? ?? "public.url", position: position)
+                } else {
+                    let linked = NSAttributedString(string: url.absoluteString, attributes: [.init("NSLink"): url])
+                    try editor.begin(["insert"]); try editor.insert(linked, at: UInt(at))
+                }
+                try editor.finish(); try save(context, notes: [note])
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            let nativeBody = try body(try self.note(id(note), in: context))
+            let nativeOK = attachmentID.map { id in attachmentMarkers(nativeBody).filter { $0.2 == id }.count == 1 } ?? nativeBody.string.contains(url.absoluteString)
+            return result(id(note), native: ["url": url.absoluteString, "card": String(card), "attachmentID": attachmentID ?? ""], nativeVerified: nativeOK,
+                          sqlite: { note in
+                if let attachmentID {
+                    return note.attachments.filter { $0.id == attachmentID && $0.url == url.absoluteString && $0.typeUTI.lowercased().contains("url") }.count == 1
+                        ? ["url": url.absoluteString, "attachmentID": attachmentID] : nil
+                }
+                return note.document?.text.contains(url.absoluteString) == true ? ["url": url.absoluteString] : nil
+            }, mismatch: card ? "The URL preview card was not present exactly once." : "The URL link was not found after the write.")
         }
     }
 
@@ -1001,6 +1168,84 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    fileprivate func matchingSmartFolders(_ ref: String, in context: NSManagedObjectContext) throws -> [NSManagedObject] {
+        let rows = try fetch("ICFolder", predicate: NSPredicate(format: "markedForDeletion == NO AND folderType == 2"), in: context)
+        if ref.hasPrefix("x-coredata://"), let url = URL(string: ref),
+           let objectID = context.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: url),
+           let object = try? context.existingObject(with: objectID) { return rows.filter { $0 == object } }
+        let byID = rows.filter { id($0).caseInsensitiveCompare(ref) == .orderedSame }
+        return byID.isEmpty ? rows.filter { (value($0, "title") as? String) == ref } : byID
+    }
+
+    public func createSmartFolder(name: String, tags: [String], matchAll: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanName.isEmpty, !tags.isEmpty else { throw NotesError("invalid_smart_folder", "Name and at least one tag are required.") }
+            let normalized = try tags.map(normalizedTag)
+            let tagObjects = try normalized.map { try hashtag($0, context: context) }
+            let store = try SQLiteNotesStore(refresh: true)
+            let accountIDs = Set(try normalized.flatMap { try store.notes(NoteQuery(tag: $0)).map(\.accountID) })
+            guard accountIDs.count == 1, let accountID = accountIDs.first else {
+                throw NotesError("invalid_smart_folder", "All tags must be used in one Notes account.")
+            }
+            guard let account = try fetch("ICAccount", predicate: NSPredicate(format: "identifier ==[c] %@", accountID), in: context, limit: 1).first else {
+                throw NotesError("account_not_found", "The tag account was not found.")
+            }
+            let folderID: String
+            do {
+                folderID = try NCNotesRuntime.createSmartFolder(cleanName, tags: tagObjects, matchAll: matchAll, account: account)
+                try NCNotesRuntime.save(context); operation?.committed = true; operation?.folderID = folderID
+                context.refreshAllObjects()
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            let nativeFolder = try matchingSmartFolders(folderID, in: context).first
+            return globalResult(native: ["folderID": folderID, "name": cleanName, "match": matchAll ? "all" : "any", "tags": tags.joined(separator: ",")],
+                                nativeVerified: nativeFolder != nil, folderID: folderID, sqlite: {
+                guard let folder = try SQLiteNotesStore(refresh: true).folders(account: nil).first(where: { $0.id.caseInsensitiveCompare(folderID) == .orderedSame }),
+                      folder.isSmartFolder, folder.name == cleanName else { return nil }
+                return ["folderID": folder.id, "name": folder.name]
+            })
+        }
+    }
+
+    public func renameSmartFolder(_ ref: String, name: String, expectedCount: Int) throws -> NativeWriteResult {
+        try performWrite { context in
+            let matches = try matchingSmartFolders(ref, in: context)
+            guard matches.count == expectedCount else { throw NotesError("expected_count_mismatch", "Found \(matches.count) matching Smart Folders, not \(expectedCount).") }
+            guard expectedCount == 1, let folder = matches.first else { throw NotesError("invalid_expected_count", "Smart Folder rename requires --expected-count 1.") }
+            let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanName.isEmpty else { throw NotesError("invalid_name", "The Smart Folder name cannot be empty.") }
+            let folderID = id(folder)
+            do {
+                try NCNotesRuntime.renameFolder(folder, name: cleanName); try NCNotesRuntime.save(context)
+                operation?.committed = true; operation?.folderID = folderID; context.refreshAllObjects()
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            return globalResult(native: ["folderID": folderID, "name": cleanName],
+                                nativeVerified: (value(folder, "title") as? String) == cleanName, folderID: folderID, sqlite: {
+                guard let row = try SQLiteNotesStore(refresh: true).folders(account: nil).first(where: { $0.id.caseInsensitiveCompare(folderID) == .orderedSame }),
+                      row.isSmartFolder, row.name == cleanName else { return nil }
+                return ["folderID": row.id, "name": row.name]
+            })
+        }
+    }
+
+    public func deleteSmartFolder(_ ref: String, expectedCount: Int) throws -> NativeWriteResult {
+        try performWrite { context in
+            let matches = try matchingSmartFolders(ref, in: context)
+            guard matches.count == expectedCount else { throw NotesError("expected_count_mismatch", "Found \(matches.count) matching Smart Folders, not \(expectedCount).") }
+            guard expectedCount == 1, let folder = matches.first else { throw NotesError("invalid_expected_count", "Smart Folder delete requires --expected-count 1.") }
+            let folderID = id(folder)
+            do {
+                try NCNotesRuntime.markForDeletion(folder); try NCNotesRuntime.save(context)
+                operation?.committed = true; operation?.folderID = folderID; context.refreshAllObjects()
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            return globalResult(native: ["folderID": folderID, "deleted": "true"],
+                                nativeVerified: value(folder, "markedForDeletion") as? Bool == true, folderID: folderID, sqlite: {
+                let rows = try SQLiteNotesStore(refresh: true).folders(account: nil)
+                return rows.contains(where: { $0.id.caseInsensitiveCompare(folderID) == .orderedSame && !$0.isRecentlyDeleted }) ? nil : ["folderID": folderID, "deleted": "true"]
+            })
+        }
+    }
+
     public func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
             try MarkdownNativeWriter(owner: self).write(ref: ref, markdown: markdown, dryRun: dryRun, backup: backup, allowShared: allowShared, context: context)
@@ -1024,8 +1269,34 @@ private final class MarkdownNativeWriter {
         var table: [[String]]?
     }
 
+    fileprivate func attributed(markdown: String, note: NSManagedObject, context: NSManagedObjectContext,
+                                editor: NCBodyEditor, existing: [String: (AnyObject, String)]) throws -> (NSMutableAttributedString, Int) {
+        let lines = try parse(markdown)
+        var tableIDs: [String] = []
+        for line in lines {
+            if let rows = line.table { tableIDs.append(try editor.addTable(rows.map { $0.joined(separator: "\t") }.joined(separator: "\n"))) }
+        }
+        var tableIndex = 0
+        let built = NSMutableAttributedString()
+        for (index, line) in lines.enumerated() {
+            let style = try NCNotesRuntime.paragraphStyle(line.style.number, indent: line.indent,
+                                                          quote: line.style == .blockquote ? 1 : 0,
+                                                          checked: line.done.map { $0 ? 1 : 0 } ?? -1, basedOn: nil)
+            if line.table != nil {
+                let id = tableIDs[tableIndex]; tableIndex += 1
+                let marker = try NCNotesRuntime.attachmentMarker(id: id, type: "com.apple.notes.table")
+                built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("TTStyle"): style, .init("NSAttachment"): marker]))
+            } else {
+                built.append(try inline(line.text, style: style, note: note, context: context, existing: existing))
+            }
+            if index < lines.count - 1 { built.append(NSAttributedString(string: "\n", attributes: [.init("TTStyle"): style])) }
+        }
+        return (built, lines.count)
+    }
+
     func write(ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool, context: NSManagedObjectContext) throws -> NativeWriteResult {
         let lines = try parse(markdown), note = try owner.note(ref, in: context)
+        let preservedIDs = attachmentReferences(markdown)
         try owner.guardWritable(note, allowShared: allowShared); try owner.refreshIfStale(note)
         if backup { try makeBackup(ref: owner.id(note)) }
         if dryRun {
@@ -1034,7 +1305,6 @@ private final class MarkdownNativeWriter {
         do {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["delete", "insert"])
             let existing = owner.attachmentMarkers(editor.original)
-            let preservedIDs = attachmentReferences(markdown)
             guard Set(preservedIDs).count == preservedIDs.count else { throw NotesError("duplicate_attachment_reference", "Each notescli-attachment ID may appear once.") }
             let existingGroups = Dictionary(grouping: existing, by: { $0.2 })
             guard existingGroups.values.allSatisfy({ $0.count == 1 }) else { throw NotesError("attachment_placement_mismatch", "An existing attachment has more than one placement; nothing was saved.") }
@@ -1046,29 +1316,20 @@ private final class MarkdownNativeWriter {
                     throw NotesError("attachment_would_be_lost", "Markdown omitted attachment \(owner.id(attachment)); nothing was saved.")
                 }
             }
-            var tableIDs: [String] = []
-            for line in lines { if let rows = line.table { tableIDs.append(try editor.addTable(rows.map { $0.joined(separator: "\t") }.joined(separator: "\n"))) } }
-            var tableIndex = 0
-            let built = NSMutableAttributedString()
-            for (index, line) in lines.enumerated() {
-                let style = try NCNotesRuntime.paragraphStyle(line.style.number, indent: line.indent,
-                                                              quote: line.style == .blockquote ? 1 : 0,
-                                                              checked: line.done.map { $0 ? 1 : 0 } ?? -1, basedOn: nil)
-                if let _ = line.table {
-                    let id = tableIDs[tableIndex]; tableIndex += 1
-                    let marker = try NCNotesRuntime.attachmentMarker(id: id, type: "com.apple.notes.table")
-                    built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("TTStyle"): style, .init("NSAttachment"): marker]))
-                } else {
-                    built.append(try inline(line.text, style: style, note: note, context: context, existing: existingByID))
-                }
-                if index < lines.count - 1 { built.append(NSAttributedString(string: "\n", attributes: [.init("TTStyle"): style])) }
-            }
+            let built = try attributed(markdown: markdown, note: note, context: context, editor: editor, existing: existingByID).0
             try editor.begin(["delete", "insert"]); try editor.delete(NSRange(location: 0, length: editor.original.length)); try editor.insert(built, at: 0); try editor.finish()
             try owner.save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? owner.nativeError(error) }
         let nativeBody = try owner.body(try owner.note(owner.id(note), in: context))
-        return owner.result(owner.id(note), native: ["utf16Length": "\(nativeBody.length)", "paragraphs": "\(lines.count)"],
-                            sqlite: { n in n.document?.text.utf16.count == nativeBody.length ? ["utf16Length": "\(nativeBody.length)", "hasChecklist": "\(n.summary.hasChecklist)"] : nil })
+        let nativeMarkers = owner.attachmentMarkers(nativeBody).map(\.2)
+        let nativeVerified = preservedIDs.allSatisfy { id in nativeMarkers.filter { $0 == id }.count == 1 }
+        return owner.result(owner.id(note), native: ["utf16Length": "\(nativeBody.length)", "paragraphs": "\(lines.count)", "preservedAttachments": "\(preservedIDs.count)"],
+                            nativeVerified: nativeVerified, sqlite: { n in
+            guard n.document?.text == nativeBody.string else { return nil }
+            let readbackIDs = n.document?.runs.compactMap { $0.attachment?.id } ?? []
+            guard preservedIDs.allSatisfy({ id in readbackIDs.filter { $0 == id }.count == 1 }) else { return nil }
+            return ["utf16Length": "\(nativeBody.length)", "hasChecklist": "\(n.summary.hasChecklist)", "preservedAttachments": "\(preservedIDs.count)"]
+        })
     }
 
     fileprivate func makeBackup(ref: String) throws {
@@ -1083,7 +1344,7 @@ private final class MarkdownNativeWriter {
     }
 
     fileprivate func attachmentReferences(_ markdown: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: #"!\[[^\]]*\]\(notescli-attachment:([A-Za-z0-9_-]+)\)"#) else { return [] }
+        guard let regex = try? NSRegularExpression(pattern: #"!?\[[^\]]*\]\(<?notescli-attachment:([A-Za-z0-9_-]+)>?\)"#) else { return [] }
         let source = markdown as NSString
         return regex.matches(in: markdown, range: NSRange(location: 0, length: source.length)).map { source.substring(with: $0.range(at: 1)) }
     }
@@ -1130,7 +1391,7 @@ private final class MarkdownNativeWriter {
     fileprivate func inline(_ text: String, style: Any, note: NSManagedObject, context: NSManagedObjectContext,
                         existing: [String: (AnyObject, String)]) throws -> NSAttributedString {
         let output = NSMutableAttributedString(), source = text as NSString
-        let pattern = #"!\[[^\]]*\]\(notescli-attachment:([^)]+)\)|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|~~([^~]+)~~|<u>(.*?)</u>|\*([^*]+)\*"#
+        let pattern = #"!?\[[^\]]*\]\(<?notescli-attachment:([A-Za-z0-9_-]+)>?\)|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|~~([^~]+)~~|<u>(.*?)</u>|\*([^*]+)\*"#
         let regex = try NSRegularExpression(pattern: pattern), matches = regex.matches(in: text, range: NSRange(location: 0, length: source.length))
         var cursor = 0
         func append(_ value: String, _ extra: [NSAttributedString.Key: Any] = [:]) { var attrs: [NSAttributedString.Key: Any] = [.init("TTStyle"): style]; attrs.merge(extra) { _, new in new }; output.append(NSAttributedString(string: value, attributes: attrs)) }

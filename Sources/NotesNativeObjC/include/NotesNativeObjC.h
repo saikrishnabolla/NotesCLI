@@ -10,6 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSDictionary<NSString *, id> *)doctor;
 + (nullable NSManagedObjectContext *)sharedContext:(NSError **)error NS_SWIFT_NAME(sharedContext());
 + (nullable NSAttributedString *)bodyOfNote:(NSManagedObject *)note error:(NSError **)error NS_SWIFT_NAME(body(of:));
++ (nullable NSManagedObject *)newNoteInFolder:(NSManagedObject *)folder error:(NSError **)error NS_SWIFT_NAME(newNote(in:));
 + (nullable id)valueForKey:(NSString *)key ofObject:(id)object;
 + (BOOL)setValue:(nullable id)value forKey:(NSString *)key ofObject:(id)object error:(NSError **)error
     NS_SWIFT_NAME(setValue(_:forKey:of:));
@@ -27,6 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSString *)addFile:(NSURL *)file toNote:(NSManagedObject *)note title:(NSString *)title
                            type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
     NS_SWIFT_NAME(addFile(_:to:title:type:));
++ (nullable NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note
+                          type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
+    NS_SWIFT_NAME(addURL(_:to:type:));
 + (BOOL)setPreferredImageSize:(NSString *)size attachment:(NSManagedObject *)attachment error:(NSError **)error
     NS_SWIFT_NAME(setPreferredImageSize(_:attachment:));
 + (BOOL)renameTag:(NSManagedObject *)tag to:(NSString *)name error:(NSError **)error NS_SWIFT_NAME(renameTag(_:to:));
@@ -36,6 +40,11 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)setPinned:(BOOL)pinned note:(NSManagedObject *)note error:(NSError **)error NS_SWIFT_NAME(setPinned(_:note:));
 + (BOOL)moveFolder:(NSManagedObject *)folder parent:(nullable NSManagedObject *)parent error:(NSError **)error
     NS_SWIFT_NAME(moveFolder(_:parent:));
++ (nullable NSString *)createSmartFolder:(NSString *)name tags:(NSArray<NSManagedObject *> *)tags matchAll:(BOOL)matchAll
+                                  account:(NSManagedObject *)account error:(NSError **)error
+    NS_SWIFT_NAME(createSmartFolder(_:tags:matchAll:account:));
++ (BOOL)renameFolder:(NSManagedObject *)folder name:(NSString *)name error:(NSError **)error
+    NS_SWIFT_NAME(renameFolder(_:name:));
 + (nullable NSManagedObject *)duplicateNote:(NSManagedObject *)note folder:(NSManagedObject *)folder error:(NSError **)error
     NS_SWIFT_NAME(duplicateNote(_:folder:));
 + (BOOL)saveContext:(NSManagedObjectContext *)context error:(NSError **)error NS_SWIFT_NAME(save(_:));

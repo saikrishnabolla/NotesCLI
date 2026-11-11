@@ -16,6 +16,7 @@ public struct MCPNativeResult {
 }
 
 public typealias MCPNativeHandler = (_ tool: String, _ arguments: [String: Any]) throws -> MCPNativeResult
+public typealias MCPSyncWaiter = (_ noteID: String, _ modifiedAfter: Date, _ timeout: TimeInterval) throws -> Bool
 
 public final class MCPServer {
     public let reader: any NotesReading
@@ -26,17 +27,19 @@ public final class MCPServer {
     public static let versions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
     private let nativeHandler: MCPNativeHandler?
+    private let syncWaiter: MCPSyncWaiter?
     private let writeFolders: String?
     private let stateRoot: URL
 
     public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false,
-                allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil,
+                allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil, syncWaiter: MCPSyncWaiter? = nil,
                 writeFolders: String? = nil, stateRoot: URL? = nil) {
         self.reader = reader
         self.writer = writer
         self.readOnly = readOnly
         self.allowNative = allowNative
         self.nativeHandler = nativeHandler
+        self.syncWaiter = syncWaiter
         self.writeFolders = writeFolders
         self.stateRoot = stateRoot ?? FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-" + UUID().uuidString)
     }
@@ -60,7 +63,8 @@ public final class MCPServer {
         let rows: [String: Any] = ["type": "array", "items": ["type": "array", "items": string]]
         let page = ["offset": integer, "limit": integer]
         let writeCommon = ["dry_run": bool, "idempotency_key": string, "if_modified": string,
-                           "expect_revision": string, "write_folders": string, "allow_attachment_loss": bool]
+                           "expect_revision": string, "write_folders": string, "allow_attachment_loss": bool,
+                           "allow_shared": bool, "wait_sync": bool, "sync_timeout": ["type": "number", "minimum": 0]]
         func t(_ name: String, _ description: String, _ required: [String] = [], _ properties: [String: [String: Any]] = [:],
                write: Bool = false, native: Bool = false, destructive: Bool = false) -> Tool {
             Tool(name: name, description: description, write: write, native: native, destructive: destructive,
@@ -104,7 +108,7 @@ public final class MCPServer {
             t("file_diff", "Compare one Markdown file with its note and stored merge base.", ["path"], ["path": string]),
             // MARK: w3-export end
             t("sync_notes", "Run one two-way Markdown folder sync pass.", ["directory", "folder"], ["directory": string, "folder": string, "propagate_deletes": bool], write: true, destructive: true),
-            t("create_note", "Create a note from Markdown.", ["title", "body"], ["title": string, "body": string, "folder": string], write: true),
+            t("create_note", "Create a note from Markdown.", ["title", "body"], ["title": string, "body": string, "folder": string, "attachments": strings], write: true),
             t("append_to_note", "Append Markdown to a note.", ["ref", "body"], ["ref": string, "body": string], write: true),
             t("prepend_to_note", "Prepend Markdown while preserving supported rich content.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true),
             t("update_note", "Replace a note body.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true),
@@ -124,6 +128,13 @@ public final class MCPServer {
         ]
         if allowNative {
             values += [
+                // MARK: w3-write begin
+                t("attach_pasteboard", "Attach the frozen pasteboard bytes to a note.", ["ref"], ["ref": string, "position": integer, "view": string], write: true, native: true),
+                t("add_url", "Add a URL link or native preview card.", ["ref", "url"], ["ref": string, "url": string, "card": bool, "position": integer], write: true, native: true),
+                t("smart_folder_create", "Create a tag-based Smart Folder.", ["name", "tags", "match"], ["name": string, "tags": strings, "match": ["type": "string", "enum": ["any", "all"]]], write: true, native: true),
+                t("smart_folder_rename", "Rename one Smart Folder after an expected-count check.", ["ref", "name", "expected_count"], ["ref": string, "name": string, "expected_count": integer], write: true, native: true),
+                t("smart_folder_delete", "Delete one Smart Folder after an expected-count check.", ["ref", "expected_count"], ["ref": string, "expected_count": integer], write: true, native: true, destructive: true),
+                // MARK: w3-write end
                 t("checklist_list", "List native checklist items.", ["ref"], ["ref": string], native: true),
                 t("checklist_add", "Add a native checklist item.", ["ref", "text"], ["ref": string, "text": string, "position": integer], write: true, native: true),
                 t("checklist_toggle", "Toggle a native checklist item.", ["ref"], ["ref": string, "index": integer, "text": string, "done": bool], write: true, native: true),
@@ -289,6 +300,11 @@ public final class MCPServer {
         func b(_ key: String) -> Bool { a[key] as? Bool ?? false }
         func i(_ key: String, _ fallback: Int = 0) -> Int { (a[key] as? NSNumber)?.intValue ?? fallback }
         let offset = i("offset"), limit = max(1, i("limit", 100))
+        // MARK: w3-write begin
+        if allowNative && ((tool.name == "create_note" && a["attachments"] != nil) || ["update_note", "write_markdown"].contains(tool.name)) {
+            return try callNative(tool, a)
+        }
+        // MARK: w3-write end
         if tool.native { return try callNative(tool, a) }
         if tool.write && b("dry_run") && ["save_attachment", "export_notes"].contains(tool.name) {
             return try content(["dry_run": true, "tool": tool.name, "engine": "filesystem", "arguments": a, "message": "No changes made."])
@@ -486,10 +502,27 @@ public final class MCPServer {
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
         }
+        if ["smart_folder_create", "smart_folder_rename", "smart_folder_delete"].contains(tool.name) {
+            var dispatch = arguments
+            var paths: [[String]] = []
+            if tool.name == "smart_folder_create" { paths = [[arguments["name"] as! String]] }
+            else {
+                let target = try folder(arguments["ref"] as! String)
+                guard target.isSmartFolder else { throw NotesError("smart_folder_not_found", "No Smart Folder matches the reference.") }
+                dispatch["ref"] = target.id; paths = [target.path]
+            }
+            return try safeWrite(tool: tool, arguments: arguments, note: nil, paths: paths, engine: "native") {
+                let value = try nativeHandler(tool.name, dispatch)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
         var targetNotes: [Note] = []
         if let ref = arguments["ref"] as? String { targetNotes = [try reader.note(ref)] }
         else if let tag = arguments["tag"] as? String { targetNotes = try reader.notes(NoteQuery(tag: tag)).map { try reader.note($0.id.uuid) } }
-        let note = targetNotes.first, paths = targetNotes.map(\.summary.folderPath)
+        let note = targetNotes.first
+        var paths = targetNotes.map(\.summary.folderPath)
+        if tool.name == "create_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         var dispatchArguments = arguments
         if let note { dispatchArguments["ref"] = note.summary.id.uuid }
         if tool.name == "link_add", let target = arguments["target"] as? String {
@@ -511,6 +544,12 @@ public final class MCPServer {
         for path in paths { try allowlist.require(path) }
         if let note {
             try ConcurrencyGuard.require(note, ifModified: arguments["if_modified"] as? String, expectRevision: arguments["expect_revision"] as? String)
+            if note.summary.isShared == true {
+                guard arguments["allow_shared"] as? Bool == true else {
+                    throw NotesError("shared_write_refused", "The note is shared. Set allow_shared to confirm the write.")
+                }
+                guard engine == "native" else { throw NotesError("native_required", "Shared-note writes require MCP native mode so Notes can check write permission.") }
+            }
         }
         if arguments["dry_run"] as? Bool == true {
             var clean = arguments
@@ -534,7 +573,13 @@ public final class MCPServer {
             throw NotesError("write_outcome_unknown", "The recorded operation has an unresolved outcome.")
         }
         do {
-            let (result, details, operationID) = try action()
+            let started = Date().addingTimeInterval(-1)
+            var (result, details, operationID) = try action()
+            if arguments["wait_sync"] as? Bool == true, result.outcome == .verified,
+               let noteID = result.noteID?.uuid, !noteID.isEmpty {
+                let timeout = (arguments["sync_timeout"] as? NSNumber)?.doubleValue ?? 30
+                result.syncPending = !((try? syncWaiter?(noteID, started, timeout)) ?? false)
+            }
             let outcome = JournalOutcome(rawValue: result.outcome.rawValue) ?? .failed
             let identity = result.noteID.flatMap { $0.uuid.isEmpty ? $0.coreDataID : $0.uuid } ?? result.folderID
             try journal.finish(begun.entry.id, outcome: outcome, noteID: identity, result: result, message: result.message)

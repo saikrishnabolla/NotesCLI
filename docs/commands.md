@@ -113,18 +113,23 @@ notescli journal resolve [<operation-ids> ...]
 notescli sync <directory> --folder <folder> [--propagate-deletes] [--dry-run]
 notescli sync-daemon <directory> --folder <folder> [--interval <seconds>]
 notescli watch [--folder <folder>]
+notescli file pull <note> <path> [--dry-run]
+notescli file push <path> [--dry-run]
+notescli file diff <path>
 ```
 
 ## Export
 
 ```text
 notescli export [--out <out>] [--folder <folder>]
-                [--format markdown|html|json|ndjson|sqlite|zip]
+                [--format markdown|html|json|ndjson|sqlite|zip|pdf|docx|rtf|epub|bear|joplin|quiver]
                 [--attachments] [--embed-media] [--template <template>]
                 [--filename-template <template>] [--obsidian] [--prune]
+                [--combine] [--scans-pdf]
+                [--order display|modified|created|title]
 ```
 
-The default output directory is `notes-export`. Export reads Notes and writes local files.
+The default output directory is `notes-export`. `--combine` writes one PDF per folder. EPUB writes one book per folder. Export order defaults to Notes display order.
 
 ## Setup and diagnostics
 

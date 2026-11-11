@@ -29,7 +29,7 @@ final class ProtocolTests: XCTestCase {
             let server = MCPServer(reader: fake, writer: fake, readOnly: readOnly)
             let result = try request(server, method: "tools/list")["result"] as! [String: Any]
             let tools = result["tools"] as! [[String: Any]]
-            XCTAssertEqual(tools.count, readOnly ? 20 : 39)
+            XCTAssertEqual(tools.count, readOnly ? 21 : 42)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "delete_note" }, !readOnly)
             for tool in tools { XCTAssertEqual((tool["inputSchema"] as? [String: Any])?["type"] as? String, "object") }
             if readOnly {
@@ -38,9 +38,9 @@ final class ProtocolTests: XCTestCase {
             }
         }
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "count_notes", "get_stats", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown"])
+        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "count_notes", "get_stats", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown"])
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 70)
+        XCTAssertEqual(nativeTools.count, 73)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
         XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
@@ -127,6 +127,23 @@ final class ProtocolTests: XCTestCase {
         _ = try call(writable, "delete_note", ["ref": "Renamed"])
         _ = try call(writable, "delete_folder", ["ref": "New work"])
         XCTAssertTrue(try fake.note("Renamed").summary.isDeleted)
+    }
+    func testExportAndSingleFileTools() throws {
+        let fake = InMemoryNotes.sample(), server = MCPServer(reader: fake, writer: fake)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-export-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let exported = try structured(call(server, "export_notes", ["output": root.appendingPathComponent("epub").path, "format": "epub"]))
+        let report = try XCTUnwrap(exported["report"] as? [String: Any])
+        XCTAssertEqual((report["files"] as? [String])?.count, 1)
+
+        let path = root.appendingPathComponent("welcome.md")
+        let pulled = try structured(call(server, "file_pull", ["ref": "welcome", "path": path.path]))
+        XCTAssertEqual((pulled["report"] as? [String: Any])?["action"] as? String, "pull")
+        let diff = try structured(call(server, "file_diff", ["path": path.path]))
+        XCTAssertEqual((diff["report"] as? [String: Any])?["action"] as? String, "unchanged")
+        let dryPush = try structured(call(server, "file_push", ["path": path.path, "dry_run": true]))
+        XCTAssertEqual(dryPush["dry_run"] as? Bool, true)
     }
     func testInvalidArgumentsAndToolErrors() throws {
         let server = MCPServer(reader: InMemoryNotes.sample())

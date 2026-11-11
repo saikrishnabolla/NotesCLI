@@ -91,9 +91,18 @@ public final class MCPServer {
             t("get_raw_note", "Read decoded raw note protobuf data with paging.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
             t("related_notes", "Find notes related by links or tags.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
             t("get_write_policy", "Show read-only, native, and write-folder policy."),
+            // MARK: w3-export begin
             t("export_notes", "Export notes with optional templates and attachments.", ["output"], ["output": string, "folder": string,
-                "format": ["type": "string", "enum": ["markdown", "html", "json", "ndjson", "sqlite", "zip"]],
-                "template": string, "filename_template": string, "include_attachments": bool, "embed_media": bool, "obsidian": bool, "prune": bool], write: true),
+                "format": ["type": "string", "enum": ["markdown", "html", "json", "ndjson", "sqlite", "zip", "pdf", "docx", "rtf", "epub", "bear", "joplin", "quiver"]],
+                "template": string, "filename_template": string, "include_attachments": bool, "embed_media": bool,
+                "obsidian": bool, "prune": bool, "combine": bool, "scans_pdf": bool,
+                "order": ["type": "string", "enum": ["display", "modified", "created", "title"]]], write: true),
+            t("file_pull", "Pull one note into a Markdown file with a three-way merge base.", ["ref", "path"],
+              ["ref": string, "path": string, "dry_run": bool], write: true),
+            t("file_push", "Push one Markdown file identified by notes-id with three-way merge safety.", ["path"],
+              ["path": string, "dry_run": bool], write: true, destructive: true),
+            t("file_diff", "Compare one Markdown file with its note and stored merge base.", ["path"], ["path": string]),
+            // MARK: w3-export end
             t("sync_notes", "Run one two-way Markdown folder sync pass.", ["directory", "folder"], ["directory": string, "folder": string, "propagate_deletes": bool], write: true, destructive: true),
             t("create_note", "Create a note from Markdown.", ["title", "body"], ["title": string, "body": string, "folder": string], write: true),
             t("append_to_note", "Append Markdown to a note.", ["ref", "body"], ["ref": string, "body": string], write: true),
@@ -371,12 +380,36 @@ public final class MCPServer {
             let related = candidates.filter { !tagSet.isDisjoint(with: $0.tags) || backlinks.contains($0) }
             var result = try page(related, offset: offset, limit: limit) { try NotePresentation.object($0) }; result["notes"] = result.removeValue(forKey: "items")
             return try content(result)
+        // MARK: w3-export begin
         case "export_notes":
             let format = NotesExportFormat(rawValue: s("format") ?? "markdown") ?? .markdown
+            let order = NotesExportOrder(rawValue: s("order") ?? "display") ?? .display
             let report = try NotesExporter(reader: reader).run(ExportOptions(output: URL(fileURLWithPath: s("output")!), folder: s("folder"), format: format,
                 includeAttachments: a["include_attachments"] as? Bool ?? true, embedMedia: b("embed_media"), template: s("template"),
-                filenameTemplate: s("filename_template"), obsidian: b("obsidian"), prune: b("prune")))
+                filenameTemplate: s("filename_template"), obsidian: b("obsidian"), prune: b("prune"), combine: b("combine"),
+                scansPDF: b("scans_pdf"), order: order))
             return try content(["engine": "filesystem", "report": NotePresentation.object(report)])
+        case "file_pull":
+            let report = try SingleFileSync(reader: reader, writer: nil).pull(note: s("ref")!, to: URL(fileURLWithPath: s("path")!), dryRun: b("dry_run"))
+            return try content(["engine": "filesystem", "report": NotePresentation.object(report)])
+        case "file_diff":
+            let report = try SingleFileSync(reader: reader, writer: nil).diff(URL(fileURLWithPath: s("path")!))
+            return try content(["engine": "filesystem", "report": NotePresentation.object(report)])
+        case "file_push":
+            let path = URL(fileURLWithPath: s("path")!)
+            if b("dry_run") {
+                let report = try SingleFileSync(reader: reader, writer: nil).push(from: path, dryRun: true)
+                return try content(["engine": "scripting", "dry_run": true, "report": NotePresentation.object(report)])
+            }
+            guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }
+            let markdown = MarkdownFile.parse(try String(contentsOf: path, encoding: .utf8), fallbackTitle: path.deletingPathExtension().lastPathComponent)
+            guard let noteID = markdown.noteID else { throw NotesError("invalid_file", "The Markdown file must contain notes-id front matter.") }
+            let note = try reader.note(noteID), paths = [note.summary.folderPath]
+            return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting", snapshotNotes: [note]) {
+                let report = try SingleFileSync(reader: reader, writer: writer).push(from: path)
+                return (WriteResult(outcome: .verified, noteID: note.summary.id, message: report.message), try NotePresentation.object(report), nil)
+            }
+        // MARK: w3-export end
         case "sync_notes":
             guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }
             let folder = s("folder")!, paths = try folderPaths(folder)

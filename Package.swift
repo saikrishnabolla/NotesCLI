@@ -31,6 +31,8 @@ let package = Package(
         .target(name: "NotesSync", dependencies: ["NotesCore"], linkerSettings: [
             .linkedLibrary("sqlite3"),
             .linkedFramework("CoreServices"),
+            .linkedFramework("AppKit"),
+            .linkedFramework("PDFKit"),
         ]),
         .executableTarget(name: "notescli", dependencies: [
             "NotesCore", "NotesStore", "NotesIndex", "NotesAutomation", "NotesNative", "NotesMCP", "NotesSync", "NotesSafety",

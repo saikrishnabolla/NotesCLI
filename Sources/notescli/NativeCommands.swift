@@ -10,13 +10,14 @@ struct EngineWriteResponse: Encodable {
     var engine: String
     var result: WriteResult
     var operationID: String? = nil
+    var syncPending: Bool? = nil
     var verification: NativeVerification? = nil
     var details: [String: String]? = nil
 }
 
 private struct EngineReadResponse<T: Encodable>: Encodable { var engine: String; var result: T }
 
-private struct NativeActionResult {
+struct NativeActionResult {
     var result: WriteResult
     var operationID: String?
     var verification: NativeVerification?
@@ -26,12 +27,16 @@ private struct NativeActionResult {
     }
     init(_ value: NativeAttachmentResult) {
         result = value.write.writeResult; operationID = value.write.operationID; verification = value.write.verification
-        details = ["attachment_id": value.attachmentID, "type_uti": value.typeUTI, "position": String(value.position)]
+        details = ["attachment_id": value.attachmentID, "type_uti": value.typeUTI, "position": String(value.position),
+                   "source_sha256": value.sourceSHA256 ?? "", "stored_sha256": value.storedSHA256 ?? ""]
     }
     init(_ value: WriteResult) { result = value; operationID = nil; verification = nil; details = nil }
 }
 
-func outputEngineWrite(_ response: EngineWriteResponse, options: GlobalOptions) throws {
+func outputEngineWrite(_ input: EngineWriteResponse, options: GlobalOptions) throws {
+    var response = input
+    response.operationID = response.operationID ?? response.result.operationID
+    response.syncPending = response.syncPending ?? response.result.syncPending
     if response.result.outcome == .unknown {
         if options.json { try Output.json(response) }
         let operation = response.operationID.map { " Native operation ID: \($0)." } ?? ""
@@ -42,7 +47,7 @@ func outputEngineWrite(_ response: EngineWriteResponse, options: GlobalOptions) 
         response.result.noteID?.uuid ?? response.result.folderID ?? "", response.result.message ?? ""]]) }
 }
 
-private enum UnifiedNative {
+enum UnifiedNative {
     static func nativeAvailable() -> Bool {
         let report = NativeNotesWriter().doctor()
         return report.frameworkLoaded && report.error == nil && report.missing.isEmpty
@@ -120,39 +125,39 @@ private enum UnifiedNative {
 
     static func checklistAdd(_ o: GlobalOptions, _ w: WriteOptions, ref: String, text: String, position: Int?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "checklistAdd", arguments: ["text": text, "position": position.map(String.init) ?? ""]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().insertChecklist(stableRef, text: text, position: position, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().insertChecklist(stableRef, text: text, position: position, allowShared: w.allowShared))
         }
     }
     static func checklistToggle(_ o: GlobalOptions, _ w: WriteOptions, ref: String, index: Int?, text: String?, done: Bool?) throws {
         let selection: ChecklistSelection
         if let index { selection = .index(index) } else { selection = .text(try required(text, "--text or --index")) }
         try noteWrite(options: o, write: w, ref: ref, operation: "checklistToggle", arguments: ["index": index.map(String.init) ?? "", "text": text ?? "", "done": done.map(String.init) ?? ""]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().toggleChecklist(stableRef, selection: selection, done: done, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().toggleChecklist(stableRef, selection: selection, done: done, allowShared: w.allowShared))
         }
     }
     static func checklistAll(_ o: GlobalOptions, _ w: WriteOptions, ref: String, done: Bool) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: done ? "checklistCheckAll" : "checklistUncheckAll", arguments: [:]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().setAllChecklist(stableRef, done: done, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().setAllChecklist(stableRef, done: done, allowShared: w.allowShared))
         }
     }
     static func checklistClear(_ o: GlobalOptions, _ w: WriteOptions, ref: String) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "checklistClearDone", arguments: [:]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().deleteCompleted(stableRef, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().deleteCompleted(stableRef, allowShared: w.allowShared))
         }
     }
     static func pin(_ o: GlobalOptions, _ w: WriteOptions, ref: String, pinned: Bool) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: pinned ? "pinNote" : "unpinNote", arguments: [:]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().setPinned(stableRef, pinned: pinned, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().setPinned(stableRef, pinned: pinned, allowShared: w.allowShared))
         }
     }
     static func tagAdd(_ o: GlobalOptions, _ w: WriteOptions, ref: String, tag: String, position: Int?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "tagAdd", arguments: ["tag": tag, "position": position.map(String.init) ?? ""]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().addTag(stableRef, tag: tag, position: position, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().addTag(stableRef, tag: tag, position: position, allowShared: w.allowShared))
         }
     }
     static func tagRemove(_ o: GlobalOptions, _ w: WriteOptions, ref: String, tag: String) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "tagRemove", arguments: ["tag": tag]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().removeTag(stableRef, tag: tag, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().removeTag(stableRef, tag: tag, allowShared: w.allowShared))
         }
     }
     static func tagGlobal(_ o: GlobalOptions, _ w: WriteOptions, tag: String, to: String?, expected: Int, delete: Bool) throws {
@@ -162,73 +167,73 @@ private enum UnifiedNative {
         try globalWrite(options: o, write: w, operation: delete ? "tagDelete" : "tagRename",
                         arguments: ["tag": tag, "to": to ?? "", "expected_count": String(expected)], notes: notes) {
             let writer = NativeNotesWriter()
-            return NativeActionResult(try delete ? writer.deleteTag(tag, expectedCount: expected) : writer.renameTag(tag, to: to!, expectedCount: expected))
+            return NativeActionResult(try delete ? writer.deleteTag(tag, expectedCount: expected, allowShared: w.allowShared) : writer.renameTag(tag, to: to!, expectedCount: expected, allowShared: w.allowShared))
         }
     }
     static func linkAdd(_ o: GlobalOptions, _ w: WriteOptions, ref: String, target: String, text: String?, position: Int?) throws {
         let stableTarget = try o.backends().reader.summary(target).id.uuid
         try noteWrite(options: o, write: w, ref: ref, operation: "linkAdd", arguments: ["target": stableTarget, "text": text ?? "", "position": position.map(String.init) ?? ""]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().insertNoteLink(stableRef, target: stableTarget, text: text, position: position, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().insertNoteLink(stableRef, target: stableTarget, text: text, position: position, allowShared: w.allowShared))
         }
     }
     static func textEdit(_ o: GlobalOptions, _ w: WriteOptions, ref: String, operation: String, start: Int, length: Int, text: String?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: operation, arguments: ["start": String(start), "length": String(length), "text": text ?? ""]) { stableRef in
             let writer = NativeNotesWriter(), range = UTF16Range(location: start, length: length)
-            if operation == "textInsert" { return NativeActionResult(try writer.insertText(stableRef, text: text!, position: start, allowShared: false)) }
-            if operation == "textDelete" { return NativeActionResult(try writer.deleteRange(stableRef, range: range, allowShared: false)) }
-            return NativeActionResult(try writer.replaceRange(stableRef, range: range, text: text!, allowShared: false))
+            if operation == "textInsert" { return NativeActionResult(try writer.insertText(stableRef, text: text!, position: start, allowShared: w.allowShared)) }
+            if operation == "textDelete" { return NativeActionResult(try writer.deleteRange(stableRef, range: range, allowShared: w.allowShared)) }
+            return NativeActionResult(try writer.replaceRange(stableRef, range: range, text: text!, allowShared: w.allowShared))
         }
     }
     static func paragraphFormat(_ o: GlobalOptions, _ w: WriteOptions, ref: String, start: Int, length: Int, style: NativeParagraphStyle, indent: Int?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "formatParagraph", arguments: ["start": String(start), "length": String(length), "style": style.rawValue]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().setParagraphStyle(stableRef, range: UTF16Range(location: start, length: length), style: style, indent: indent, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().setParagraphStyle(stableRef, range: UTF16Range(location: start, length: length), style: style, indent: indent, allowShared: w.allowShared))
         }
     }
     static func inlineFormat(_ o: GlobalOptions, _ w: WriteOptions, ref: String, start: Int, length: Int, format: InlineFormat) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "formatInline", arguments: ["start": String(start), "length": String(length)]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().setInlineFormat(stableRef, range: UTF16Range(location: start, length: length), format: format, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().setInlineFormat(stableRef, range: UTF16Range(location: start, length: length), format: format, allowShared: w.allowShared))
         }
     }
     static func attach(_ o: GlobalOptions, _ w: WriteOptions, ref: String, path: String, position: Int?, view: String?) throws {
         let url = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath).standardizedFileURL
         try noteWrite(options: o, write: w, ref: ref, operation: "attachFile", arguments: ["path": url.path, "position": position.map(String.init) ?? "", "view": view ?? ""]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().insertFile(stableRef, file: url, position: position, imageView: view, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().insertFile(stableRef, file: url, position: position, imageView: view, allowShared: w.allowShared))
         }
     }
     static func attachmentDelete(_ o: GlobalOptions, _ w: WriteOptions, ref: String, id: String) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "attachmentDelete", arguments: ["attachment_id": id]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().deleteAttachment(stableRef, attachmentID: id, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().deleteAttachment(stableRef, attachmentID: id, allowShared: w.allowShared))
         }
     }
     static func tableCreate(_ o: GlobalOptions, _ w: WriteOptions, ref: String, rows: [[String]], position: Int?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "tableCreate", arguments: ["rows": String(data: try JSONEncoder().encode(rows), encoding: .utf8)!]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().createTable(stableRef, rows: rows, position: position, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().createTable(stableRef, rows: rows, position: position, allowShared: w.allowShared))
         }
     }
     static func tableSet(_ o: GlobalOptions, _ w: WriteOptions, ref: String, id: String, row: Int, column: Int, text: String) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "tableSet", arguments: ["attachment_id": id, "row": String(row), "column": String(column), "text": text]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().editTable(stableRef, attachmentID: id, row: row, column: column, text: text, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().editTable(stableRef, attachmentID: id, row: row, column: column, text: text, allowShared: w.allowShared))
         }
     }
     static func tableResize(_ o: GlobalOptions, _ w: WriteOptions, ref: String, id: String, axis: String, index: Int, add: Bool) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "table\(add ? "Add" : "Remove")\(axis.capitalized)", arguments: ["attachment_id": id, "index": String(index)]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().resizeTable(stableRef, attachmentID: id, axis: axis, index: index, add: add, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().resizeTable(stableRef, attachmentID: id, axis: axis, index: index, add: add, allowShared: w.allowShared))
         }
     }
     static func duplicate(_ o: GlobalOptions, _ w: WriteOptions, ref: String, title: String?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "duplicateNote", arguments: ["title": title ?? ""]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().duplicate(stableRef, title: title, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().duplicate(stableRef, title: title, allowShared: w.allowShared))
         }
     }
     static func restore(_ o: GlobalOptions, _ w: WriteOptions, ref: String, folder: String?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "restoreNote", arguments: ["folder": folder ?? ""], native: { stableRef in
-            NativeActionResult(try NativeNotesWriter().restore(stableRef, folder: folder, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().restore(stableRef, folder: folder, allowShared: w.allowShared))
         })
     }
     static func writeMarkdown(_ o: GlobalOptions, _ w: WriteOptions, ref: String, body: String, backup: Bool) throws {
         let backend = try o.backends()
         try noteWrite(options: o, write: w, ref: ref, operation: "writeMarkdown", arguments: ["body": body, "backup": String(backup)], native: { stableRef in
-            NativeActionResult(try NativeNotesWriter().writeMarkdown(stableRef, markdown: body, dryRun: false, backup: backup, allowShared: false))
+            NativeActionResult(try NativeNotesWriter().writeMarkdown(stableRef, markdown: body, dryRun: false, backup: backup, allowShared: w.allowShared))
         }, scripting: { stableRef in try backend.writer().replaceBody(stableRef, markdown: body, allowAttachmentLoss: w.allowAttachmentLoss) })
     }
 }
@@ -246,7 +251,7 @@ func unifiedNativeFolderMove(options: GlobalOptions, write: WriteOptions, ref: S
     let result = try SafetyExecutor.run(options: write, operation: "moveFolder", arguments: ["ref": source.id, "parent": destination?.id ?? "", "engine": "native", "stable_id": source.id, "stable_parent_id": destination?.id ?? ""],
         allowedPaths: [source.path, targetPath], plan: plan) {
             for note in notes { _ = try SnapshotStore().save(note) }
-            let value = NativeActionResult(try NativeNotesWriter().moveFolder(source.id, parent: destination?.id, allowShared: false))
+            let value = NativeActionResult(try NativeNotesWriter().moveFolder(source.id, parent: destination?.id, allowShared: write.allowShared))
             captured = value
             return value.result
         }
@@ -333,7 +338,7 @@ struct TagDelete: ParsableCommand {
     func run() throws { try UnifiedNative.tagGlobal(options, write, tag: tag, to: nil, expected: expectedCount, delete: true) }
 }
 
-struct LinkCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "link", subcommands: [LinkAdd.self, LinkList.self]) }
+struct LinkCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "link", subcommands: [LinkAdd.self, LinkAddURL.self, LinkList.self]) }
 struct LinkAdd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "add")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var target: String; @Option var text: String?; @Option var position: Int?
@@ -391,8 +396,11 @@ struct FormatInline: ParsableCommand {
 struct AttachCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "attach")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
-    @Argument var ref: String; @Argument var path: String; @Option var position: Int?; @Option var view: String?
-    func run() throws { try UnifiedNative.attach(options, write, ref: ref, path: path, position: position, view: view) }
+    @Argument var ref: String; @Argument var path: String?; @Flag var pasteboard = false; @Option var position: Int?; @Option var view: String?
+    func validate() throws {
+        guard (path != nil) != pasteboard else { throw ValidationError("Provide either FILE or --pasteboard.") }
+    }
+    func run() throws { try writeExtraAttach(options: options, write: write, ref: ref, path: path, pasteboard: pasteboard, position: position, view: view) }
 }
 struct AttachmentCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "attachment", subcommands: [AttachmentDelete.self]) }
 struct AttachmentDelete: ParsableCommand {
@@ -445,9 +453,8 @@ struct NativeChecklist: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-checklist", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var action: LegacyChecklistAction; @Argument var ref: String
-    @Option var text: String?; @Option var index: Int?; @Option var position: Int?; @Option var done: Bool?; @Flag var allowShared = false
+    @Option var text: String?; @Option var index: Int?; @Option var position: Int?; @Option var done: Bool?
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         switch action {
         case .list:
             try UnifiedNative.requireNative(options)
@@ -467,9 +474,8 @@ struct NativeTag: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-tag", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var action: LegacyTagAction; @Argument var tag: String; @Option var ref: String?; @Option(name: .customLong("to")) var newName: String?
-    @Option var position: Int?; @Option var expectedCount: Int?; @Flag var allowShared = false
+    @Option var position: Int?; @Option var expectedCount: Int?
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         switch action {
         case .add: try UnifiedNative.tagAdd(options, write, ref: try required(ref, "--ref"), tag: tag, position: position)
         case .remove: try UnifiedNative.tagRemove(options, write, ref: try required(ref, "--ref"), tag: tag)
@@ -482,9 +488,8 @@ enum LegacyLinkAction: String, ExpressibleByArgument { case add, list, backlinks
 struct NativeLink: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-link", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
-    @Argument var action: LegacyLinkAction; @Argument var ref: String; @Option var target: String?; @Option var text: String?; @Option var position: Int?; @Flag var allowShared = false
+    @Argument var action: LegacyLinkAction; @Argument var ref: String; @Option var target: String?; @Option var text: String?; @Option var position: Int?
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         switch action {
         case .add: try UnifiedNative.linkAdd(options, write, ref: ref, target: try required(target, "--target"), text: text, position: position)
         case .list:
@@ -499,9 +504,8 @@ struct NativeText: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-text", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var action: LegacyTextAction; @Argument var ref: String; @Option var text: String?; @Option var position: Int?; @Option var start: Int?; @Option var length: Int?
-    @Flag var caseInsensitive = false; @Flag var allowShared = false
+    @Flag var caseInsensitive = false
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         switch action {
         case .insert: try UnifiedNative.textEdit(options, write, ref: ref, operation: "textInsert", start: try required(position, "--position"), length: 0, text: try required(text, "--text"))
         case .delete: try UnifiedNative.textEdit(options, write, ref: ref, operation: "textDelete", start: try required(start, "--start"), length: try required(length, "--length"), text: nil)
@@ -518,9 +522,8 @@ struct NativeFormat: ParsableCommand {
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var action: LegacyFormatAction; @Argument var ref: String; @Option var start: Int; @Option var length: Int; @Option var style: NativeParagraphStyle?; @Option var indent: Int?
     @Option var bold: Bool?; @Option var italic: Bool?; @Option var underline: Bool?; @Option var strike: Bool?; @Option var link: String?; @Option var color: String?
-    @Flag var clearLink = false; @Flag var clearColor = false; @Flag var allowShared = false
+    @Flag var clearLink = false; @Flag var clearColor = false
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         switch action {
         case .paragraph: try UnifiedNative.paragraphFormat(options, write, ref: ref, start: start, length: length, style: try required(style, "--style"), indent: indent)
         case .inline: try UnifiedNative.inlineFormat(options, write, ref: ref, start: start, length: length, format: InlineFormat(bold: bold, italic: italic, underline: underline, strike: strike, link: link, clearLink: clearLink, color: color, clearColor: clearColor))
@@ -531,9 +534,8 @@ enum LegacyAttachmentAction: String, ExpressibleByArgument { case image, file, d
 struct NativeAttachment: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-attachment", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
-    @Argument var action: LegacyAttachmentAction; @Argument var ref: String; @Option var path: String?; @Option var attachmentID: String?; @Option var position: Int?; @Option var view: String?; @Flag var allowShared = false
+    @Argument var action: LegacyAttachmentAction; @Argument var ref: String; @Option var path: String?; @Option var attachmentID: String?; @Option var position: Int?; @Option var view: String?
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         switch action {
         case .image: try UnifiedNative.attach(options, write, ref: ref, path: try required(path, "--path"), position: position, view: view)
         case .file: try UnifiedNative.attach(options, write, ref: ref, path: try required(path, "--path"), position: position, view: nil)
@@ -546,9 +548,8 @@ struct NativeTableCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-table", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var action: LegacyTableAction; @Argument var ref: String; @Option var rows: String?; @Option var attachmentID: String?; @Option var row: Int?; @Option var column: Int?
-    @Option var text: String?; @Option var index: Int?; @Option var position: Int?; @Flag var allowShared = false
+    @Option var text: String?; @Option var index: Int?; @Option var position: Int?
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         switch action {
         case .create: try UnifiedNative.tableCreate(options, write, ref: ref, rows: try JSONDecoder().decode([[String]].self, from: Data(try required(rows, "--rows").utf8)), position: position)
         case .edit: try UnifiedNative.tableSet(options, write, ref: ref, id: try required(attachmentID, "--attachment-id"), row: try required(row, "--row"), column: try required(column, "--column"), text: try required(text, "--text"))
@@ -562,9 +563,8 @@ struct NativeDuplicate: ParsableCommand { static let configuration = CommandConf
 struct NativeRestore: ParsableCommand { static let configuration = CommandConfiguration(commandName: "native-restore", shouldDisplay: false); @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var folder: String?; func run() throws { try UnifiedNative.restore(options, write, ref: ref, folder: folder) } }
 struct NativeMoveFolder: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-move-folder", shouldDisplay: false)
-    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var parent: String?; @Flag var allowShared = false
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var parent: String?
     func run() throws {
-        guard !allowShared else { throw NotesError("shared_note_write_refused", "Shared-note native writes are disabled.") }
         try unifiedNativeFolderMove(options: options, write: write, ref: ref, parent: parent)
     }
 }

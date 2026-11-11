@@ -93,8 +93,12 @@ public struct WriteResult: Codable, Sendable {
     public var noteID: NoteID?
     public var folderID: String?
     public var message: String?
-    public init(outcome: WriteOutcome, noteID: NoteID? = nil, folderID: String? = nil, message: String? = nil) {
+    public var operationID: String?
+    public var syncPending: Bool?
+    public init(outcome: WriteOutcome, noteID: NoteID? = nil, folderID: String? = nil, message: String? = nil,
+                operationID: String? = nil, syncPending: Bool? = nil) {
         self.outcome = outcome; self.noteID = noteID; self.folderID = folderID; self.message = message
+        self.operationID = operationID; self.syncPending = syncPending
     }
 }
 

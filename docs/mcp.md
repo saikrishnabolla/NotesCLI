@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 39 tools. Read-only mode exposes the 20 read tools. `notescli mcp --allow-native` exposes 31 more tools that use Apple's private Notes framework.
+The default server exposes 39 tools. Read-only mode exposes the 20 read tools. `notescli mcp --allow-native` exposes 36 more tools that use Apple's private Notes framework.
 
 ## Tools
 
@@ -35,6 +35,8 @@ Tools added by `--allow-native`:
 checklist_list  checklist_add  checklist_toggle  checklist_check_all
 checklist_uncheck_all  checklist_clear_done  pin_note  unpin_note
 tag_add  tag_remove  tag_rename  tag_delete  link_add  link_list
+attach_pasteboard  add_url
+smart_folder_create  smart_folder_rename  smart_folder_delete
 text_find  text_insert  text_delete  text_replace
 format_paragraph  format_inline  attach_file  delete_attachment
 table_create  table_set  table_add_row  table_add_column
@@ -94,6 +96,8 @@ Use a folder named `notescli-test` and titles beginning with `notescli-test-` fo
 Every Notes write uses the folder allowlist, concurrency checks, journal, snapshots, and fresh readback. Pass `write_folders` per call or set `NOTESCLI_WRITE_FOLDERS` for the server. Read-only mode hides filesystem write tools as well as Notes write tools.
 
 Native tools stay hidden unless the server starts with `--allow-native`. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
+
+`create_note` accepts an `attachments` array in native mode. With native mode enabled, `update_note` and `write_markdown` preserve `notescli-attachment:ID` references. Write tools accept `allow_shared`, `wait_sync`, and `sync_timeout`. Shared writes require Notes write permission. A sync timeout returns `syncPending: true` without retrying the write.
 
 ## Troubleshoot
 

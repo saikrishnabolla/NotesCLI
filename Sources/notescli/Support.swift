@@ -44,7 +44,7 @@ enum Output {
         else { table(["ID", "TITLE", "FOLDER", "MODIFIED"], notes.map { [$0.id.uuid, $0.title + ($0.isLocked ? " [locked]" : ""), $0.folderPath.joined(separator: " > "), $0.modified.map { ISO8601DateFormatter().string(from: $0) } ?? ""] }) }
     }
     static func write(_ result: WriteResult, json: Bool) throws {
-        let response = EngineWriteResponse(engine: "scripting", result: result)
+        let response = EngineWriteResponse(engine: "scripting", result: result, operationID: result.operationID, syncPending: result.syncPending)
         if result.outcome == .unknown {
             if json { try Self.json(response) }
             throw NotesError("write_outcome_unknown", result.message ?? "The write may have completed. Do not retry automatically.", hint: "Read the note before retrying.")

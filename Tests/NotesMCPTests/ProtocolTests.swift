@@ -40,10 +40,51 @@ final class ProtocolTests: XCTestCase {
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
         XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "count_notes", "get_stats", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown"])
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 70)
+        XCTAssertEqual(nativeTools.count, 75)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
+        for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_delete"] {
+            XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
+        }
+        let create = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "create_note" })
+        let createProperties = ((create["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
+        XCTAssertNotNil(createProperties?["attachments"])
+        XCTAssertNotNil(createProperties?["wait_sync"])
+        XCTAssertNotNil(createProperties?["allow_shared"])
         XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
+    }
+    func testAttachmentsAndNativeMarkdownRouteThroughNativeHandler() throws {
+        let fake = InMemoryNotes.sample()
+        var calls: [(String, [String: Any])] = []
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            calls.append((tool, arguments))
+            return try MCPNativeResult(result: WriteResult(outcome: .verified, noteID: NoteID(uuid: arguments["ref"] as? String ?? "created")),
+                                       operationID: "native-operation", value: ["ok": true])
+        })
+        _ = try call(server, "create_note", ["title": "With file", "body": "Body", "folder": "Notes", "attachments": ["/tmp/file"]])
+        _ = try call(server, "update_note", ["ref": "Welcome", "body": "Changed"])
+        XCTAssertEqual(calls.map(\.0), ["create_note", "update_note"])
+        XCTAssertEqual(calls[1].1["ref"] as? String, "welcome")
+    }
+    func testSharedGuardAndSyncTimeout() throws {
+        let sample = InMemoryNotes.sample()
+        var note = try sample.note("welcome")
+        note.summary.isShared = true
+        let fake = InMemoryNotes(accounts: try sample.accounts(), folders: try sample.folders(account: nil), notes: [note])
+        var calls = 0
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { _, arguments in
+            calls += 1
+            return try MCPNativeResult(result: WriteResult(outcome: .verified, noteID: NoteID(uuid: arguments["ref"] as! String)),
+                                       operationID: "shared-native", value: ["ok": true])
+        }, syncWaiter: { _, _, _ in false })
+        let refused = try structured(call(server, "update_note", ["ref": "welcome", "body": "Changed"]))
+        XCTAssertEqual((refused["error"] as? [String: Any])?["code"] as? String, "shared_write_refused")
+        XCTAssertEqual(calls, 0)
+        let written = try structured(call(server, "update_note", ["ref": "welcome", "body": "Changed", "allow_shared": true,
+                                                                   "wait_sync": true, "sync_timeout": 0]))
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual((written["result"] as? [String: Any])?["syncPending"] as? Bool, true)
+        XCTAssertEqual(written["operationID"] as? String, "shared-native")
     }
     func testNativeWriteUsesStableIdentityAndSurfacesOperationID() throws {
         let fake = InMemoryNotes.sample()

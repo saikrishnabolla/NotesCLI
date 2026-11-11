@@ -7,7 +7,7 @@ import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, TableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, SmartFolderCommand.self, Export.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, TableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
     @OptionGroup var options: GlobalOptions
 
     static func main() {
@@ -110,10 +110,12 @@ struct Add: ParsableCommand {
     @Option var body: String?
     @Flag var stdin = false
     @Option var file: String?
+    @Option(name: .long, parsing: .upToNextOption) var attach: [String] = []
     func validate() throws { try validateBodySources(body: body, stdin: stdin, file: file, allowEditor: true) }
     func run() throws {
         let backend = try options.writable()
         let markdown = try inputBody(body: body, stdin: stdin, file: file, allowEditor: true)
+        if !attach.isEmpty { try writeExtraCreate(options: options, write: write, title: title, folder: folder, markdown: markdown, paths: attach); return }
         let targetPath = try SafetyExecutor.folderPath(folder, reader: backend.reader)
         let paths = targetPath.map { [$0] } ?? []
         let plan = DryRunPlan(operation: "createNote", target: title, arguments: ["folder": folder ?? ""], resultingHTML: SafetyExecutor.bodyHTML(title: title, markdown: markdown))
@@ -151,20 +153,7 @@ struct Edit: ParsableCommand {
     @OptionGroup var write: WriteOptions
     @Argument var ref: String
     func run() throws {
-        let backend = try options.writable(), note = try backend.reader.note(ref)
-        guard !note.summary.isLocked else { throw NotesError("note_locked", "The note is locked.") }
-        try SafetyExecutor.requireAttachmentSafety(note, allowLoss: write.allowAttachmentLoss)
-        Output.error("Warning: replacing the body may downgrade attachments and checklists.")
-        let original = try NotePresentation.render(note, format: "markdown")
-        let edited = try editor(original)
-        if edited == original { try Output.write(WriteResult(outcome: .verified, noteID: note.summary.id, message: "Unchanged; no write made."), json: options.json); return }
-        let plan = DryRunPlan(operation: "replaceBody", target: note.summary.id.uuid, arguments: [:],
-                              resultingHTML: SafetyExecutor.bodyHTML(title: note.summary.title, markdown: edited))
-        if let result = try SafetyExecutor.run(options: write, operation: "replaceBody", arguments: ["ref": note.summary.id.uuid, "body": edited],
-            note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan,
-            action: { try backend.writer().replaceBody(note.summary.id.uuid, markdown: edited, allowAttachmentLoss: write.allowAttachmentLoss) }) {
-            try Output.write(result, json: options.json)
-        }
+        try writeExtraEdit(options: options, write: write, ref: ref)
     }
 }
 struct Rename: ParsableCommand {

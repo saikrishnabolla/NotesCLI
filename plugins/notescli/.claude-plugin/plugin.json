@@ -1,0 +1,10 @@
+{
+  "name": "notescli",
+  "version": "1.0.0",
+  "description": "Read and manage Apple Notes through NotesCLI.",
+  "author": {
+    "name": "NotesCLI contributors"
+  },
+  "homepage": "https://github.com/saikrishnabolla/NotesCLI",
+  "license": "MIT"
+}

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "notescli": {
+      "type": "stdio",
+      "command": "sh",
+      "args": [
+        "-c",
+        "for cli in \"$HOME/.local/bin/notescli\" \"$HOME/bin/notescli\" /opt/homebrew/bin/notescli /usr/local/bin/notescli; do [ -x \"$cli\" ] && exec \"$cli\" mcp; done; cli=\"$(command -v notescli)\" && exec \"$cli\" mcp; echo \"notescli is not installed; install it and run notescli setup\" >&2; exit 127"
+      ]
+    }
+  }
+}

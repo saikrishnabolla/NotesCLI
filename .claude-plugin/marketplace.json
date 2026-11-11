@@ -1,0 +1,15 @@
+{
+  "name": "notescli",
+  "description": "Apple Notes tools for Claude Code",
+  "owner": {
+    "name": "NotesCLI contributors"
+  },
+  "plugins": [
+    {
+      "name": "notescli",
+      "source": "./plugins/notescli",
+      "description": "Read and manage Apple Notes through NotesCLI.",
+      "category": "productivity"
+    }
+  ]
+}

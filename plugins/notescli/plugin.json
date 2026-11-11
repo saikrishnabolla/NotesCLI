@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "notescli",
+  "version": "1.0.0",
+  "description": "Read and manage Apple Notes through NotesCLI.",
+  "author": {
+    "name": "NotesCLI contributors"
+  },
+  "homepage": "https://github.com/saikrishnabolla/NotesCLI",
+  "license": "MIT",
+  "keywords": [
+    "apple-notes",
+    "notes",
+    "macos",
+    "productivity"
+  ]
+}

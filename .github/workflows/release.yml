@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+      DEVELOPER_ID_PASSWORD: ${{ secrets.DEVELOPER_ID_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import Developer ID certificate
+        if: ${{ env.DEVELOPER_ID_P12 != '' }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/notescli.keychain-db"
+          CERTIFICATE="$RUNNER_TEMP/notescli.p12"
+          printf '%s' "$DEVELOPER_ID_P12" | base64 --decode > "$CERTIFICATE"
+          security create-keychain -p notescli "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p notescli "$KEYCHAIN"
+          security import "$CERTIFICATE" -k "$KEYCHAIN" -P "$DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k notescli "$KEYCHAIN"
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+          test -n "$IDENTITY"
+          echo "NOTESCLI_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+      - name: Use ad hoc signing when no certificate is configured
+        if: ${{ env.DEVELOPER_ID_P12 == '' }}
+        run: echo 'NOTESCLI_SIGNING_IDENTITY=-' >> "$GITHUB_ENV"
+      - name: Build release archives
+        env:
+          NOTESCLI_VERSION: ${{ github.ref_name }}
+        run: |
+          export NOTESCLI_VERSION="${NOTESCLI_VERSION#v}"
+          scripts/build-release.sh
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256

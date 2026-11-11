@@ -1,0 +1,20 @@
+{
+  "name": "notescli-local",
+  "interface": {
+    "displayName": "NotesCLI"
+  },
+  "plugins": [
+    {
+      "name": "notescli",
+      "source": {
+        "source": "local",
+        "path": "./plugins/notescli"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

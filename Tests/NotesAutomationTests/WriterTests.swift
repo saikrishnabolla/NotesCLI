@@ -38,7 +38,7 @@ final class WriterTests: XCTestCase {
     }
     func testTimeoutNeverRetriesOrVerifies() throws {
         let runner = StubRunner([ScriptOutput(timedOut: true)])
-        let writer = ScriptingNotesWriter(runner: runner, verifier: { _ in XCTFail("Must not verify unknown writes"); return .verified })
+        let writer = ScriptingNotesWriter(runner: runner, verifier: { _ in XCTFail("Must not verify unknown writes"); return WriteVerificationResult(outcome: .verified) })
         XCTAssertEqual(try writer.deleteNote(id).outcome, .unknown)
         XCTAssertEqual(runner.calls.count, 1)
     }
@@ -53,11 +53,15 @@ final class WriterTests: XCTestCase {
     }
     func testVerifierAndChecklistMessage() throws {
         let runner = StubRunner([ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
-        let writer = ScriptingNotesWriter(runner: runner, verifier: { result in
-            XCTAssertEqual(result.message, #"downgraded: ["checklist"]"#)
-            return .verified
+        let writer = ScriptingNotesWriter(runner: runner, verifier: { request in
+            XCTAssertEqual(request.result.message, #"downgraded: ["checklist"]"#)
+            XCTAssertEqual(request.operation, .createNote)
+            XCTAssertEqual(request.title, "test")
+            return WriteVerificationResult(outcome: .verified, noteID: NoteID(uuid: "stable", coreDataID: request.result.noteID?.coreDataID))
         })
-        XCTAssertEqual(try writer.createNote(title: "test", markdown: "- [ ] task").outcome, .verified)
+        let result = try writer.createNote(title: "test", markdown: "- [ ] task")
+        XCTAssertEqual(result.outcome, .verified)
+        XCTAssertEqual(result.noteID?.uuid, "stable")
     }
     func testVerifierFailureDoesNotTurnSuccessIntoRetryableError() throws {
         let runner = StubRunner([ScriptOutput(stdout: "{}")])
@@ -66,6 +70,18 @@ final class WriterTests: XCTestCase {
         XCTAssertEqual(result.outcome, .unverified)
         XCTAssertTrue(result.message?.contains("Do not retry") == true)
         XCTAssertEqual(runner.calls.count, 1)
+    }
+    func testChangedIncompleteResponseStillUsesOperationVerifier() throws {
+        let runner = StubRunner([ScriptOutput(stdout: #"{"changed":true,"errorCode":"automation_error"}"#)])
+        let writer = ScriptingNotesWriter(runner: runner, verifier: { request in
+            XCTAssertEqual(request.operation, .moveFolder)
+            XCTAssertEqual(request.expectedFolderPath, ["Archive", "Source"])
+            return WriteVerificationResult(outcome: .verified, folderID: "x-coredata://moved-folder")
+        })
+        let result = try writer.moveFolder("Old > Source", toParent: "Archive")
+        XCTAssertEqual(result.outcome, .verified)
+        XCTAssertEqual(result.folderID, "x-coredata://moved-folder")
+        XCTAssertTrue(result.message?.contains("could not complete its response") == true)
     }
     func testResolver() throws {
         let runner = StubRunner([ScriptOutput(stdout: "{}")])
@@ -145,6 +161,18 @@ final class WriterTests: XCTestCase {
         let writer = ScriptingNotesWriter(runner: runner, resolver: { _ in "x-coredata://synthetic/ICNote/p123" })
         XCTAssertEqual(try writer.renameNote(uuid, title: "new").noteID?.uuid, uuid)
     }
+    func testVerifierReceivesOperationAndReportsMismatch() throws {
+        let runner = StubRunner([ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
+        let writer = ScriptingNotesWriter(runner: runner, verifier: { request in
+            XCTAssertEqual(request.operation, .renameNote)
+            XCTAssertEqual(request.title, "new title")
+            XCTAssertEqual(request.ref, "x-coredata://synthetic/ICNote/p123")
+            return WriteVerificationResult(outcome: .unverified, mismatch: "title was still old")
+        })
+        let result = try writer.renameNote(id, title: "new title")
+        XCTAssertEqual(result.outcome, .unverified)
+        XCTAssertTrue(result.message?.contains("mismatch: title was still old") == true)
+    }
     func testDisabledAttachmentsDowngradeWithoutDispatch() throws {
         let runner = StubRunner([ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
         let writer = ScriptingNotesWriter(runner: runner, attachLocalImages: false)
@@ -165,6 +193,41 @@ final class WriterTests: XCTestCase {
         let encoded = try JSONEncoder().encode(["notes": [note]])
         let runner = StubRunner([ScriptOutput(stdout: String(decoding: encoded, as: UTF8.self))])
         XCTAssertEqual(try ScriptingNotesWriter(runner: runner).listViaScripting(), [note])
+    }
+
+    func testPrependPreservesExistingHTMLAndAttachmentGuardStopsBeforeWrite() throws {
+        let read = ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123","title":"T","body":"<h1>T</h1><div>old</div>","attachmentCount":0}"#)
+        let written = ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)
+        let runner = StubRunner([read, written])
+        _ = try ScriptingNotesWriter(runner: runner).prependToNote(id, markdown: "new")
+        let payload = try JSONDecoder().decode([String: String].self, from: Data(runner.calls[1].arguments[0].utf8))
+        XCTAssertEqual(payload["operation"], "prependToNote")
+        XCTAssertEqual(payload["html"], "<h1>T</h1><div>new</div><div>old</div>")
+
+        let guarded = StubRunner([ScriptOutput(stdout: #"{"id":"x","title":"T","body":"<h1>T</h1>","attachmentCount":1}"#)])
+        XCTAssertThrowsError(try ScriptingNotesWriter(runner: guarded).replaceText(id, find: "T", replacement: "X")) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "attachments_would_be_lost")
+        }
+        XCTAssertEqual(guarded.calls.count, 1)
+    }
+
+    func testReplaceSectionKeepsOtherSections() throws {
+        let body = "<h1>T</h1><h2>A</h2><div>old</div><h2>B</h2><div>keep</div>"
+        let read = ScriptOutput(stdout: "{\"id\":\"x\",\"title\":\"T\",\"body\":\"\(body)\",\"attachmentCount\":0}")
+        let runner = StubRunner([read, ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
+        _ = try ScriptingNotesWriter(runner: runner).replaceSection(id, heading: "A", markdown: "new")
+        let payload = try JSONDecoder().decode([String: String].self, from: Data(runner.calls[1].arguments[0].utf8))
+        XCTAssertEqual(payload["html"], "<h1>T</h1><h2>A</h2><div>new</div><h2>B</h2><div>keep</div>")
+    }
+
+    func testStyledNotesHeadingsAreDetected() throws {
+        let body = #"<div><b><span style="font-size: 24px">T</span></b></div><div><b><span style="font-size: 18px">A</span></b></div><div>old</div><div><b><span style="font-size: 18px">B</span></b></div><div>keep</div>"#
+        let encoded = String(decoding: try JSONEncoder().encode(["id": "x", "title": "T", "body": body, "attachmentCount": "0"]), as: UTF8.self)
+            .replacingOccurrences(of: #""attachmentCount":"0""#, with: #""attachmentCount":0"#)
+        let runner = StubRunner([ScriptOutput(stdout: encoded), ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
+        _ = try ScriptingNotesWriter(runner: runner).replaceSection(id, heading: "A", markdown: "new")
+        let payload = try JSONDecoder().decode([String: String].self, from: Data(runner.calls[1].arguments[0].utf8))
+        XCTAssertTrue(payload["html"]?.contains(#"font-size: 18px">A</span></b></div><div>new</div><div><b><span style="font-size: 18px">B"#) == true)
     }
 
 }

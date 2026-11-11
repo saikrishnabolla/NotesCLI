@@ -49,5 +49,15 @@ final class MarkdownTests: XCTestCase {
         XCTAssertEqual(MarkdownToNotesHTML.convert("**bold *italic*** and *italic **bold***").html,
                        "<div><b>bold <i>italic</i></b> and <i>italic <b>bold</b></i></div>")
     }
+    func testReadableWebClipExtraction() throws {
+        let source = try XCTUnwrap(URL(string: "https://example.com/post"))
+        let clip = WebPageClipper.extract("<html><head><title>Example</title><style>secret</style></head><body><nav>menu</nav><article><h2>Heading</h2><p>Hello <a href='https://example.com/x'>world</a>.</p><script>bad()</script></article></body></html>", source: source)
+        XCTAssertEqual(clip.title, "Example")
+        XCTAssertTrue(clip.markdown.contains("Source: https://example.com/post"))
+        XCTAssertTrue(clip.markdown.contains("Heading"))
+        XCTAssertTrue(clip.markdown.contains("[world](https://example.com/x)"))
+        XCTAssertFalse(clip.markdown.contains("secret"))
+        XCTAssertFalse(clip.markdown.contains("bad()"))
+    }
 
 }

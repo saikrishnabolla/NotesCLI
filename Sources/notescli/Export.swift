@@ -3,7 +3,8 @@ import Foundation
 import NotesCore
 import NotesSync
 
-enum ExportFormat: String, ExpressibleByArgument { case markdown, html, json, ndjson, sqlite, zip }
+enum ExportFormat: String, ExpressibleByArgument { case markdown, html, json, ndjson, sqlite, zip, pdf, docx, rtf, epub, bear, joplin, quiver }
+enum ExportOrder: String, ExpressibleByArgument { case display, modified, created, title }
 
 struct Export: ParsableCommand {
     @OptionGroup var options: GlobalOptions
@@ -16,9 +17,13 @@ struct Export: ParsableCommand {
     @Option var filename: String?
     @Flag var obsidian = false
     @Flag var prune = false
+    @Flag var combine = false
+    @Flag var scansPDF = false
+    @Option var order: ExportOrder = .display
 
     func validate() throws {
         if embedMedia && format != .html { throw ValidationError("--embed-media requires --format html.") }
+        if combine && format != .pdf { throw ValidationError("--combine requires --format pdf.") }
     }
 
     func run() throws {
@@ -31,7 +36,8 @@ struct Export: ParsableCommand {
         let exportOptions = ExportOptions(output: output, folder: folder,
             format: NotesExportFormat(rawValue: format.rawValue)!, includeAttachments: attachments,
             embedMedia: embedMedia, template: templateText, filenameTemplate: filename,
-            obsidian: obsidian, prune: prune)
+            obsidian: obsidian, prune: prune, combine: combine, scansPDF: scansPDF,
+            order: NotesExportOrder(rawValue: order.rawValue)!)
         let report = try NotesExporter(reader: reader).run(exportOptions)
         for issue in report.incomplete { Output.error("Incomplete \(issue.noteID) \(issue.title): \(issue.reason)") }
         if options.json { try Output.json(report.files) }

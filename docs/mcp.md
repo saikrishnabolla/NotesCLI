@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 39 tools. Read-only mode exposes the 20 read tools. `notescli mcp --allow-native` exposes 31 more tools that use Apple's private Notes framework.
+The default server exposes 42 tools. Read-only mode exposes the 21 read tools. `notescli mcp --allow-native` exposes 31 more tools that use Apple's private Notes framework.
 
 ## Tools
 
@@ -16,18 +16,22 @@ Read tools:
 list_accounts  list_folders  list_notes  search_notes  query_notes
 get_note  get_notes  list_tags  list_attachments  list_backlinks
 get_deeplink  list_smart_folders  list_deleted  recent_notes  today_notes
-count_notes  get_stats  get_raw_note  related_notes  get_write_policy
+count_notes  get_stats  get_raw_note  related_notes  get_write_policy  file_diff
 ```
 
 Scripting, export, and sync tools:
 
 ```text
-save_attachment  export_notes  sync_notes
+save_attachment  export_notes  file_pull  file_push  sync_notes
 create_note  append_to_note  prepend_to_note  update_note
 insert_under_heading  replace_section  replace_text  rename_note
 move_note  delete_note  batch_move_notes  batch_delete_notes
 create_folder  rename_folder  delete_folder  write_markdown
 ```
+
+`export_notes` accepts `markdown`, `html`, `json`, `ndjson`, `sqlite`, `zip`, `pdf`, `docx`, `rtf`, `epub`, `bear`, `joplin`, and `quiver`. It also accepts `combine`, `scans_pdf`, and `order` (`display`, `modified`, `created`, or `title`).
+
+`file_pull` and `file_push` accept `dry_run`. `file_diff` reads the local sidecar merge base and does not write.
 
 Tools added by `--allow-native`:
 

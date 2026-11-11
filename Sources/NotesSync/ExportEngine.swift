@@ -2,7 +2,20 @@ import Foundation
 import NotesCore
 
 public enum NotesExportFormat: String, Codable, Sendable {
-    case markdown, html, json, ndjson, sqlite, zip
+    case markdown, html, json, ndjson, sqlite, zip, pdf, docx, rtf, epub, bear, joplin, quiver
+}
+
+public enum NotesExportOrder: String, Codable, Sendable {
+    case display, modified, created, title
+
+    var noteSort: NoteSort {
+        switch self {
+        case .display: return .display
+        case .modified: return .modified
+        case .created: return .created
+        case .title: return .title
+        }
+    }
 }
 
 public struct ExportOptions: Sendable {
@@ -15,14 +28,19 @@ public struct ExportOptions: Sendable {
     public var filenameTemplate: String?
     public var obsidian: Bool
     public var prune: Bool
+    public var combine: Bool
+    public var scansPDF: Bool
+    public var order: NotesExportOrder
 
     public init(output: URL, folder: String? = nil, format: NotesExportFormat = .markdown,
                 includeAttachments: Bool = true, embedMedia: Bool = false, template: String? = nil,
-                filenameTemplate: String? = nil, obsidian: Bool = false, prune: Bool = false) {
+                filenameTemplate: String? = nil, obsidian: Bool = false, prune: Bool = false,
+                combine: Bool = false, scansPDF: Bool = false, order: NotesExportOrder = .display) {
         self.output = output; self.folder = folder; self.format = format
         self.includeAttachments = includeAttachments; self.embedMedia = embedMedia
         self.template = template; self.filenameTemplate = filenameTemplate
         self.obsidian = obsidian; self.prune = prune
+        self.combine = combine; self.scansPDF = scansPDF; self.order = order
     }
 }
 
@@ -54,14 +72,16 @@ private struct ExportManifest: Codable {
         var path: String
         var attachmentPaths: [String]
         var hash: String
+        var order: Int?
     }
-    var version = 1
+    var version = 2
     var entries: [String: Entry]
+    var order: [String] = []
 }
 
 public final class NotesExporter {
-    private let reader: any NotesReading
-    private let fileManager: FileManager
+    let reader: any NotesReading
+    let fileManager: FileManager
 
     public init(reader: any NotesReading, fileManager: FileManager = .default) {
         self.reader = reader; self.fileManager = fileManager
@@ -72,15 +92,15 @@ public final class NotesExporter {
         let requestedRoot = options.output.standardizedFileURL
         try fileManager.createPrivateDirectory(at: requestedRoot)
         let root = requestedRoot.resolvingSymlinksInPath().standardizedFileURL
-        let summaries = try reader.notes(NoteQuery(folder: options.folder))
+        let summaries = try reader.notes(NoteQuery(folder: options.folder), sort: options.order.noteSort)
         let accounts = try reader.accounts()
         let manifestURL = root.appendingPathComponent(".notescli-export.json")
         let oldManifest = (try? Data(contentsOf: manifestURL)).flatMap { try? JSONDecoder().decode(ExportManifest.self, from: $0) } ?? ExportManifest(entries: [:])
         var report = ExportReport(), manifest = ExportManifest(entries: [:])
-        var prepared: [(Note, String, String)] = []
+        var prepared: [PreparedExportNote] = []
         var pathsInUse: [String: String] = [:]
 
-        for summary in summaries {
+        for (orderIndex, summary) in summaries.enumerated() {
             var note: Note
             do { note = try reader.note(summary.id.uuid) }
             catch let error as NotesError where summary.isLocked || error.code == "body_unavailable" {
@@ -93,7 +113,12 @@ public final class NotesExporter {
                                                      reason: summary.isLocked ? "locked" : "body not downloaded"))
             }
             let relativeDirectory = directory(for: summary, accounts: accounts)
-            let ext = options.format == .markdown ? "md" : options.format.rawValue
+            let ext: String
+            switch options.format {
+            case .markdown, .bear, .joplin: ext = "md"
+            case .quiver: ext = "json"
+            default: ext = options.format.rawValue
+            }
             let stemTemplate = options.filenameTemplate ?? (options.obsidian ? "{{title}}" : "{{title}}--{{id}}")
             var stem = SafePath.component(render(stemTemplate, summary: summary, body: ""))
             var relative = ([relativeDirectory, stem + "." + ext].filter { !$0.isEmpty }).joined(separator: "/")
@@ -102,30 +127,39 @@ public final class NotesExporter {
                 relative = ([relativeDirectory, stem + "." + ext].filter { !$0.isEmpty }).joined(separator: "/")
             }
             pathsInUse[relative] = summary.id.uuid
-            let attachmentPaths = try prepareAttachments(note: &note, root: root, relativeDirectory: relativeDirectory,
+            let specialized: Set<NotesExportFormat> = [.pdf, .docx, .rtf, .epub, .bear, .joplin, .quiver]
+            let attachmentPaths: [String]
+            if specialized.contains(options.format) {
+                if !options.includeAttachments { note.attachments = [] }
+                attachmentPaths = []
+            } else {
+                attachmentPaths = try prepareAttachments(note: &note, root: root, relativeDirectory: relativeDirectory,
                                                          linkBaseDirectory: [.markdown, .html].contains(options.format) ? relativeDirectory : "",
                                                          stem: stem, embed: options.format == .html && options.embedMedia,
                                                          include: options.includeAttachments, report: &report)
+            }
             let text = try content(note: note, summary: summary, format: options.format, template: options.template)
             let attachmentHashes = attachmentPaths.compactMap { path -> String? in
                 guard let data = try? Data(contentsOf: root.appendingPathComponent(path)) else { return nil }
                 return StableHash.hex(data)
             }.joined(separator: ":")
             let hash = StableHash.hex(text + "\n" + attachmentHashes)
-            manifest.entries[summary.id.uuid] = .init(path: relative, attachmentPaths: attachmentPaths, hash: hash)
-            prepared.append((note, relative, text))
+            manifest.entries[summary.id.uuid] = .init(path: relative, attachmentPaths: attachmentPaths, hash: hash, order: orderIndex)
+            manifest.order.append(summary.id.uuid)
+            prepared.append(PreparedExportNote(note: note, relativeDirectory: relativeDirectory, stem: stem,
+                                               relativePath: relative, content: text, attachmentPaths: attachmentPaths))
         }
 
         switch options.format {
         case .markdown, .html, .json:
             for (index, item) in prepared.enumerated() {
-                let summary = summaries[index], target = try SafePath.child(item.1, of: root)
+                let summary = summaries[index], target = try SafePath.child(item.relativePath, of: root)
                 if oldManifest.entries[summary.id.uuid]?.hash == manifest.entries[summary.id.uuid]?.hash,
                    fileManager.fileExists(atPath: target.path) {
                     report.unchanged += 1
                 } else {
                     try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-                    try Data(item.2.utf8).write(to: target, options: .atomic)
+                    try Data(item.content.utf8).write(to: target, options: .atomic)
                     try setDates(target, summary: summary)
                     report.exported += 1
                 }
@@ -134,14 +168,58 @@ public final class NotesExporter {
         case .ndjson:
             let target = root.appendingPathComponent("notes.ndjson")
             var data = Data()
-            for item in prepared { data.append(try noteJSON(item.0)); data.append(0x0a) }
+            for item in prepared { data.append(try noteJSON(item.note)); data.append(0x0a) }
             try data.write(to: target, options: .atomic)
             report.files = [target.path]; report.exported = prepared.count
         case .sqlite:
             let target = root.appendingPathComponent("notes.sqlite")
-            try SQLiteExport.write(to: target, accounts: accounts, folders: try reader.folders(account: nil), notes: prepared.map(\.0))
+            try SQLiteExport.write(to: target, accounts: accounts, folders: try reader.folders(account: nil), notes: prepared.map(\.note))
             report.files = [target.path]; report.exported = prepared.count
+        case .pdf:
+            if options.combine {
+                for group in Dictionary(grouping: prepared, by: { ExportFolderKey($0.note.summary) }).sorted(by: {
+                    ($0.key.accountID, $0.key.path.joined(separator: "/")) < ($1.key.accountID, $1.key.path.joined(separator: "/"))
+                }) {
+                    let temporary = fileManager.temporaryDirectory.appendingPathComponent("notescli-pdf-" + UUID().uuidString, isDirectory: true)
+                    try fileManager.createPrivateDirectory(at: temporary); defer { try? fileManager.removeItem(at: temporary) }
+                    var parts: [URL] = []
+                    for (index, item) in group.value.enumerated() {
+                        let part = temporary.appendingPathComponent("\(index).pdf")
+                        try RichDocumentExport.write(item.note, format: .pdf, to: part); parts.append(part)
+                    }
+                    let name = folderExportName(group.key, accounts: accounts) + ".pdf"
+                    let target = root.appendingPathComponent(name)
+                    try RichDocumentExport.combinePDFs(parts, to: target)
+                    report.files.append(target.path); report.exported += group.value.count
+                    for item in group.value { manifest.entries[item.note.summary.id.uuid]?.path = name }
+                }
+            } else {
+                try writeRich(prepared, format: .pdf, root: root, report: &report)
+            }
+        case .docx, .rtf:
+            try writeRich(prepared, format: options.format, root: root, report: &report)
+        case .epub:
+            for group in Dictionary(grouping: prepared.map(\.note), by: { ExportFolderKey($0.summary) }).sorted(by: {
+                ($0.key.accountID, $0.key.path.joined(separator: "/")) < ($1.key.accountID, $1.key.path.joined(separator: "/"))
+            }) {
+                let title = folderExportName(group.key, accounts: accounts)
+                let name = title + ".epub"
+                let target = root.appendingPathComponent(name)
+                try EPUBExport.write(notes: group.value, title: title, to: target)
+                report.files.append(target.path); report.exported += group.value.count
+                for note in group.value { manifest.entries[note.summary.id.uuid]?.path = name }
+            }
+        case .bear:
+            report.files = try ImportFormatExport.writeBear(prepared.map(\.note), root: root); report.exported = prepared.count
+        case .joplin:
+            report.files = try ImportFormatExport.writeJoplin(prepared.map(\.note), root: root); report.exported = prepared.count
+        case .quiver:
+            report.files = try ImportFormatExport.writeQuiver(prepared.map(\.note), root: root); report.exported = prepared.count
         case .zip: break
+        }
+
+        if options.scansPDF {
+            try exportScans(prepared, root: root, report: &report, manifest: &manifest)
         }
 
         if options.prune {
@@ -157,10 +235,43 @@ public final class NotesExporter {
         let manifestData = try encoder.encode(manifest)
         try manifestData.write(to: manifestURL, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: manifestURL.path)
+        let indexURL = root.appendingPathComponent(".notescli-order.json")
+        let index = summaries.enumerated().map { index, summary in
+            ["order": index, "id": summary.id.uuid, "title": summary.title,
+             "path": manifest.entries[summary.id.uuid]?.path ?? ""] as [String: Any]
+        }
+        try JSONSerialization.data(withJSONObject: index, options: [.prettyPrinted, .sortedKeys]).write(to: indexURL, options: .atomic)
         report.bytes = report.files.reduce(0) { total, path in
             total + Int64((try? fileManager.attributesOfItem(atPath: path)[.size] as? NSNumber)?.int64Value ?? 0)
         }
         return report
+    }
+
+    private func writeRich(_ prepared: [PreparedExportNote], format: NotesExportFormat, root: URL,
+                           report: inout ExportReport) throws {
+        for item in prepared {
+            let target = try SafePath.child(item.relativePath, of: root)
+            try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try RichDocumentExport.write(item.note, format: format, to: target)
+            try setDates(target, summary: item.note.summary)
+            report.files.append(target.path); report.exported += 1
+        }
+    }
+
+    private func exportScans(_ prepared: [PreparedExportNote], root: URL, report: inout ExportReport,
+                             manifest: inout ExportManifest) throws {
+        for item in prepared {
+            for attachment in item.note.attachments where !(attachment.pageImagePaths ?? []).isEmpty || attachment.typeUTI.lowercased().contains("scan") {
+                let relative = ([item.relativeDirectory, item.stem + "-scans",
+                                 SafePath.component(attachment.id, limit: 40) + ".pdf"].filter { !$0.isEmpty }).joined(separator: "/")
+                let target = try SafePath.child(relative, of: root)
+                try fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                _ = try RichDocumentExport.writeScanPDF(pagePaths: attachment.pageImagePaths ?? [],
+                                                         fallbackPDF: attachment.filePath ?? attachment.fallbackRasterPath, to: target)
+                report.files.append(target.path)
+                manifest.entries[item.note.summary.id.uuid]?.attachmentPaths.append(relative)
+            }
+        }
     }
 
     private func zip(_ options: ExportOptions) throws -> ExportReport {
@@ -168,7 +279,7 @@ public final class NotesExporter {
         let temporary = fileManager.temporaryDirectory.appendingPathComponent("notescli-export-" + UUID().uuidString, isDirectory: true)
         try fileManager.createPrivateDirectory(at: temporary)
         defer { try? fileManager.removeItem(at: temporary) }
-        var nested = options; nested.output = temporary; nested.format = .markdown; nested.prune = false
+        var nested = options; nested.output = temporary; nested.format = .markdown; nested.prune = false; nested.scansPDF = false
         var report = try run(nested)
         try fileManager.createDirectory(at: archive.deletingLastPathComponent(), withIntermediateDirectories: true)
         if fileManager.fileExists(atPath: archive.path) { try fileManager.removeItem(at: archive) }
@@ -191,6 +302,15 @@ public final class NotesExporter {
         }
         components += summary.folderPath.map { SafePath.component($0) }
         return components.joined(separator: "/")
+    }
+
+    private func folderExportName(_ key: ExportFolderKey, accounts: [Account]) -> String {
+        var components = key.path
+        if accounts.count > 1 {
+            let account = accounts.first(where: { $0.id == key.accountID })?.name ?? key.accountID
+            components.insert(account + "--" + key.accountID, at: 0)
+        }
+        return SafePath.component(components.isEmpty ? "Notes" : components.joined(separator: " - "))
     }
 
     private func prepareAttachments(note: inout Note, root: URL, relativeDirectory: String, linkBaseDirectory: String, stem: String,

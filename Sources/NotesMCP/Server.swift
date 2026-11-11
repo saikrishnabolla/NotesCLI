@@ -1,52 +1,153 @@
 import Foundation
 import NotesCore
+import NotesIndex
+import NotesSafety
+import NotesSync
+
+public struct MCPNativeResult {
+    public var result: WriteResult?
+    public var operationID: String?
+    public var value: Data
+    public init<T: Encodable>(result: WriteResult? = nil, operationID: String? = nil, value: T) throws {
+        self.result = result
+        self.operationID = operationID
+        self.value = try JSONEncoder().encode(value)
+    }
+}
+
+public typealias MCPNativeHandler = (_ tool: String, _ arguments: [String: Any]) throws -> MCPNativeResult
 
 public final class MCPServer {
     public let reader: any NotesReading
     public let writer: (any NotesWriting)?
     public let readOnly: Bool
+    public let allowNative: Bool
     public static let textLimit = 48 * 1024
     public static let versions = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
-    public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false) {
-        self.reader = reader; self.writer = writer; self.readOnly = readOnly
+    private let nativeHandler: MCPNativeHandler?
+    private let writeFolders: String?
+    private let stateRoot: URL
+
+    public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false,
+                allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil,
+                writeFolders: String? = nil, stateRoot: URL? = nil) {
+        self.reader = reader
+        self.writer = writer
+        self.readOnly = readOnly
+        self.allowNative = allowNative
+        self.nativeHandler = nativeHandler
+        self.writeFolders = writeFolders
+        self.stateRoot = stateRoot ?? FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-" + UUID().uuidString)
     }
 
     private struct Tool {
         let name: String
         let description: String
         let write: Bool
+        let native: Bool
+        let destructive: Bool
         let required: [String]
         let properties: [String: [String: Any]]
         var schema: [String: Any] { ["type": "object", "properties": properties, "required": required, "additionalProperties": false] }
     }
+
     private var tools: [Tool] {
         let string: [String: Any] = ["type": "string"]
         let bool: [String: Any] = ["type": "boolean"]
         let integer: [String: Any] = ["type": "integer", "minimum": 0]
+        let strings: [String: Any] = ["type": "array", "items": string]
+        let rows: [String: Any] = ["type": "array", "items": ["type": "array", "items": string]]
         let page = ["offset": integer, "limit": integer]
-        func t(_ name: String, _ description: String, _ required: [String] = [], _ properties: [String: [String: Any]] = [:], write: Bool = false) -> Tool {
-            var p = properties; if write { p["dry_run"] = bool }
-            return Tool(name: name, description: description, write: write, required: required, properties: p)
+        let writeCommon = ["dry_run": bool, "idempotency_key": string, "if_modified": string,
+                           "expect_revision": string, "write_folders": string, "allow_attachment_loss": bool]
+        func t(_ name: String, _ description: String, _ required: [String] = [], _ properties: [String: [String: Any]] = [:],
+               write: Bool = false, native: Bool = false, destructive: Bool = false) -> Tool {
+            Tool(name: name, description: description, write: write, native: native, destructive: destructive,
+                 required: required, properties: write ? properties.merging(writeCommon) { old, _ in old } : properties)
         }
-        let filters: [String: [String: Any]] = ["folder": string, "account": string, "pinned": bool, "tag": string, "since": string, "until": string, "include_deleted": bool]
-        return [
+        let filters: [String: [String: Any]] = ["folder": string, "account": string, "pinned": bool, "tag": string,
+            "since": string, "until": string, "include_deleted": bool,
+            "sort": ["type": "string", "enum": ["modified", "created", "opened", "title", "display"]]]
+        var values: [Tool] = [
             t("list_accounts", "List Notes accounts."),
             t("list_folders", "List folders.", [], ["account": string]),
-            t("list_notes", "List notes ordered by modification date.", [], filters.merging(page) { a, _ in a }),
-            t("search_notes", "Search note titles and bodies.", ["query"], ["query": string, "folder": string].merging(page) { a, _ in a }),
-            t("get_note", "Read one note.", ["ref"], ["ref": string, "format": ["type": "string", "enum": ["markdown", "text", "html", "json"]], "attachments": bool]),
+            t("list_notes", "List notes with filters and paging.", [], filters.merging(page) { old, _ in old }),
+            t("search_notes", "Search note titles and bodies.", ["query"], ["query": string, "folder": string].merging(page) { old, _ in old }),
+            t("query_notes", "Search the local index with boolean, field, date, and kind expressions.", ["query"], ["query": string, "folder": string, "rebuild": bool].merging(page) { old, _ in old }),
+            t("get_note", "Read one note in Markdown, text, HTML, or JSON.", ["ref"], ["ref": string, "format": ["type": "string", "enum": ["markdown", "text", "html", "json"]], "attachments": bool].merging(page) { old, _ in old }),
+            t("get_notes", "Read several notes.", ["refs"], ["refs": strings, "format": ["type": "string", "enum": ["markdown", "text", "html", "json"]]].merging(page) { old, _ in old }),
             t("list_tags", "List tags and note counts."),
+            t("list_attachments", "List attachment metadata for a note.", ["ref"], ["ref": string]),
+            t("save_attachment", "Copy one attachment original to a new file.", ["ref", "attachment_id", "output"], ["ref": string, "attachment_id": string, "output": string], write: true),
+            t("list_backlinks", "List notes that link to a note.", ["ref"], ["ref": string]),
+            t("get_deeplink", "Get an applenotes deep link.", ["ref"], ["ref": string]),
+            t("list_smart_folders", "List smart folders and decoded rules.", [], ["evaluate": bool]),
+            t("list_deleted", "List notes in Recently Deleted.", [], page),
+            t("recent_notes", "List recently modified notes.", [], ["days": integer].merging(page) { old, _ in old }),
+            t("today_notes", "List notes modified today.", [], page),
+            t("count_notes", "Count notes matching filters.", [], filters),
+            t("get_stats", "Get note, folder, account, and attachment-kind counts."),
+            t("get_raw_note", "Read decoded raw note protobuf data with paging.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
+            t("related_notes", "Find notes related by links or tags.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
+            t("get_write_policy", "Show read-only, native, and write-folder policy."),
+            t("export_notes", "Export notes with optional templates and attachments.", ["output"], ["output": string, "folder": string,
+                "format": ["type": "string", "enum": ["markdown", "html", "json", "ndjson", "sqlite", "zip"]],
+                "template": string, "filename_template": string, "include_attachments": bool, "embed_media": bool, "obsidian": bool, "prune": bool], write: true),
+            t("sync_notes", "Run one two-way Markdown folder sync pass.", ["directory", "folder"], ["directory": string, "folder": string, "propagate_deletes": bool], write: true, destructive: true),
             t("create_note", "Create a note from Markdown.", ["title", "body"], ["title": string, "body": string, "folder": string], write: true),
             t("append_to_note", "Append Markdown to a note.", ["ref", "body"], ["ref": string, "body": string], write: true),
-            t("update_note", "Replace the body. Attachments and checklists may downgrade.", ["ref", "body"], ["ref": string, "body": string], write: true),
+            t("prepend_to_note", "Prepend Markdown while preserving supported rich content.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true),
+            t("update_note", "Replace a note body.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true),
+            t("insert_under_heading", "Insert Markdown below a heading.", ["ref", "heading", "body"], ["ref": string, "heading": string, "body": string], write: true, destructive: true),
+            t("replace_section", "Replace a heading section.", ["ref", "heading", "body"], ["ref": string, "heading": string, "body": string], write: true, destructive: true),
+            t("replace_text", "Replace exact text in a note.", ["ref", "find", "replacement"], ["ref": string, "find": string, "replacement": string], write: true, destructive: true),
             t("rename_note", "Rename a note.", ["ref", "title"], ["ref": string, "title": string], write: true),
             t("move_note", "Move a note to a folder.", ["ref", "folder"], ["ref": string, "folder": string], write: true),
-            t("delete_note", "Move a note to Recently Deleted.", ["ref"], ["ref": string], write: true),
+            t("delete_note", "Move a note to Recently Deleted.", ["ref"], ["ref": string], write: true, destructive: true),
+            t("batch_move_notes", "Move several notes.", ["refs", "folder"], ["refs": strings, "folder": string], write: true),
+            t("batch_delete_notes", "Move several notes to Recently Deleted.", ["refs"], ["refs": strings], write: true, destructive: true),
             t("create_folder", "Create a folder.", ["name"], ["name": string, "parent": string, "account": string], write: true),
             t("rename_folder", "Rename a folder.", ["ref", "name"], ["ref": string, "name": string], write: true),
-            t("delete_folder", "Delete a folder, moving its notes to Recently Deleted.", ["ref"], ["ref": string], write: true)
-        ].filter { !readOnly || !$0.write }
+            t("move_folder", "Move a folder below another folder.", ["ref"], ["ref": string, "parent": string, "account": string], write: true, native: true),
+            t("delete_folder", "Delete an empty folder.", ["ref"], ["ref": string], write: true, destructive: true),
+            t("write_markdown", "Replace a note with Markdown using the scripting engine.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true)
+        ]
+        if allowNative {
+            values += [
+                t("checklist_list", "List native checklist items.", ["ref"], ["ref": string], native: true),
+                t("checklist_add", "Add a native checklist item.", ["ref", "text"], ["ref": string, "text": string, "position": integer], write: true, native: true),
+                t("checklist_toggle", "Toggle a native checklist item.", ["ref"], ["ref": string, "index": integer, "text": string, "done": bool], write: true, native: true),
+                t("checklist_check_all", "Check all native checklist items.", ["ref"], ["ref": string], write: true, native: true),
+                t("checklist_uncheck_all", "Uncheck all native checklist items.", ["ref"], ["ref": string], write: true, native: true),
+                t("checklist_clear_done", "Delete completed checklist items.", ["ref"], ["ref": string], write: true, native: true, destructive: true),
+                t("pin_note", "Pin a note.", ["ref"], ["ref": string], write: true, native: true),
+                t("unpin_note", "Unpin a note.", ["ref"], ["ref": string], write: true, native: true),
+                t("tag_add", "Add a native tag.", ["ref", "tag"], ["ref": string, "tag": string, "position": integer], write: true, native: true),
+                t("tag_remove", "Remove a native tag.", ["ref", "tag"], ["ref": string, "tag": string], write: true, native: true),
+                t("tag_rename", "Rename a native tag after checking its note count.", ["tag", "new_name", "expected_count"], ["tag": string, "new_name": string, "expected_count": integer], write: true, native: true),
+                t("tag_delete", "Delete a native tag after checking its note count.", ["tag", "expected_count"], ["tag": string, "expected_count": integer], write: true, native: true, destructive: true),
+                t("link_add", "Insert a native note link.", ["ref", "target"], ["ref": string, "target": string, "text": string, "position": integer], write: true, native: true),
+                t("link_list", "List native note links.", ["ref"], ["ref": string], native: true),
+                t("text_find", "Find native UTF-16 text ranges.", ["ref", "text"], ["ref": string, "text": string, "case_insensitive": bool], native: true),
+                t("text_insert", "Insert text at a UTF-16 position.", ["ref", "text", "position"], ["ref": string, "text": string, "position": integer], write: true, native: true),
+                t("text_delete", "Delete a UTF-16 range.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer], write: true, native: true, destructive: true),
+                t("text_replace", "Replace a UTF-16 range.", ["ref", "start", "length", "text"], ["ref": string, "start": integer, "length": integer, "text": string], write: true, native: true, destructive: true),
+                t("format_paragraph", "Apply a native paragraph style.", ["ref", "start", "length", "style"], ["ref": string, "start": integer, "length": integer, "style": string, "indent": integer], write: true, native: true),
+                t("format_inline", "Apply native inline formatting.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "clear_link": bool, "clear_color": bool], write: true, native: true),
+                t("attach_file", "Insert a file or positioned image.", ["ref", "path"], ["ref": string, "path": string, "position": integer, "view": string], write: true, native: true),
+                t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),
+                t("table_create", "Create a native table.", ["ref", "rows"], ["ref": string, "rows": rows, "position": integer], write: true, native: true),
+                t("table_set", "Set a native table cell.", ["ref", "attachment_id", "row", "column", "text"], ["ref": string, "attachment_id": string, "row": integer, "column": integer, "text": string], write: true, native: true),
+                t("table_add_row", "Add a native table row.", ["ref", "attachment_id", "index"], ["ref": string, "attachment_id": string, "index": integer], write: true, native: true),
+                t("table_add_column", "Add a native table column.", ["ref", "attachment_id", "index"], ["ref": string, "attachment_id": string, "index": integer], write: true, native: true),
+                t("table_remove_row", "Remove a native table row.", ["ref", "attachment_id", "index"], ["ref": string, "attachment_id": string, "index": integer], write: true, native: true, destructive: true),
+                t("table_remove_column", "Remove a native table column.", ["ref", "attachment_id", "index"], ["ref": string, "attachment_id": string, "index": integer], write: true, native: true, destructive: true),
+                t("duplicate_note", "Duplicate a note.", ["ref"], ["ref": string, "title": string], write: true, native: true),
+                t("restore_note", "Restore a note from Recently Deleted.", ["ref"], ["ref": string, "folder": string], write: true, native: true)
+            ]
+        }
+        return values.filter { (!readOnly || !$0.write) && (!$0.native || allowNative) }
     }
 
     public func handleLine(_ line: String) -> String? {
@@ -58,13 +159,20 @@ public final class MCPServer {
         } catch { response = self.error(id: NSNull(), code: -32700, message: "Parse error") }
         return response.map(encode)
     }
+
     private func encode(_ object: [String: Any]) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .fragmentsAllowed]) else {
-            return "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"Encoding failed\"}}"
+            return #"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Encoding failed"}}"#
         }
         return String(decoding: data, as: UTF8.self)
     }
-    private func error(id: Any, code: Int, message: String) -> [String: Any] { ["jsonrpc": "2.0", "id": id, "error": ["code": code, "message": message]] }
+
+    private func error(id: Any, code: Int, message: String, data: [String: Any]? = nil) -> [String: Any] {
+        var value: [String: Any] = ["code": code, "message": message]
+        if let data { value["data"] = data }
+        return ["jsonrpc": "2.0", "id": id, "error": value]
+    }
+
     public func handle(_ request: [String: Any]) -> [String: Any]? {
         let id = request["id"] ?? NSNull()
         guard request["jsonrpc"] as? String == "2.0", let method = request["method"] as? String,
@@ -80,21 +188,39 @@ public final class MCPServer {
             case "initialize":
                 guard let version = params["protocolVersion"] as? String else { return error(id: id, code: -32602, message: "protocolVersion is required") }
                 result = ["protocolVersion": Self.versions.contains(version) ? version : Self.versions[0],
-                          "capabilities": ["tools": ["listChanged": false]], "serverInfo": ["name": "notescli", "version": "1.0.0"]]
+                          "capabilities": ["tools": ["listChanged": false], "resources": ["subscribe": false, "listChanged": false], "prompts": ["listChanged": false]],
+                          "serverInfo": ["name": "notescli", "version": "1.0.0"]]
             case "ping": result = [:]
-            case "tools/list": result = ["tools": tools.map { ["name": $0.name, "description": $0.description, "inputSchema": $0.schema, "annotations": ["readOnlyHint": !$0.write, "destructiveHint": $0.name == "delete_note" || $0.name == "delete_folder" || $0.name == "update_note"]] as [String: Any] }]
+            case "tools/list":
+                result = ["tools": tools.map { ["name": $0.name, "description": $0.description, "inputSchema": $0.schema,
+                    "annotations": ["readOnlyHint": !$0.write, "destructiveHint": $0.destructive]] as [String: Any] }]
             case "tools/call":
                 guard let name = params["name"] as? String, let tool = tools.first(where: { $0.name == name }) else { return error(id: id, code: -32602, message: "Unknown or unavailable tool") }
                 guard params["arguments"] == nil || params["arguments"] is [String: Any] else { return error(id: id, code: -32602, message: "arguments must be an object") }
-                let args = params["arguments"] as? [String: Any] ?? [:]
-                if let issue = validate(args, tool: tool) { return error(id: id, code: -32602, message: issue) }
-                do { result = try call(tool, args) }
-                catch { let e = error as? NotesError ?? NotesError("internal_error", String(describing: error)); result = try content(["error": NotePresentation.object(e)], isError: true) }
+                let arguments = params["arguments"] as? [String: Any] ?? [:]
+                if let issue = validate(arguments, tool: tool) { return error(id: id, code: -32602, message: issue) }
+                do { result = try call(tool, arguments) }
+                catch {
+                    let value = error as? NotesError ?? NotesError("internal_error", String(describing: error))
+                    result = try content(["error": NotePresentation.object(value)], isError: true)
+                }
+            case "resources/list":
+                result = ["resources": [["uri": "notes://folders", "name": "Apple Notes folders", "mimeType": "application/json"]],
+                          "resourceTemplates": [["uriTemplate": "notes://note/{uuid}", "name": "Apple Note", "mimeType": "application/json"]]]
+            case "resources/read": result = try readResource(params)
+            case "prompts/list":
+                result = ["prompts": [["name": "find_note", "description": "Find and summarize matching notes", "arguments": [["name": "query", "required": true]]],
+                                      ["name": "weekly_review", "description": "Review notes modified in the last seven days", "arguments": []]]]
+            case "prompts/get": result = try getPrompt(params)
             default: return error(id: id, code: -32601, message: "Method not found")
             }
             return ["jsonrpc": "2.0", "id": id, "result": result]
-        } catch { return self.error(id: id, code: -32603, message: "Internal error") }
+        } catch {
+            let value = error as? NotesError ?? NotesError("internal_error", String(describing: error))
+            return self.error(id: id, code: -32603, message: value.message, data: (try? NotePresentation.object(value)) as? [String: Any])
+        }
     }
+
     private func validate(_ args: [String: Any], tool: Tool) -> String? {
         for key in tool.required where args[key] == nil { return "Missing argument: \(key)" }
         for (key, value) in args {
@@ -103,76 +229,359 @@ public final class MCPServer {
             case "string": if !(value is String) { return "\(key) must be a string" }
             case "boolean": if !(value is NSNumber) || String(cString: (value as! NSNumber).objCType) != "c" { return "\(key) must be a boolean" }
             case "integer":
-                guard let n = value as? NSNumber, String(cString: n.objCType) != "c", n.doubleValue >= 0, n.doubleValue < Double(Int.max), n.doubleValue.rounded() == n.doubleValue else { return "\(key) must be a nonnegative integer" }
+                guard let number = value as? NSNumber, String(cString: number.objCType) != "c", number.doubleValue >= 0,
+                      number.doubleValue < Double(Int.max), number.doubleValue.rounded() == number.doubleValue else { return "\(key) must be a nonnegative integer" }
+            case "array": if !(value is [Any]) { return "\(key) must be an array" }
             default: break
             }
             if let values = spec["enum"] as? [String], !values.contains(value as? String ?? "") { return "Invalid \(key)" }
         }
         return nil
     }
+
     private func content(_ structured: [String: Any], isError: Bool = false) throws -> [String: Any] {
-        var structured = structured
         let data = try JSONSerialization.data(withJSONObject: structured, options: [.sortedKeys])
         var text = String(decoding: data, as: UTF8.self)
-        if data.count > Self.textLimit {
-            structured["truncated"] = true
-            var prefix = Data(data.prefix(Self.textLimit - 128))
+        if text.utf8.count > Self.textLimit {
+            var prefix = Data(data.prefix(Self.textLimit - 96))
             while String(data: prefix, encoding: .utf8) == nil { prefix.removeLast() }
-            text = String(decoding: prefix, as: UTF8.self) + "\n[Text truncated; use structuredContent and offset/limit for lists.]"
+            text = String(decoding: prefix, as: UTF8.self) + "\n[Result truncated; use offset and limit.]"
         }
         return ["content": [["type": "text", "text": text]], "structuredContent": structured, "isError": isError]
     }
+
+    private func page<T>(_ values: [T], offset: Int, limit: Int, encode: ([T]) throws -> Any) throws -> [String: Any] {
+        let maximum = min(limit, 1000)
+        var valuesPage = Array(values.dropFirst(offset).prefix(maximum))
+        while valuesPage.count > 1 {
+            let object: [String: Any] = ["items": try encode(valuesPage)]
+            if try JSONSerialization.data(withJSONObject: object).count < Self.textLimit / 2 { break }
+            valuesPage.removeLast()
+        }
+        let next = offset + valuesPage.count
+        var result: [String: Any] = ["items": try encode(valuesPage), "offset": offset, "limit": maximum, "total": values.count, "truncated": next < values.count]
+        if next < values.count { result["next_offset"] = next }
+        return result
+    }
+
+    private func textPage(_ text: String, offset: Int, limit: Int) -> (String, Int?) {
+        let characters = Array(text)
+        guard offset < characters.count else { return ("", nil) }
+        var output = "", index = offset
+        let maximum = min(limit, 32_000)
+        while index < characters.count && output.utf8.count + String(characters[index]).utf8.count <= maximum {
+            output.append(characters[index]); index += 1
+        }
+        return (output, index < characters.count ? index : nil)
+    }
+
     private func call(_ tool: Tool, _ a: [String: Any]) throws -> [String: Any] {
         func s(_ key: String) -> String? { a[key] as? String }
         func b(_ key: String) -> Bool { a[key] as? Bool ?? false }
-        if tool.write && b("dry_run") {
-            var arguments = a; arguments.removeValue(forKey: "dry_run")
-            return try content(["dry_run": true, "tool": tool.name, "arguments": arguments, "message": "No changes made."])
+        func i(_ key: String, _ fallback: Int = 0) -> Int { (a[key] as? NSNumber)?.intValue ?? fallback }
+        let offset = i("offset"), limit = max(1, i("limit", 100))
+        if tool.native { return try callNative(tool, a) }
+        if tool.write && b("dry_run") && ["save_attachment", "export_notes"].contains(tool.name) {
+            return try content(["dry_run": true, "tool": tool.name, "engine": "filesystem", "arguments": a, "message": "No changes made."])
         }
         switch tool.name {
         case "list_accounts": return try content(["accounts": NotePresentation.object(reader.accounts())])
         case "list_folders": return try content(["folders": NotePresentation.object(reader.folders(account: s("account")))])
         case "list_tags": return try content(["tags": reader.tags()])
+        case "get_write_policy":
+            let effectiveWriteFolders: Any
+            if let configured = writeFolders ?? ProcessInfo.processInfo.environment["NOTESCLI_WRITE_FOLDERS"] { effectiveWriteFolders = configured }
+            else { effectiveWriteFolders = NSNull() }
+            return try content(["read_only": readOnly, "allow_native": allowNative, "write_folders": effectiveWriteFolders])
         case "get_note":
-            let n = try reader.note(s("ref")!)
-            let format = s("format") ?? "markdown"
-            if format == "json" {
-                let rendered = try NotePresentation.render(n, format: format, attachments: a["attachments"] as? Bool ?? true)
-                return try content(["note": JSONSerialization.jsonObject(with: Data(rendered.utf8))])
-            }
-            return try content(["summary": NotePresentation.object(n.summary), "format": format,
-                                "body": NotePresentation.render(n, format: format, attachments: a["attachments"] as? Bool ?? true)])
-        case "list_notes", "search_notes":
-            let offset = a["offset"] as? Int ?? 0, limit = min(a["limit"] as? Int ?? 100, 1000)
-            let q = NoteQuery(folder: s("folder"), account: s("account"), text: s("query"), includeDeleted: b("include_deleted"), pinnedOnly: b("pinned"), tag: s("tag"), modifiedAfter: try s("since").map { try NotePresentation.date($0) }, modifiedBefore: try s("until").map { try NotePresentation.date($0) })
-            let all = try reader.notes(q)
-            var page = Array(all.dropFirst(offset).prefix(limit))
-            while page.count > 1 {
-                if try NotePresentation.json(page).count <= Self.textLimit - 1024 { break }
-                page.removeLast()
-            }
-            let next = offset + page.count
-            var result: [String: Any] = ["notes": try NotePresentation.object(page), "offset": offset, "limit": limit, "total": all.count, "truncated": next < all.count]
-            if next < all.count { result["next_offset"] = next; result["hint"] = "Call again with next_offset as offset and a positive limit." }
+            let note = try reader.note(s("ref")!), format = s("format") ?? "markdown"
+            let rendered = try NotePresentation.render(note, format: format, attachments: a["attachments"] as? Bool ?? true)
+            let value = textPage(rendered, offset: offset, limit: min(a["limit"] == nil ? 16_000 : limit, 16_000))
+            var result: [String: Any] = ["summary": try NotePresentation.object(note.summary), "format": format, "body": value.0, "offset": offset, "truncated": value.1 != nil]
+            if let next = value.1 { result["next_offset"] = next }
+            if format == "json", value.1 == nil { result["note"] = try JSONSerialization.jsonObject(with: Data(rendered.utf8)) }
             return try content(result)
-        default:
+        case "get_notes":
+            let refs = a["refs"] as! [String], format = s("format") ?? "markdown", maximum = min(limit, 100)
+            let selected = Array(refs.dropFirst(offset).prefix(maximum))
+            let values = try selected.map { ref -> [String: Any] in
+                let note = try reader.note(ref)
+                let rendered = try NotePresentation.render(note, format: format, attachments: true)
+                return ["summary": try NotePresentation.object(note.summary), "format": format,
+                        "body": textPage(rendered, offset: 0, limit: max(1_000, 16_000 / max(1, selected.count))).0]
+            }
+            let next = offset + selected.count
+            var result: [String: Any] = ["notes": values, "offset": offset, "limit": maximum, "total": refs.count, "truncated": next < refs.count]
+            if next < refs.count { result["next_offset"] = next }
+            return try content(result)
+        case "list_notes", "search_notes":
+            let sort = NoteSort(rawValue: s("sort") ?? "modified") ?? .modified
+            let query = NoteQuery(folder: s("folder"), account: s("account"), text: s("query"), includeDeleted: b("include_deleted"),
+                                  pinnedOnly: b("pinned"), tag: s("tag"), modifiedAfter: try s("since").map { try NotePresentation.date($0) },
+                                  modifiedBefore: try s("until").map { try NotePresentation.date($0) })
+            let all = try reader.notes(query, sort: sort)
+            var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }
+            result["notes"] = result.removeValue(forKey: "items")
+            return try content(result)
+        case "query_notes":
+            let index = LocalNotesIndex(url: stateRoot.appendingPathComponent("index.sqlite"))
+            _ = try index.update(from: reader, rebuild: b("rebuild"))
+            let all = try index.search(s("query")!, folder: s("folder"), limit: 5000)
+            var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }
+            result["hits"] = result.removeValue(forKey: "items")
+            return try content(result)
+        case "list_attachments": return try content(["attachments": NotePresentation.object(reader.attachments(s("ref")!))])
+        case "save_attachment":
+            var result = try saveAttachment(ref: s("ref")!, attachmentID: s("attachment_id")!, output: s("output")!)
+            result["engine"] = "filesystem"
+            return try content(result)
+        case "list_backlinks": return try content(["notes": NotePresentation.object(reader.backlinks(s("ref")!))])
+        case "get_deeplink":
+            let summary = try reader.summary(s("ref")!)
+            return try content(["url": summary.deepLink ?? "applenotes://showNote?identifier=\(summary.id.uuid)"])
+        case "list_smart_folders": return try content(["folders": NotePresentation.object(reader.smartFolders(evaluate: b("evaluate")))])
+        case "list_deleted":
+            let all = try reader.notes(NoteQuery(includeDeleted: true)).filter(\.isDeleted)
+            var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }; result["notes"] = result.removeValue(forKey: "items")
+            return try content(result)
+        case "recent_notes", "today_notes":
+            let calendar = Calendar.current
+            let start = tool.name == "today_notes" ? calendar.startOfDay(for: Date()) : calendar.date(byAdding: .day, value: -max(1, i("days", 7)), to: Date())!
+            let all = try reader.notes(NoteQuery(modifiedAfter: start), sort: .modified)
+            var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }; result["notes"] = result.removeValue(forKey: "items")
+            return try content(result)
+        case "count_notes":
+            let query = NoteQuery(folder: s("folder"), account: s("account"), includeDeleted: b("include_deleted"), pinnedOnly: b("pinned"), tag: s("tag"), modifiedAfter: try s("since").map { try NotePresentation.date($0) }, modifiedBefore: try s("until").map { try NotePresentation.date($0) })
+            return try content(["count": reader.notes(query).count])
+        case "get_stats":
+            let notes = try reader.notes(NoteQuery(includeDeleted: true))
+            var folders: [String: Int] = [:], accounts: [String: Int] = [:]
+            for note in notes { folders[note.folderPath.joined(separator: " > "), default: 0] += 1; accounts[note.accountID, default: 0] += 1 }
+            return try content(["total": notes.count, "by_folder": folders, "by_account": accounts, "by_kind": reader.attachmentKindCounts()])
+        case "get_raw_note":
+            let raw = try String(decoding: NotePresentation.json(reader.rawNote(s("ref")!)), as: UTF8.self)
+            let value = textPage(raw, offset: offset, limit: min(a["limit"] == nil ? 16_000 : limit, 16_000))
+            var result: [String: Any] = ["json": value.0, "offset": offset, "truncated": value.1 != nil]
+            if let next = value.1 { result["next_offset"] = next }
+            return try content(result)
+        case "related_notes":
+            let note = try reader.note(s("ref")!), backlinks = try reader.backlinks(note.summary.id.uuid)
+            let candidates = try reader.notes(NoteQuery()).filter { $0.id.uuid != note.summary.id.uuid }
+            let tagSet = Set(note.summary.tags)
+            let related = candidates.filter { !tagSet.isDisjoint(with: $0.tags) || backlinks.contains($0) }
+            var result = try page(related, offset: offset, limit: limit) { try NotePresentation.object($0) }; result["notes"] = result.removeValue(forKey: "items")
+            return try content(result)
+        case "export_notes":
+            let format = NotesExportFormat(rawValue: s("format") ?? "markdown") ?? .markdown
+            let report = try NotesExporter(reader: reader).run(ExportOptions(output: URL(fileURLWithPath: s("output")!), folder: s("folder"), format: format,
+                includeAttachments: a["include_attachments"] as? Bool ?? true, embedMedia: b("embed_media"), template: s("template"),
+                filenameTemplate: s("filename_template"), obsidian: b("obsidian"), prune: b("prune")))
+            return try content(["engine": "filesystem", "report": NotePresentation.object(report)])
+        case "sync_notes":
+            guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }
+            let folder = s("folder")!, paths = try folderPaths(folder)
+            let notes = try reader.notes(NoteQuery(folder: folder)).compactMap { try? reader.note($0.id.uuid) }
+            return try safeWrite(tool: tool, arguments: a, note: nil, paths: paths, engine: "scripting", snapshotNotes: notes) {
+                let report = try MarkdownSync(reader: reader, writer: writer).run(SyncOptions(directory: URL(fileURLWithPath: s("directory")!), folder: folder, propagateDeletes: b("propagate_deletes")))
+                return (WriteResult(outcome: .verified, message: "Sync pass completed."), try NotePresentation.object(report), nil)
+            }
+        default: return try callScriptingWrite(tool, a)
+        }
+    }
+
+    private func callScriptingWrite(_ tool: Tool, _ a: [String: Any]) throws -> [String: Any] {
+        func s(_ key: String) -> String? { a[key] as? String }
+        func b(_ key: String) -> Bool { a[key] as? Bool ?? false }
+        if ["batch_move_notes", "batch_delete_notes"].contains(tool.name) {
+            let refs = a["refs"] as! [String]
+            var results: [[String: Any]] = []
+            for ref in refs {
+                var item = a; item.removeValue(forKey: "refs"); item["ref"] = ref
+                if let key = a["idempotency_key"] as? String { item["idempotency_key"] = "\(key):\(ref)" }
+                let itemTool = tools.first { $0.name == (tool.name == "batch_move_notes" ? "move_note" : "delete_note") }!
+                do { results.append(["ref": ref, "response": try callScriptingWrite(itemTool, item)]) }
+                catch { results.append(["ref": ref, "error": try NotePresentation.object(error as? NotesError ?? NotesError("internal_error", String(describing: error)))]) }
+            }
+            return try content(["results": results])
+        }
+        let noteTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note"])
+        let note = try noteTools.contains(tool.name) ? s("ref").flatMap { try reader.note($0) } : nil
+        let paths = try writePaths(tool: tool, arguments: a, note: note)
+        return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting") {
             guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }
             let result: WriteResult
             switch tool.name {
             case "create_note": result = try writer.createNote(title: s("title")!, markdown: s("body")!, folder: s("folder"))
             case "append_to_note": result = try writer.appendToNote(s("ref")!, markdown: s("body")!)
-            case "update_note": result = try writer.replaceBody(s("ref")!, markdown: s("body")!)
+            case "prepend_to_note": result = try writer.prependToNote(s("ref")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "update_note", "write_markdown": result = try writer.replaceBody(s("ref")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "insert_under_heading": result = try writer.insertUnderHeading(s("ref")!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "replace_section": result = try writer.replaceSection(s("ref")!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "replace_text": result = try writer.replaceText(s("ref")!, find: s("find")!, replacement: s("replacement")!, allowAttachmentLoss: b("allow_attachment_loss"))
             case "rename_note": result = try writer.renameNote(s("ref")!, title: s("title")!)
             case "move_note": result = try writer.moveNote(s("ref")!, toFolder: s("folder")!)
             case "delete_note": result = try writer.deleteNote(s("ref")!)
             case "create_folder": result = try writer.createFolder(name: s("name")!, parent: s("parent"), account: s("account"))
             case "rename_folder": result = try writer.renameFolder(s("ref")!, name: s("name")!)
+            case "move_folder": result = try writer.moveFolder(s("ref")!, toParent: s("parent"), account: s("account"))
             case "delete_folder": result = try writer.deleteFolder(s("ref")!)
             default: throw NotesError("unknown_tool", "Unknown tool.")
             }
-            return try content(["result": NotePresentation.object(result)], isError: result.outcome == .unknown)
+            return (result, nil, nil)
         }
     }
+
+    private func callNative(_ tool: Tool, _ arguments: [String: Any]) throws -> [String: Any] {
+        guard allowNative else { throw NotesError("native_required", "This tool requires the private native engine.", hint: "Start notescli mcp with --allow-native.") }
+        guard let nativeHandler else { throw NotesError("native_unavailable", "The native engine is not available.") }
+        if !tool.write {
+            let value = try nativeHandler(tool.name, arguments)
+            return try content(["engine": "native", "value": try JSONSerialization.jsonObject(with: value.value)])
+        }
+        if tool.name == "move_folder" {
+            let source = try folder(arguments["ref"] as! String)
+            let destination = try (arguments["parent"] as? String).map(folder)
+            let notes = try reader.notes(NoteQuery()).filter { $0.folderPath.starts(with: source.path) }
+                .map { try reader.note($0.id.uuid) }
+            var dispatch = arguments
+            dispatch["ref"] = source.id
+            dispatch["parent"] = destination?.id
+            let paths = [source.path, (destination?.path ?? []) + [source.name]]
+            return try safeWrite(tool: tool, arguments: arguments, note: nil, paths: paths, engine: "native", snapshotNotes: notes) {
+                let value = try nativeHandler(tool.name, dispatch)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        var targetNotes: [Note] = []
+        if let ref = arguments["ref"] as? String { targetNotes = [try reader.note(ref)] }
+        else if let tag = arguments["tag"] as? String { targetNotes = try reader.notes(NoteQuery(tag: tag)).map { try reader.note($0.id.uuid) } }
+        let note = targetNotes.first, paths = targetNotes.map(\.summary.folderPath)
+        var dispatchArguments = arguments
+        if let note { dispatchArguments["ref"] = note.summary.id.uuid }
+        if tool.name == "link_add", let target = arguments["target"] as? String {
+            dispatchArguments["target"] = try reader.summary(target).id.uuid
+        }
+        return try safeWrite(tool: tool, arguments: arguments, note: note, paths: paths, engine: "native", snapshotNotes: targetNotes) {
+            let value = try nativeHandler(tool.name, dispatchArguments)
+            guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+            return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+        }
+    }
+
+    private func safeWrite(tool: Tool, arguments: [String: Any], note: Note?, paths: [[String]], engine: String,
+                           snapshotNotes: [Note] = [],
+                           action: () throws -> (WriteResult, Any?, String?)) throws -> [String: Any] {
+        let configured = arguments["write_folders"] as? String ?? writeFolders ?? ProcessInfo.processInfo.environment["NOTESCLI_WRITE_FOLDERS"]
+        let allowlist = WriteAllowlist(configured)
+        if allowlist.isRestricted && paths.isEmpty { throw NotesError("write_not_allowed", "The target folder could not be resolved for the write allowlist.") }
+        for path in paths { try allowlist.require(path) }
+        if let note {
+            try ConcurrencyGuard.require(note, ifModified: arguments["if_modified"] as? String, expectRevision: arguments["expect_revision"] as? String)
+        }
+        if arguments["dry_run"] as? Bool == true {
+            var clean = arguments
+            for key in ["dry_run", "idempotency_key", "if_modified", "expect_revision", "write_folders"] { clean.removeValue(forKey: key) }
+            return try content(["dry_run": true, "tool": tool.name, "engine": engine, "arguments": clean, "message": "No changes made."])
+        }
+        if !snapshotNotes.isEmpty {
+            for target in snapshotNotes { _ = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots")).save(target) }
+        } else if tool.destructive, let note {
+            _ = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots")).save(note)
+        }
+        try FileManager.default.createDirectory(at: stateRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var recorded = arguments
+        recorded["tool"] = tool.name; recorded["engine"] = engine
+        if let note { recorded["stable_id"] = note.summary.id.uuid }
+        let data = try JSONSerialization.data(withJSONObject: recorded, options: [.sortedKeys])
+        let journal = try WriteJournal(url: stateRoot.appendingPathComponent("journal.sqlite"))
+        let begun = try journal.begin(operation: tool.name, arguments: data, idempotencyKey: arguments["idempotency_key"] as? String)
+        if begun.replayed {
+            if let result = begun.entry.result { return try content(["engine": engine, "result": NotePresentation.object(result), "replayed": true]) }
+            throw NotesError("write_outcome_unknown", "The recorded operation has an unresolved outcome.")
+        }
+        do {
+            let (result, details, operationID) = try action()
+            let outcome = JournalOutcome(rawValue: result.outcome.rawValue) ?? .failed
+            let identity = result.noteID.flatMap { $0.uuid.isEmpty ? $0.coreDataID : $0.uuid } ?? result.folderID
+            try journal.finish(begun.entry.id, outcome: outcome, noteID: identity, result: result, message: result.message)
+            var value: [String: Any] = ["engine": engine, "result": try NotePresentation.object(result)]
+            if let operationID { value["operationID"] = operationID }
+            if let details { value["details"] = details }
+            return try content(value, isError: result.outcome == .unknown)
+        } catch {
+            try? journal.finish(begun.entry.id, outcome: .failed, message: String(describing: error))
+            throw error
+        }
+    }
+
+    private func writePaths(tool: Tool, arguments: [String: Any], note: Note?) throws -> [[String]] {
+        if let note {
+            var values = [note.summary.folderPath]
+            if let folder = arguments["folder"] as? String { values += try folderPaths(folder) }
+            return values
+        }
+        if tool.name == "create_note", let folder = arguments["folder"] as? String { return try folderPaths(folder) }
+        if ["create_folder", "rename_folder", "move_folder", "delete_folder"].contains(tool.name) {
+            var values: [[String]] = []
+            if let ref = arguments["ref"] as? String { values += try folderPaths(ref) }
+            if let parent = arguments["parent"] as? String { values += try folderPaths(parent) }
+            if tool.name == "create_folder" {
+                let parent = (arguments["parent"] as? String).map { $0.split(separator: ">").map { $0.trimmingCharacters(in: .whitespaces) } } ?? []
+                values.append(parent + [arguments["name"] as! String])
+            }
+            return values
+        }
+        return []
+    }
+
+    private func folderPaths(_ ref: String) throws -> [[String]] {
+        [try folder(ref).path]
+    }
+
+    private func folder(_ ref: String) throws -> Folder {
+        let matches = try reader.folders(account: nil).filter { $0.id == ref || $0.coreDataID == ref || $0.name == ref || $0.path.joined(separator: " > ") == ref }
+        guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "folder_not_found" : "ambiguous_folder", "Folder must resolve uniquely.") }
+        return matches[0]
+    }
+
+    private func saveAttachment(ref: String, attachmentID: String, output: String) throws -> [String: Any] {
+        let attachment = try reader.attachments(ref).first { $0.id == attachmentID }
+        guard let attachment else { throw NotesError("attachment_not_found", "The attachment was not found.") }
+        guard let path = attachment.filePath else { throw NotesError("attachment_unavailable", "The attachment original is not available on disk.") }
+        let source = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let target = URL(fileURLWithPath: output).standardizedFileURL
+        guard !FileManager.default.fileExists(atPath: target.path) else { throw NotesError("file_exists", "Refusing to replace an existing file.") }
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: source, to: target)
+        return ["attachment_id": attachmentID, "path": target.path, "bytes": (try Data(contentsOf: target)).count]
+    }
+
+    private func readResource(_ params: [String: Any]) throws -> [String: Any] {
+        guard let uri = params["uri"] as? String else { throw NotesError("invalid_resource", "uri is required.") }
+        if uri == "notes://folders" {
+            let text = String(decoding: try NotePresentation.json(reader.folders(account: nil)), as: UTF8.self)
+            return ["contents": [["uri": uri, "mimeType": "application/json", "text": text]]]
+        }
+        guard uri.hasPrefix("notes://note/") else { throw NotesError("resource_not_found", "Unknown Notes resource.") }
+        let ref = String(uri.dropFirst("notes://note/".count)).removingPercentEncoding ?? ""
+        let text = String(decoding: try NotePresentation.json(reader.note(ref)), as: UTF8.self)
+        return ["contents": [["uri": uri, "mimeType": "application/json", "text": text]]]
+    }
+
+    private func getPrompt(_ params: [String: Any]) throws -> [String: Any] {
+        guard let name = params["name"] as? String else { throw NotesError("invalid_prompt", "name is required.") }
+        let arguments = params["arguments"] as? [String: Any] ?? [:]
+        switch name {
+        case "find_note":
+            guard let query = arguments["query"] as? String else { throw NotesError("invalid_prompt", "query is required.") }
+            return ["description": "Find and summarize matching notes", "messages": [["role": "user", "content": ["type": "text", "text": "Use search_notes for \"\(query)\". Summarize only the matching Notes content and cite note titles."]]]]
+        case "weekly_review":
+            return ["description": "Review recent notes", "messages": [["role": "user", "content": ["type": "text", "text": "Use recent_notes with days=7. Group the results by topic and list unresolved checklist items."]]]]
+        default: throw NotesError("prompt_not_found", "Unknown prompt.")
+        }
+    }
+
     public func run() {
         while let line = readLine() {
             if let response = handleLine(line) { FileHandle.standardOutput.write(Data((response + "\n").utf8)) }

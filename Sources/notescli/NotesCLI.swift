@@ -7,7 +7,7 @@ import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Link.self, Backlinks.self, AttachmentsCommand.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, TableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
     @OptionGroup var options: GlobalOptions
 
     static func main() {
@@ -279,12 +279,16 @@ struct CreateFolder: ParsableCommand {
         let backend = try options.writable(), writer = try backend.writer()
         let components = parents ? name.split(separator: ">").map { $0.trimmingCharacters(in: .whitespaces) } : [name]
         let resolvedParent = try SafetyExecutor.folder(parent, reader: backend.reader)
-        var currentParent = resolvedParent?.path.joined(separator: " > ")
+        var currentParentPath = resolvedParent?.path.joined(separator: " > ")
+        var currentParentRef = backend.isFake ? currentParentPath : resolvedParent?.coreDataID
         var currentPath = resolvedParent?.path ?? []
         var activePaths = try (writer as? ScriptingNotesWriter).map {
             Set(try $0.listFoldersViaScripting().map { $0.path.joined(separator: " > ") })
         }
-        if let currentParent, let activePaths, !activePaths.contains(currentParent) {
+        if resolvedParent != nil, currentParentRef == nil {
+            throw NotesError("stale_folder", "The parent folder has no stable Notes.app identity.")
+        }
+        if let currentParentPath, let activePaths, !activePaths.contains(currentParentPath) {
             throw NotesError("folder_not_found", "The parent folder does not exist in Notes.app.")
         }
         var results: [WriteResult] = []
@@ -294,23 +298,33 @@ struct CreateFolder: ParsableCommand {
             let pathRef = path.joined(separator: " > ")
             let exists = activePaths?.contains(pathRef) ?? ((try? SafetyExecutor.folder(pathRef, reader: backend.reader)) != nil)
             if exists {
-                currentParent = path.joined(separator: " > "); currentPath = path; continue
+                let existing = try SafetyExecutor.folder(pathRef, reader: backend.reader)
+                currentParentPath = pathRef
+                currentParentRef = backend.isFake ? pathRef : existing?.coreDataID
+                guard currentParentRef != nil else { throw NotesError("stale_folder", "The existing folder has no stable Notes.app identity.") }
+                currentPath = path
+                continue
             }
             let plan = DryRunPlan(operation: "createFolder", target: path.joined(separator: " > "), arguments: ["name": component], resultingHTML: nil)
             var itemWrite = write
             itemWrite.idempotencyKey = write.idempotencyKey.map { "\($0):\(path.joined(separator: ">"))" }
-            if let result = try SafetyExecutor.run(options: itemWrite, operation: "createFolder", arguments: ["name": component, "parent": currentParent ?? "", "account": account ?? ""],
+            if let result = try SafetyExecutor.run(options: itemWrite, operation: "createFolder", arguments: ["name": component, "parent": currentParentRef ?? "", "account": account ?? ""],
                 allowedPaths: [path], plan: plan, emitDryRun: false,
-                action: { try writer.createFolder(name: component, parent: currentParent, account: account) }) {
-                results.append(result); currentParent = path.joined(separator: " > ")
+                action: { try writer.createFolder(name: component, parent: currentParentRef, account: account) }) {
+                results.append(result)
+                currentParentPath = pathRef
+                currentParentRef = backend.isFake ? pathRef : result.folderID
                 activePaths?.insert(pathRef)
             }
             plans.append(plan)
-            if write.dryRun { currentParent = path.joined(separator: " > ") }
+            if write.dryRun {
+                currentParentPath = pathRef
+                currentParentRef = pathRef
+            }
             currentPath = path
         }
         if write.dryRun { try outputDryRunPlans(plans, json: options.json) }
-        else if options.json { try Output.json(results) }
+        else if options.json { try Output.json(results.map { EngineWriteResponse(engine: "scripting", result: $0) }) }
         else { for result in results { try Output.write(result, json: false) } }
     }
 }
@@ -325,7 +339,7 @@ struct RenameFolder: ParsableCommand {
         let source = folder?.path.joined(separator: " > ") ?? ref
         let targetPath = Array(folder?.path.dropLast() ?? []) + [name]
         let plan = DryRunPlan(operation: "renameFolder", target: ref, arguments: ["name": name], resultingHTML: nil)
-        if let result = try SafetyExecutor.run(options: write, operation: "renameFolder", arguments: ["ref": ref, "name": name],
+        if let result = try SafetyExecutor.run(options: write, operation: "renameFolder", arguments: ["ref": ref, "name": name, "stable_id": folder?.id ?? ""],
             allowedPaths: [folder?.path, targetPath].compactMap { $0 }, destructive: false, plan: plan,
             action: { try backend.writer().renameFolder(source, name: name) }) { try Output.write(result, json: options.json) }
     }
@@ -343,7 +357,20 @@ struct DeleteFolder: ParsableCommand {
         let writer = try backend.writer()
         // Identify the subtree by stable ids and parent links, never by path: Notes allows
         // sibling folders with the same name, so paths are ambiguous.
-        let allFolders = try backend.reader.folders(account: nil)
+        var allFolders = try backend.reader.folders(account: nil)
+        var activeNoteIDs: Set<String>?
+        if let scripting = writer as? ScriptingNotesWriter, let coreDataID = folder.coreDataID {
+            let active = try scripting.listFoldersViaScripting()
+            guard active.contains(where: { $0.id == coreDataID }) else {
+                throw NotesError("folder_not_found", "Notes.app does not show this folder.")
+            }
+            let activeIDs = Set(active.map(\.id))
+            allFolders.removeAll { item in
+                guard let id = item.coreDataID else { return true }
+                return !activeIDs.contains(id)
+            }
+            activeNoteIDs = Set(try scripting.listViaScripting().map(\.id))
+        }
         var subtreeIDs: Set<String> = [folder.id]
         var grew = true
         while grew {
@@ -353,17 +380,16 @@ struct DeleteFolder: ParsableCommand {
             }
         }
         let descendants = allFolders.filter { subtreeIDs.contains($0.id) }
-        let notes = try backend.reader.notes(NoteQuery(includeDeleted: false)).filter { subtreeIDs.contains($0.folderID ?? "") }
-        if let scripting = writer as? ScriptingNotesWriter, let coreDataID = folder.coreDataID {
-            // Confirm Notes.app sees exactly this folder before deleting anything.
-            guard try scripting.listFoldersViaScripting().contains(where: { $0.id == coreDataID }) else {
-                throw NotesError("folder_not_found", "Notes.app does not show this folder.")
-            }
+        let notes = try backend.reader.notes(NoteQuery(includeDeleted: false)).filter { summary in
+            guard subtreeIDs.contains(summary.folderID ?? "") else { return false }
+            guard let activeNoteIDs else { return true }
+            guard let id = summary.id.coreDataID else { return false }
+            return activeNoteIDs.contains(id)
         }
         if backend.isFake && expectCount == nil {
             if !write.dryRun { try confirm("Delete folder \(ref) and move its notes to Recently Deleted?", yes: yes) }
             let plan = DryRunPlan(operation: "deleteFolder", target: folder.path.joined(separator: " > "), arguments: [:], resultingHTML: nil)
-            if let result = try SafetyExecutor.run(options: write, operation: "deleteFolder", arguments: ["ref": ref], allowedPaths: [folder.path],
+            if let result = try SafetyExecutor.run(options: write, operation: "deleteFolder", arguments: ["ref": ref, "stable_id": folder.id], allowedPaths: [folder.path],
                 plan: plan, action: { try backend.writer().deleteFolder(ref) }) { try Output.write(result, json: options.json) }
             return
         }
@@ -375,6 +401,10 @@ struct DeleteFolder: ParsableCommand {
         if let scripting = writer as? ScriptingNotesWriter {
             try scripting.validateFolderDelete(folder.coreDataID ?? folder.path.joined(separator: " > "), expectedCount: notes.count)
         }
+        let allowedFolderIDs = descendants.compactMap(\.coreDataID)
+        if writer is ScriptingNotesWriter, allowedFolderIDs.count != descendants.count {
+            throw NotesError("stale_folder", "The folder subtree could not be resolved to stable Notes.app folder identities.")
+        }
         var plans: [DryRunPlan] = []
         for summary in notes {
             let note = try backend.reader.note(summary.id.uuid)
@@ -385,15 +415,20 @@ struct DeleteFolder: ParsableCommand {
             _ = try SafetyExecutor.run(options: itemWrite, operation: "deleteNote", arguments: ["ref": summary.id.uuid], note: note,
                 allowedPaths: [note.summary.folderPath], destructive: true,
                 plan: plan, emitDryRun: false,
-                action: { try writer.deleteNote(summary.id.uuid) })
+                action: {
+                    if let scripting = writer as? ScriptingNotesWriter {
+                        return try scripting.deleteNote(summary.id.uuid, allowedFolderIDs: allowedFolderIDs)
+                    }
+                    return try writer.deleteNote(summary.id.uuid)
+                })
             plans.append(plan)
         }
         for item in descendants.sorted(by: { $0.path.count > $1.path.count }) {
             let plan = DryRunPlan(operation: "deleteFolder", target: item.path.joined(separator: " > "), arguments: [:], resultingHTML: nil)
             var itemWrite = write
             itemWrite.idempotencyKey = write.idempotencyKey.map { "\($0):folder:\(item.path.joined(separator: ">"))" }
-            let itemRef = item.path.joined(separator: " > ")
-            if let result = try SafetyExecutor.run(options: itemWrite, operation: "deleteFolder", arguments: ["ref": itemRef], allowedPaths: [item.path],
+            let itemRef = backend.isFake ? item.path.joined(separator: " > ") : (item.coreDataID ?? item.path.joined(separator: " > "))
+            if let result = try SafetyExecutor.run(options: itemWrite, operation: "deleteFolder", arguments: ["ref": itemRef, "stable_id": item.id], allowedPaths: [item.path],
                 destructive: false, plan: plan, emitDryRun: false, action: { try writer.deleteFolder(itemRef) }), item.path == folder.path {
                 try Output.write(result, json: options.json)
             }
@@ -409,14 +444,6 @@ struct Open: ParsableCommand {
         let backend = try options.backends(), note = try backend.reader.note(ref)
         try backend.openNote(note.summary.id)
         if options.json { try Output.json(["opened": note.summary.id.uuid]) } else { print("Opened \(note.summary.title)") }
-    }
-}
-struct MCP: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "mcp", abstract: "Run MCP on stdio.")
-    @OptionGroup var options: GlobalOptions
-    func run() throws {
-        let backend = try options.backends()
-        MCPServer(reader: backend.reader, writer: options.readOnly ? nil : try backend.writer(), readOnly: options.readOnly).run()
     }
 }
 struct Completion: ParsableCommand {

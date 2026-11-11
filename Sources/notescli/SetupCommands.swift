@@ -2,6 +2,8 @@ import ArgumentParser
 import Foundation
 import NotesCore
 import NotesMCP
+import NotesNative
+import NotesSafety
 
 enum MCPClient: String, CaseIterable, ExpressibleByArgument {
     case claudeCode = "claude-code"
@@ -31,10 +33,77 @@ struct MCPRoot: ParsableCommand {
         subcommands: [MCPInstall.self, MCPUninstall.self, MCPStatus.self]
     )
     @OptionGroup var options: GlobalOptions
+    @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.") var allowNative = false
 
     func run() throws {
         let backend = try options.backends()
-        MCPServer(reader: backend.reader, writer: options.readOnly ? nil : try backend.writer(), readOnly: options.readOnly).run()
+        let selectedWriter: (any NotesWriting)? = options.readOnly ? nil : try backend.writer()
+        let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1) } : nil
+        let server = MCPServer(reader: backend.reader, writer: selectedWriter, readOnly: options.readOnly,
+                               allowNative: allowNative, nativeHandler: handler,
+                               stateRoot: NotesSafetyPaths.applicationSupport)
+        server.run()
+    }
+}
+
+private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws -> MCPNativeResult {
+    func string(_ key: String) -> String? { arguments[key] as? String }
+    func integer(_ key: String) -> Int? { (arguments[key] as? NSNumber)?.intValue }
+    func boolean(_ key: String) -> Bool? { arguments[key] as? Bool }
+    func ref() throws -> String {
+        guard let value = string("ref") else { throw NotesError("invalid_arguments", "ref is required.") }
+        return value
+    }
+    func result(_ value: NativeWriteResult) throws -> MCPNativeResult {
+        try MCPNativeResult(result: value.writeResult, operationID: value.operationID, value: value)
+    }
+    let writer = NativeNotesWriter()
+    switch tool {
+    case "checklist_list": return try MCPNativeResult(value: writer.checklistItems(ref()))
+    case "checklist_add": return try result(writer.insertChecklist(ref(), text: string("text")!, position: integer("position"), allowShared: false))
+    case "checklist_toggle":
+        let selection: ChecklistSelection
+        if let index = integer("index") { selection = .index(index) }
+        else if let text = string("text") { selection = .text(text) }
+        else { throw NotesError("invalid_arguments", "index or text is required.") }
+        return try result(writer.toggleChecklist(ref(), selection: selection, done: boolean("done"), allowShared: false))
+    case "checklist_check_all": return try result(writer.setAllChecklist(ref(), done: true, allowShared: false))
+    case "checklist_uncheck_all": return try result(writer.setAllChecklist(ref(), done: false, allowShared: false))
+    case "checklist_clear_done": return try result(writer.deleteCompleted(ref(), allowShared: false))
+    case "pin_note": return try result(writer.setPinned(ref(), pinned: true, allowShared: false))
+    case "unpin_note": return try result(writer.setPinned(ref(), pinned: false, allowShared: false))
+    case "tag_add": return try result(writer.addTag(ref(), tag: string("tag")!, position: integer("position"), allowShared: false))
+    case "tag_remove": return try result(writer.removeTag(ref(), tag: string("tag")!, allowShared: false))
+    case "tag_rename": return try result(writer.renameTag(string("tag")!, to: string("new_name")!, expectedCount: integer("expected_count")!))
+    case "tag_delete": return try result(writer.deleteTag(string("tag")!, expectedCount: integer("expected_count")!))
+    case "link_add": return try result(writer.insertNoteLink(ref(), target: string("target")!, text: string("text"), position: integer("position"), allowShared: false))
+    case "link_list": return try MCPNativeResult(value: writer.links(ref()))
+    case "text_find": return try MCPNativeResult(value: writer.searchOffsets(ref(), text: string("text")!, caseInsensitive: boolean("case_insensitive") ?? false))
+    case "text_insert": return try result(writer.insertText(ref(), text: string("text")!, position: integer("position")!, allowShared: false))
+    case "text_delete": return try result(writer.deleteRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), allowShared: false))
+    case "text_replace": return try result(writer.replaceRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), text: string("text")!, allowShared: false))
+    case "format_paragraph":
+        guard let style = NativeParagraphStyle(rawValue: string("style") ?? "") else { throw NotesError("invalid_style", "Unknown paragraph style.") }
+        return try result(writer.setParagraphStyle(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), style: style, indent: integer("indent"), allowShared: false))
+    case "format_inline":
+        let format = InlineFormat(bold: boolean("bold"), italic: boolean("italic"), underline: boolean("underline"), strike: boolean("strike"),
+                                  link: string("link"), clearLink: boolean("clear_link") ?? false, color: string("color"), clearColor: boolean("clear_color") ?? false)
+        return try result(writer.setInlineFormat(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format, allowShared: false))
+    case "attach_file":
+        let value = try writer.insertFile(ref(), file: URL(fileURLWithPath: string("path")!), position: integer("position"), imageView: string("view"), allowShared: false)
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "delete_attachment": return try result(writer.deleteAttachment(ref(), attachmentID: string("attachment_id")!, allowShared: false))
+    case "table_create":
+        guard let rows = arguments["rows"] as? [[String]] else { throw NotesError("invalid_arguments", "rows must be an array of string arrays.") }
+        return try result(writer.createTable(ref(), rows: rows, position: integer("position"), allowShared: false))
+    case "table_set": return try result(writer.editTable(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!, text: string("text")!, allowShared: false))
+    case "table_add_row", "table_remove_row", "table_add_column", "table_remove_column":
+        let axis = tool.contains("row") ? "row" : "column", add = tool.contains("add")
+        return try result(writer.resizeTable(ref(), attachmentID: string("attachment_id")!, axis: axis, index: integer("index")!, add: add, allowShared: false))
+    case "duplicate_note": return try result(writer.duplicate(ref(), title: string("title"), allowShared: false))
+    case "restore_note": return try result(writer.restore(ref(), folder: string("folder"), allowShared: false))
+    case "move_folder": return try result(writer.moveFolder(ref(), parent: string("parent"), allowShared: false))
+    default: throw NotesError("unknown_tool", "Unknown native MCP tool.")
     }
 }
 

@@ -107,7 +107,7 @@ enum NotesScripts {
                 // Replacing rich content through HTML can lose embedded attachments.
                 if (n.attachments().length !== 0) fail('attachments_would_be_lost');
                 const body = n.body();
-                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container())};
+                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container()), bodyBefore: body};
                 n.body = body + p.html;
                 changed = true;
                 break;
@@ -115,7 +115,7 @@ enum NotesScripts {
             case 'replaceBody': {
                 const n = note(p.ref); writable(n);
                 if (n.attachments().length !== 0 && p.allowAttachmentLoss !== 'true') fail('attachments_would_be_lost');
-                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container())};
+                result = {id: id(n), folderID: id(n.container()), folderPath: path(n.container()), bodyBefore: n.body()};
                 const title = n.name();
                 n.body = '<h1>' + plainEscape(title) + '</h1>' + p.html;
                 changed = true;
@@ -150,6 +150,10 @@ enum NotesScripts {
             }
             case 'deleteNote': {
                 const n = note(p.ref); writable(n);
+                if (p.allowedFolderIDsJSON) {
+                    const allowed = JSON.parse(p.allowedFolderIDsJSON);
+                    if (!allowed.some(folderID => folderID === id(n.container()))) fail('stale_folder');
+                }
                 if (n.shared()) fail('shared_note');
                 const owner = app.accounts().find(a => folders(a).some(f => id(f) === id(n.container())));
                 if (!owner || !owner.upgraded()) fail('unsupported_account');
@@ -197,7 +201,8 @@ enum NotesScripts {
                 if (p.parent) {
                     activeFolder(parent);
                     if (!folders(a).some(item => id(item) === id(parent))) fail('account_mismatch');
-                    if (id(parent) === id(f) || path(parent).slice(0, path(f).length).every((part, i) => sameName(part, path(f)[i]))) fail('invalid_parent');
+                    const sourcePath = path(f), parentPath = path(parent);
+                    if (id(parent) === id(f) || (parentPath.length >= sourcePath.length && sourcePath.every((part, i) => sameName(part, parentPath[i])))) fail('invalid_parent');
                 }
                 if (children(parent).some(other => id(other) !== id(f) && sameName(other.name(), f.name()))) fail('folder_exists');
                 app.move(f, {to: parent});

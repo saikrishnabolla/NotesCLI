@@ -4,11 +4,22 @@ import NotesCore
 import NotesMCP
 import Darwin
 
+enum WriteEngine: String, ExpressibleByArgument, Codable {
+    case native
+    case scripting
+}
+
 struct GlobalOptions: ParsableArguments {
     @Option(help: "Backend: default or fake. Also accepts NOTESCLI_BACKEND.") var backend: String?
+    @Option(help: "Write engine: scripting (default) or native. Also accepts NOTESCLI_ENGINE.")
+    var engine: WriteEngine = .scripting
     @Flag(help: "Refuse all writes.") var readOnly = false
     @Flag(help: "Print JSON, including errors on stderr.") var json = false
     func backends() throws -> Backends { try Backends.make(backend) }
+    var resolvedEngine: WriteEngine {
+        if CommandLine.arguments.contains(where: { $0 == "--engine" || $0.hasPrefix("--engine=") }) { return engine }
+        return WriteEngine(rawValue: ProcessInfo.processInfo.environment["NOTESCLI_ENGINE"] ?? "") ?? engine
+    }
     func writable() throws -> Backends {
         guard !readOnly else { throw NotesError("read_only", "Writing is disabled by --read-only.") }
         return try backends()
@@ -33,9 +44,13 @@ enum Output {
         else { table(["ID", "TITLE", "FOLDER", "MODIFIED"], notes.map { [$0.id.uuid, $0.title + ($0.isLocked ? " [locked]" : ""), $0.folderPath.joined(separator: " > "), $0.modified.map { ISO8601DateFormatter().string(from: $0) } ?? ""] }) }
     }
     static func write(_ result: WriteResult, json: Bool) throws {
-        if result.outcome == .unknown { throw NotesError("write_outcome_unknown", result.message ?? "The write may have completed. Do not retry automatically.", hint: "Read the note before retrying.") }
-        if json { try Self.json(result) }
-        else { table(["OUTCOME", "ID", "MESSAGE"], [[result.outcome.rawValue, result.noteID?.uuid ?? result.folderID ?? "", result.message ?? ""]]) }
+        let response = EngineWriteResponse(engine: "scripting", result: result)
+        if result.outcome == .unknown {
+            if json { try Self.json(response) }
+            throw NotesError("write_outcome_unknown", result.message ?? "The write may have completed. Do not retry automatically.", hint: "Read the note before retrying.")
+        }
+        if json { try Self.json(response) }
+        else { table(["ENGINE", "OUTCOME", "ID", "MESSAGE"], [[response.engine, result.outcome.rawValue, result.noteID?.uuid ?? result.folderID ?? "", result.message ?? ""]]) }
     }
 }
 

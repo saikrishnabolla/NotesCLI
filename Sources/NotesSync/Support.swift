@@ -75,8 +75,9 @@ enum SafePath {
         guard !relative.hasPrefix("/"), !relative.split(separator: "/", omittingEmptySubsequences: false).contains("..") else {
             throw NotesSyncError.invalidPath(relative)
         }
-        let url = root.appendingPathComponent(relative).standardizedFileURL
-        let rootPath = root.standardizedFileURL.resolvingSymlinksInPath().path
+        let canonicalRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+        let url = canonicalRoot.appendingPathComponent(relative).standardizedFileURL
+        let rootPath = canonicalRoot.path
         let resolved = url.resolvingSymlinksInPath().path
         guard resolved == rootPath || resolved.hasPrefix(rootPath + "/") else { throw NotesSyncError.invalidPath(relative) }
         return url

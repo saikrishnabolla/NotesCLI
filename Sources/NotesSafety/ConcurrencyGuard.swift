@@ -17,7 +17,7 @@ public enum ConcurrencyGuard {
         }
         if let ifModified {
             guard let expected = date(ifModified) else { throw NotesError("invalid_date", "--if-modified must be an ISO 8601 date.") }
-            guard let actual = note.summary.modified, matches(actual, expected: expected, source: ifModified) else {
+            guard let actual = note.summary.modified, abs(actual.timeIntervalSince(expected)) < 0.001 else {
                 throw NotesError("stale_note", "The note changed after it was read.")
             }
         }
@@ -34,10 +34,5 @@ public enum ConcurrencyGuard {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
-    }
-
-    private static func matches(_ actual: Date, expected: Date, source: String) -> Bool {
-        if source.contains(".") { return abs(actual.timeIntervalSince(expected)) < 0.001 }
-        return floor(actual.timeIntervalSince1970) == floor(expected.timeIntervalSince1970)
     }
 }

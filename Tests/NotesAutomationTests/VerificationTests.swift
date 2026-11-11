@@ -18,7 +18,8 @@ final class VerificationTests: XCTestCase {
     func testCreateVerificationReturnsStableIdentifier() throws {
         let reader = InMemoryNotes.sample()
         let created = try reader.createNote(title: "Draft", markdown: "Body", folder: "Notes")
-        let request = WriteVerificationRequest(operation: .createNote, title: "Draft", markdown: "Body", expectedFolderPath: ["Notes"],
+        let request = WriteVerificationRequest(operation: .createNote, title: "Draft", markdown: "Body", expectedBody: "Body",
+            expectedFolderPath: ["Notes"],
             result: WriteResult(outcome: .unverified, noteID: created.noteID))
         let result = FreshWriteVerifier(attempts: 1, interval: 0, freshReader: { reader }).verify(request)
         XCTAssertEqual(result.outcome, .verified)
@@ -56,5 +57,28 @@ final class VerificationTests: XCTestCase {
             return true
         }).verify(request)
         XCTAssertEqual(result.outcome, .verified)
+    }
+
+    func testAppendAndReplaceRequireExactExpectedBodyIncludingWhitespace() throws {
+        let sample = InMemoryNotes.sample()
+        var note = try sample.note("welcome")
+        note.document = NoteDocument(text: note.summary.title + "\nbefore  \nappend\n", runs: [])
+        let reader = InMemoryNotes(accounts: try sample.accounts(), folders: try sample.folders(account: nil), notes: [note])
+        let id = note.summary.id
+        let exact = note.summary.title + "\nbefore  \nappend\n"
+        let append = WriteVerificationRequest(operation: .appendToNote, ref: id.uuid, markdown: "append",
+            bodyBefore: note.summary.title + "\nbefore  \n", expectedBody: exact, expectedBodyIncludesTitle: true,
+            result: WriteResult(outcome: .unverified, noteID: id))
+        XCTAssertEqual(FreshWriteVerifier(attempts: 1, interval: 0, freshReader: { reader }).verify(append).outcome, .verified)
+
+        let wrongAppend = WriteVerificationRequest(operation: .appendToNote, ref: id.uuid, markdown: "append",
+            bodyBefore: note.summary.title + "\nbefore \n", expectedBody: note.summary.title + "\nbefore \nappend\n",
+            expectedBodyIncludesTitle: true, result: WriteResult(outcome: .unverified, noteID: id))
+        XCTAssertEqual(FreshWriteVerifier(attempts: 1, interval: 0, freshReader: { reader }).verify(wrongAppend).outcome, .unverified)
+
+        let replace = WriteVerificationRequest(operation: .replaceBody, ref: id.uuid, markdown: "before  \nappend",
+            bodyBefore: "ignored", expectedBody: "before  \nappend\n",
+            result: WriteResult(outcome: .unverified, noteID: id))
+        XCTAssertEqual(FreshWriteVerifier(attempts: 1, interval: 0, freshReader: { reader }).verify(replace).outcome, .verified)
     }
 }

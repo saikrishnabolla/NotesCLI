@@ -7,16 +7,17 @@ final class ScriptSafetyTests: XCTestCase {
     // No Notes Apple Events are sent by these tests.
     private func exercise(_ payload: [String: String]) throws -> [String: Any] {
         let fixture = #"""
-        let deleted = 0, made = 0;
+        let deleted = 0, made = 0, moved = 0;
         const account = {id:()=> 'account', name:()=> 'account', upgraded:()=> true};
         const root = {id:()=> 'root', name:()=> 'Root', container:()=> account, folders:()=> [], notes:()=> [], shared:()=> false};
         const trash = {id:()=> 'trash', name:()=> 'Supprimées récemment', container:()=> account, folders:()=> [], notes:()=> [], shared:()=> false};
         const stale = {container:()=> {const e=new Error('stale'); e.errorNumber=-1728; throw e;}};
         const duplicate = {id:()=> 'duplicate', name:()=> 'Root', container:()=> root, folders:()=> [], notes:()=> [], shared:()=> false};
+        const child = {id:()=> 'child', name:()=> 'Child', container:()=> root, folders:()=> [], notes:()=> [], shared:()=> false};
         const note = {id:()=> 'x-coredata://test/ICNote/p1', name:()=> 'synthetic', container:()=> trash, passwordProtected:()=> false, shared:()=> false};
         account.defaultFolder = ()=> root;
         account.folders = ()=> [root, trash, stale];
-        const app = {defaultAccount:()=> account, accounts:()=> [account], notes:{whose:()=> ()=> [note]}, delete:()=> {deleted++;}, make:()=> {made++; return root;}};
+        const app = {defaultAccount:()=> account, accounts:()=> [account], notes:{whose:()=> ()=> [note]}, delete:()=> {deleted++;}, make:()=> {made++; return root;}, move:()=> {moved++;}};
         function Application(bundle) {return app;}
         """#
         let operation = NotesScripts.operation.replacingOccurrences(of: "function run(argv)", with: "function perform(argv)")
@@ -26,8 +27,10 @@ final class ScriptSafetyTests: XCTestCase {
             if (p.duplicates) root.folders=()=> [duplicate];
             if (p.nonempty) root.notes=()=> [note];
             if (p.listFixture) {note.container=()=>root; root.notes=()=>[note]; trash.notes=()=>[note];}
+            if (p.outsideAllowed) {note.container=()=>root; root.notes=()=>[note];}
+            if (p.moveFixture) root.folders=()=> [child];
             const reply=JSON.parse(perform(argv));
-            return JSON.stringify({reply:reply, deleted:deleted, made:made});
+            return JSON.stringify({reply:reply, deleted:deleted, made:made, moved:moved});
         }
         """#
         let data = try JSONEncoder().encode(payload)
@@ -81,6 +84,21 @@ final class ScriptSafetyTests: XCTestCase {
         XCTAssertEqual(notes.count, 1)
         XCTAssertEqual(notes.first?["title"] as? String, "synthetic")
         XCTAssertEqual(notes.first?["folderPath"] as? [String], ["Root"])
+    }
+
+    func testDeleteRefusesNoteMovedOutsideAllowedSubtree() throws {
+        let result = try exercise(["operation": "deleteNote", "ref": "x-coredata://test/ICNote/p1",
+                                   "outsideAllowed": "yes", "allowedFolderIDsJSON": #"["child"]"#])
+        let reply = try XCTUnwrap(result["reply"] as? [String: Any])
+        XCTAssertEqual(reply["errorCode"] as? String, "stale_folder")
+        XCTAssertEqual(result["deleted"] as? Int, 0)
+    }
+
+    func testMoveFolderAllowsItsCurrentAncestorAsParent() throws {
+        let result = try exercise(["operation": "moveFolder", "ref": "Root > Child", "parent": "Root", "moveFixture": "yes"])
+        let reply = try XCTUnwrap(result["reply"] as? [String: Any])
+        XCTAssertNil(reply["errorCode"])
+        XCTAssertEqual(result["moved"] as? Int, 1)
     }
 
 }

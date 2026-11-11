@@ -1,6 +1,6 @@
 # NotesCLI
 
-NotesCLI is a native macOS command and MCP server for Apple Notes. It reads a private copy of the Notes database and sends writes through Notes.app. It never writes to the database.
+NotesCLI is a macOS command and MCP server for Apple Notes. It reads a private copy of the Notes database. By default, it sends writes through Notes.app scripting.
 
 You need macOS 14 or later. Reading Notes requires Full Disk Access. Creating or changing notes requires Automation access to Notes.
 
@@ -55,11 +55,14 @@ notescli show NOTE_ID --format markdown
 notescli recent 10 --json
 notescli add "Meeting notes" --body "# Notes"
 notescli append NOTE_ID --body "Follow up Friday"
+notescli checklist add NOTE_ID "Follow up Friday" --engine native
 notescli export --out notes-export --attachments
 notescli delete NOTE_ID --yes
 ```
 
-Writes return `verified`, `unverified`, or `unknown`. If a write returns `unknown`, check the note before you retry. Delete moves notes to Recently Deleted.
+Writes return `verified`, `unverified`, or `unknown`, plus the `engine` used. Native results also include `operationID` when available. If a write returns `unknown`, check the note before you retry. Delete moves notes to Recently Deleted.
+
+Rich edits such as native checklists, pins, tags, links, positioned images, tables, styles, range edits, duplication, restore, and folder moves require `--engine native` or `NOTESCLI_ENGINE=native`. The native engine uses Apple's private Notes framework and writes through Notes' own persistent data store. It is opt-in because Apple can change this framework in a macOS update. Keep a backup and run `notescli engine doctor` before using it.
 
 See [Commands](docs/commands.md) for the full command list.
 
@@ -84,14 +87,14 @@ Supported clients are Claude Code, Claude Desktop, Codex, Cursor, and VS Code. E
 
 | Tool | Strength | Tradeoff |
 | --- | --- | --- |
-| NotesCLI | Native universal binary, JSON CLI, MCP, database snapshots, and checked AppleScript writes | Smaller feature set than the largest private-framework tools |
+| NotesCLI | Universal binary, JSON CLI, MCP, snapshots, checked scripting writes, and opt-in rich native edits | Native edits use a private Apple framework that can change with macOS |
 | memo | Fast terminal workflow with `fzf` and previews | No MCP server; depends on Python and terminal helpers |
 | notekit | Broad rich-note editing and Markdown sync | Uses private Notes frameworks and has no MCP server |
 | apple-notes-mcp by sweetrb | Large MCP tool set for rich objects, attachments, and diagnostics | Node-based and uses a mix of database, scripting, and helper paths |
 | macnotesapp | Mature Python CLI with exports, selection access, and attachments | No built-in MCP server |
 | apple-mcp by xiaofeng-han | Broad CLI, MCP, agent setup, and rich native objects | Relies on private Apple frameworks that may change with macOS |
 
-NotesCLI favors a small install, structured output, database read safety, and explicit write outcomes. Notekit, sweetrb's server, and xiaofeng-han's tool cover more rich-object editing and sync features.
+NotesCLI keeps scripting as the default write path and reports explicit write outcomes. Rich native writes require an explicit opt-in.
 
 ## License
 

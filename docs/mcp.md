@@ -6,6 +6,43 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
+The default server exposes 39 tools. Read-only mode exposes the 20 read tools. `notescli mcp --allow-native` exposes 31 more tools that use Apple's private Notes framework.
+
+## Tools
+
+Read tools:
+
+```text
+list_accounts  list_folders  list_notes  search_notes  query_notes
+get_note  get_notes  list_tags  list_attachments  list_backlinks
+get_deeplink  list_smart_folders  list_deleted  recent_notes  today_notes
+count_notes  get_stats  get_raw_note  related_notes  get_write_policy
+```
+
+Scripting, export, and sync tools:
+
+```text
+save_attachment  export_notes  sync_notes
+create_note  append_to_note  prepend_to_note  update_note
+insert_under_heading  replace_section  replace_text  rename_note
+move_note  delete_note  batch_move_notes  batch_delete_notes
+create_folder  rename_folder  delete_folder  write_markdown
+```
+
+Tools added by `--allow-native`:
+
+```text
+checklist_list  checklist_add  checklist_toggle  checklist_check_all
+checklist_uncheck_all  checklist_clear_done  pin_note  unpin_note
+tag_add  tag_remove  tag_rename  tag_delete  link_add  link_list
+text_find  text_insert  text_delete  text_replace
+format_paragraph  format_inline  attach_file  delete_attachment
+table_create  table_set  table_add_row  table_add_column
+table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
+```
+
+The server also provides `notes://folders`, the `notes://note/{uuid}` resource template, and the `find_note` and `weekly_review` prompts. List and body results use `offset` and `limit` when a response could exceed 48 KB.
+
 ## Install client config
 
 ```bash
@@ -53,6 +90,10 @@ Every MCP write tool accepts `dry_run: true`. A real write returns an `outcome`:
 - `unknown`: the request timed out or lost its response. Read current state and never retry automatically.
 
 Use a folder named `notescli-test` and titles beginning with `notescli-test-` for agent experiments. Delete moves items to Recently Deleted.
+
+Every Notes write uses the folder allowlist, concurrency checks, journal, snapshots, and fresh readback. Pass `write_folders` per call or set `NOTESCLI_WRITE_FOLDERS` for the server. Read-only mode hides filesystem write tools as well as Notes write tools.
+
+Native tools stay hidden unless the server starts with `--allow-native`. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
 
 ## Troubleshoot
 

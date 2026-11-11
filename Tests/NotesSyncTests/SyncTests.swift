@@ -5,22 +5,27 @@ import XCTest
 
 final class SyncTests: XCTestCase {
     private final class UnknownAfterWrite: NotesWriting, @unchecked Sendable {
-        enum Operation { case create, replace }
+        enum Operation { case create, replace, rename, move, delete, createFolder }
         let notes: InMemoryNotes, operation: Operation
+        private(set) var calls: [Operation: Int] = [:]
         init(_ notes: InMemoryNotes, operation: Operation) { self.notes = notes; self.operation = operation }
+        private func result(_ value: WriteResult, for candidate: Operation) -> WriteResult {
+            calls[candidate, default: 0] += 1
+            return operation == candidate ? WriteResult(outcome: .unknown, noteID: value.noteID, folderID: value.folderID) : value
+        }
         func createNote(title: String, markdown: String, folder: String?) throws -> WriteResult {
-            let result = try notes.createNote(title: title, markdown: markdown, folder: folder)
-            return operation == .create ? WriteResult(outcome: .unknown, noteID: result.noteID) : result
+            result(try notes.createNote(title: title, markdown: markdown, folder: folder), for: .create)
         }
         func replaceBody(_ ref: String, markdown: String) throws -> WriteResult {
-            let result = try notes.replaceBody(ref, markdown: markdown)
-            return operation == .replace ? WriteResult(outcome: .unknown, noteID: result.noteID) : result
+            result(try notes.replaceBody(ref, markdown: markdown), for: .replace)
         }
         func appendToNote(_ ref: String, markdown: String) throws -> WriteResult { try notes.appendToNote(ref, markdown: markdown) }
-        func renameNote(_ ref: String, title: String) throws -> WriteResult { try notes.renameNote(ref, title: title) }
-        func moveNote(_ ref: String, toFolder: String) throws -> WriteResult { try notes.moveNote(ref, toFolder: toFolder) }
-        func deleteNote(_ ref: String) throws -> WriteResult { try notes.deleteNote(ref) }
-        func createFolder(name: String, parent: String?, account: String?) throws -> WriteResult { try notes.createFolder(name: name, parent: parent, account: account) }
+        func renameNote(_ ref: String, title: String) throws -> WriteResult { result(try notes.renameNote(ref, title: title), for: .rename) }
+        func moveNote(_ ref: String, toFolder: String) throws -> WriteResult { result(try notes.moveNote(ref, toFolder: toFolder), for: .move) }
+        func deleteNote(_ ref: String) throws -> WriteResult { result(try notes.deleteNote(ref), for: .delete) }
+        func createFolder(name: String, parent: String?, account: String?) throws -> WriteResult {
+            result(try notes.createFolder(name: name, parent: parent, account: account), for: .createFolder)
+        }
         func renameFolder(_ ref: String, name: String) throws -> WriteResult { try notes.renameFolder(ref, name: name) }
         func deleteFolder(_ ref: String) throws -> WriteResult { try notes.deleteFolder(ref) }
     }
@@ -148,10 +153,52 @@ final class SyncTests: XCTestCase {
         _ = try MarkdownSync(reader: fake, writer: fake).run(SyncOptions(directory: root, folder: "Sync"))
         var markdown = MarkdownFile.parse(try String(contentsOf: file), fallbackTitle: "Draft")
         markdown.body = "changed"; try markdown.rendered().write(to: file, atomically: true, encoding: .utf8)
-        XCTAssertThrowsError(try MarkdownSync(reader: fake, writer: UnknownAfterWrite(fake, operation: .replace))
-            .run(SyncOptions(directory: root, folder: "Sync")))
-        let report = try MarkdownSync(reader: fake, writer: fake).run(SyncOptions(directory: root, folder: "Sync"))
+        let writer = UnknownAfterWrite(fake, operation: .replace), sync = MarkdownSync(reader: fake, writer: writer)
+        XCTAssertThrowsError(try sync.run(SyncOptions(directory: root, folder: "Sync")))
+        let report = try sync.run(SyncOptions(directory: root, folder: "Sync"))
         XCTAssertTrue(report.actions.contains { $0.message.contains("same body") })
         XCTAssertEqual(try fake.note("n1").document?.text, "changed")
+        XCTAssertEqual(writer.calls[.replace], 1)
+    }
+
+    func testUnknownRenameMoveDeleteAndFolderCreateArePersistedBeforeReturn() throws {
+        func expectUnknown(_ operation: UnknownAfterWrite.Operation, mutate: (URL, InMemoryNotes) throws -> SyncOptions,
+                           verify: (InMemoryNotes) throws -> Void) throws {
+            let fake = fixture(), root = try root()
+            _ = try MarkdownSync(reader: fake, writer: fake).run(SyncOptions(directory: root, folder: "Sync"))
+            let options = try mutate(root, fake), writer = UnknownAfterWrite(fake, operation: operation)
+            let sync = MarkdownSync(reader: fake, writer: writer)
+            XCTAssertThrowsError(try sync.run(options)) { error in
+                guard case NotesSyncError.writeUnknown = error else { return XCTFail("Unexpected error: \(error)") }
+            }
+            _ = try sync.run(options)
+            XCTAssertEqual(writer.calls[operation], 1)
+            try verify(fake)
+        }
+
+        try expectUnknown(.rename, mutate: { root, _ in
+            try FileManager.default.moveItem(at: root.appendingPathComponent("Draft.md"), to: root.appendingPathComponent("Renamed.md"))
+            return SyncOptions(directory: root, folder: "Sync")
+        }, verify: { XCTAssertEqual(try $0.note("n1").summary.title, "Renamed") })
+
+        try expectUnknown(.createFolder, mutate: { root, _ in
+            let child = root.appendingPathComponent("Child", isDirectory: true)
+            try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: root.appendingPathComponent("Draft.md"), to: child.appendingPathComponent("Draft.md"))
+            return SyncOptions(directory: root, folder: "Sync")
+        }, verify: { XCTAssertEqual(try $0.note("n1").summary.folderPath, ["Sync", "Child"]) })
+
+        try expectUnknown(.move, mutate: { root, fake in
+            _ = try fake.createFolder(name: "Existing", parent: "Sync", account: "A")
+            let child = root.appendingPathComponent("Existing", isDirectory: true)
+            try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: root.appendingPathComponent("Draft.md"), to: child.appendingPathComponent("Draft.md"))
+            return SyncOptions(directory: root, folder: "Sync")
+        }, verify: { XCTAssertEqual(try $0.note("n1").summary.folderPath, ["Sync", "Existing"]) })
+
+        try expectUnknown(.delete, mutate: { root, _ in
+            try FileManager.default.removeItem(at: root.appendingPathComponent("Draft.md"))
+            return SyncOptions(directory: root, folder: "Sync", propagateDeletes: true)
+        }, verify: { XCTAssertTrue(try $0.note("n1").summary.isDeleted) })
     }
 }

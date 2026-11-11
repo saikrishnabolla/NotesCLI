@@ -19,12 +19,14 @@ struct DryRunPlan: Codable {
     var target: String?
     var arguments: [String: String]
     var resultingHTML: String?
+    var engine: String? = "scripting"
 }
 
 struct BatchItemResult: Codable {
     var ref: String
     var result: WriteResult?
     var error: NotesError?
+    var engine: String = "scripting"
 }
 
 func selectedNotes(reader: any NotesReading, refs: [String], fromQuery: String?, folder: String?, account: String?, tag: String?, max: Int) throws -> [Note] {
@@ -83,7 +85,9 @@ enum SafetyExecutor {
             return nil
         }
         if destructive, let note { _ = try SnapshotStore().save(note) }
-        let data = try JSONSerialization.data(withJSONObject: arguments.merging(["operation": operation]) { current, _ in current }, options: .sortedKeys)
+        var recordedArguments = arguments.merging(["operation": operation]) { current, _ in current }
+        if let note { recordedArguments["stable_id"] = note.summary.id.uuid }
+        let data = try JSONSerialization.data(withJSONObject: recordedArguments, options: .sortedKeys)
         let journal = try WriteJournal()
         let begun = try journal.begin(operation: operation, arguments: data, idempotencyKey: options.idempotencyKey)
         if begun.replayed {
@@ -109,7 +113,7 @@ enum SafetyExecutor {
     static func folder(_ ref: String?, reader: any NotesReading) throws -> Folder? {
         guard let ref else { return nil }
         let matches = try reader.folders(account: nil).filter {
-            $0.id == ref || $0.name == ref || $0.path.joined(separator: " > ") == ref
+            $0.id == ref || $0.coreDataID == ref || $0.name == ref || $0.path.joined(separator: " > ") == ref
         }
         if matches.count > 1 {
             let active = try ScriptingNotesWriter().listFoldersViaScripting().filter {
@@ -208,44 +212,41 @@ struct JournalResolve: ParsableCommand {
         let candidates = try journal.unresolved().filter { operationIDs.isEmpty || operationIDs.contains($0.id) }
         var settled: [JournalEntry] = []
         for entry in candidates {
-            var verified = false
-            var resolvedNoteID = entry.noteID
-            let args = (try? JSONSerialization.jsonObject(with: entry.arguments)) as? [String: String] ?? [:]
-            let ref = entry.noteID ?? args["ref"]
-            var note = ref.flatMap { try? reader.note($0) }
-            if note == nil, ["createNote", "clip"].contains(entry.operation), let title = args["title"] {
-                let matches = (try? reader.notes(NoteQuery(folder: args["folder"]?.isEmpty == false ? args["folder"] : nil)))?.filter { $0.title == title } ?? []
-                if matches.count == 1 { note = try? reader.note(matches[0].id.uuid) }
+            let args = (try? JSONSerialization.jsonObject(with: entry.arguments)) as? [String: Any] ?? [:]
+            func argument(_ key: String) -> String? { args[key] as? String }
+            guard let stableID = entry.stableDispatchIdentity else {
+                settled.append(entry)
+                continue
             }
+            var verified = false
+            var resolvedNoteID: String? = stableID
+            let note = try? reader.note(stableID)
             if let note {
-                resolvedNoteID = note.summary.id.uuid
                 let actual = note.document?.plainText(attachments: note.attachments) ?? ""
-                let expected = MarkdownToNotesHTML.plainText(args["body"] ?? "")
+                let expected = MarkdownToNotesHTML.plainText(argument("body") ?? "")
                 switch entry.operation {
-                case "createNote", "clip": verified = note.summary.title == args["title"] && actual.contains(expected)
-                case "renameNote": verified = note.summary.title == args["title"]
-                case "moveNote": verified = note.summary.folderPath.joined(separator: " > ") == args["folder"]
+                case "renameNote": verified = note.summary.title == argument("title")
+                case "moveNote": verified = note.summary.folderPath.joined(separator: " > ") == argument("folder")
                 case "deleteNote": verified = note.summary.isDeleted
                 case "appendToNote", "prependToNote", "insertUnderHeading", "replaceSection": verified = actual.contains(expected)
                 case "replaceBody":
                     let withoutTitle = actual.hasPrefix(note.summary.title + "\n") ? String(actual.dropFirst(note.summary.title.count + 1)) : actual
                     verified = withoutTitle.trimmingCharacters(in: .whitespacesAndNewlines) == expected.trimmingCharacters(in: .whitespacesAndNewlines)
-                case "replaceText": verified = actual.contains(args["replacement"] ?? "")
+                case "replaceText": verified = actual.contains(argument("replacement") ?? "")
                 default: break
                 }
-            } else if ["createFolder", "renameFolder", "moveFolder", "deleteFolder"].contains(entry.operation) {
-                let folders = (try? reader.folders(account: args["account"]?.isEmpty == false ? args["account"] : nil)) ?? []
+            } else if ["renameFolder", "moveFolder", "deleteFolder"].contains(entry.operation) {
+                resolvedNoteID = nil
+                let folders = (try? reader.folders(account: nil)) ?? []
                 switch entry.operation {
-                case "createFolder":
-                    let expected = [args["parent"], args["name"]].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " > ")
-                    verified = folders.contains { $0.path.joined(separator: " > ") == expected || $0.name == args["name"] }
                 case "renameFolder":
-                    verified = folders.contains { $0.name == args["name"] && ($0.id == args["ref"] || $0.path.last == args["name"]) }
+                    verified = folders.contains { $0.id == stableID && $0.name == argument("name") }
                 case "moveFolder":
-                    let parent = args["parent"] ?? ""
-                    verified = folders.contains { $0.id == args["ref"] && (parent.isEmpty || $0.path.dropLast().joined(separator: " > ") == parent) }
+                    let stableParentID = argument("stable_parent_id")
+                    let parentID = stableParentID?.isEmpty == false ? stableParentID : nil
+                    verified = folders.contains { $0.id == stableID && $0.parentID == parentID }
                 case "deleteFolder":
-                    verified = !folders.contains { $0.id == args["ref"] || $0.path.joined(separator: " > ") == args["ref"] }
+                    verified = !folders.contains { $0.id == stableID }
                 default: break
                 }
             }
@@ -266,8 +267,8 @@ struct HistoryCommand: ParsableCommand {
     func run() throws {
         let note = try options.backends().reader.note(ref), items = try SnapshotStore().history(note.summary.id.uuid)
         if options.json { try Output.json(items) }
-        else { Output.table(["SNAPSHOT", "CREATED", "TITLE", "FOLDER"], items.map {
-            [$0.id, ISO8601DateFormatter().string(from: $0.created), $0.title, $0.folderPath.joined(separator: " > ")]
+        else { Output.table(["SNAPSHOT", "CREATED", "TITLE", "FOLDER", "RESTORABLE"], items.map {
+            [$0.id, ISO8601DateFormatter().string(from: $0.created), $0.title, $0.folderPath.joined(separator: " > "), $0.restorable ? "yes" : "no"]
         }) }
     }
 }
@@ -293,7 +294,7 @@ struct DiffCommand: ParsableCommand {
 private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions, write: WriteOptions) throws {
     let backend = try options.writable(), current = try backend.reader.note(ref)
     try SafetyExecutor.requireAttachmentSafety(current, allowLoss: write.allowAttachmentLoss)
-    let snapshot = try SnapshotStore().load(current.summary.id.uuid, snapshot: snapshotID)
+    let snapshot = try SnapshotStore().loadRestorable(current.summary.id.uuid, snapshot: snapshotID)
     let writer = try backend.writer(), target = current.summary.id.uuid
     let paths = [current.summary.folderPath, snapshot.note.summary.folderPath]
     let replacePlan = DryRunPlan(operation: "replaceBody", target: target, arguments: ["snapshot": snapshot.info.id],
@@ -479,19 +480,7 @@ struct MoveFolder: ParsableCommand {
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var ref: String; @Argument var parent: String?; @Option var account: String?
     func run() throws {
-        let backend = try options.writable(), reader = backend.reader
-        let source = try SafetyExecutor.folder(ref, reader: reader)
-        let destination = try SafetyExecutor.folder(parent, reader: reader)
-        let targetPath = (destination?.path ?? []) + [source?.name ?? ref]
-        let sourceRef = source?.path.joined(separator: " > ") ?? ref
-        let parentRef = destination?.path.joined(separator: " > ")
-        let paths = [source?.path, targetPath].compactMap { $0 }
-        let plan = DryRunPlan(operation: "moveFolder", target: ref, arguments: ["parent": parent ?? ""], resultingHTML: nil)
-        if let result = try SafetyExecutor.run(options: write, operation: "moveFolder", arguments: ["ref": ref, "parent": parent ?? "", "account": account ?? ""],
-            allowedPaths: paths, destructive: false, plan: plan,
-            action: { try backend.writer().moveFolder(sourceRef, toParent: parentRef, account: account) }) {
-            try Output.write(result, json: options.json)
-        }
+        try unifiedNativeFolderMove(options: options, write: write, ref: ref, parent: parent)
     }
 }
 

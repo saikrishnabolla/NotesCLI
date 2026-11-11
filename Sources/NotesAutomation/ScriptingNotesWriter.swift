@@ -26,17 +26,23 @@ public struct WriteVerificationRequest: Sendable {
     public var ref: String?
     public var title: String?
     public var markdown: String?
+    public var bodyBefore: String?
+    public var expectedBody: String?
+    public var expectedBodyIncludesTitle: Bool
     public var folder: String?
     public var name: String?
     public var parent: String?
     public var account: String?
     public var expectedFolderPath: [String]?
     public var result: WriteResult
-    public init(operation: WriteOperation, ref: String? = nil, title: String? = nil, markdown: String? = nil,
+    public init(operation: WriteOperation, ref: String? = nil, title: String? = nil, markdown: String? = nil, bodyBefore: String? = nil,
+                expectedBody: String? = nil, expectedBodyIncludesTitle: Bool = false,
                 folder: String? = nil, name: String? = nil, parent: String? = nil, account: String? = nil,
                 expectedFolderPath: [String]? = nil, result: WriteResult) {
         self.operation = operation; self.ref = ref; self.title = title; self.markdown = markdown; self.folder = folder
-        self.name = name; self.parent = parent; self.account = account; self.expectedFolderPath = expectedFolderPath; self.result = result
+        self.bodyBefore = bodyBefore; self.expectedBody = expectedBody; self.expectedBodyIncludesTitle = expectedBodyIncludesTitle
+        self.name = name; self.parent = parent; self.account = account
+        self.expectedFolderPath = expectedFolderPath; self.result = result
     }
 }
 
@@ -112,6 +118,11 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
     /// Shared notes and accounts that are not upgraded are rejected.
     public func deleteNote(_ ref: String) throws -> WriteResult {
         try write("deleteNote", fields: ["ref": resolve(ref)], uuid: UUID(uuidString: ref)?.uuidString)
+    }
+    public func deleteNote(_ ref: String, allowedFolderIDs: [String]) throws -> WriteResult {
+        guard !allowedFolderIDs.isEmpty else { throw NotesError("stale_folder", "The allowed folder subtree is empty.") }
+        let encoded = String(decoding: try JSONEncoder().encode(allowedFolderIDs), as: UTF8.self)
+        return try write("deleteNote", fields: ["ref": resolve(ref), "allowedFolderIDsJSON": encoded], uuid: UUID(uuidString: ref)?.uuidString)
     }
     public func createFolder(name: String, parent: String? = nil, account: String? = nil) throws -> WriteResult {
         try validateFolderName(name)
@@ -271,8 +282,29 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
             }
         }
         if let verifier, let kind = WriteOperation(rawValue: operation) {
+            let exactHTML = rawHTML ?? converted?.html
+            let exactBody: String?
+            let exactBodyIncludesTitle: Bool
+            switch kind {
+            case .appendToNote:
+                exactBody = reply.bodyBefore.flatMap { before in
+                    exactHTML.map { MarkdownToNotesHTML.exactPlainText(html: before + $0) }
+                }
+                exactBodyIncludesTitle = true
+            case .prependToNote, .insertUnderHeading, .replaceSection, .replaceText:
+                exactBody = exactHTML.map { MarkdownToNotesHTML.exactPlainText(html: $0) }
+                exactBodyIncludesTitle = true
+            case .createNote, .replaceBody:
+                exactBody = exactHTML.map { MarkdownToNotesHTML.exactPlainText(html: $0) }
+                exactBodyIncludesTitle = false
+            default:
+                exactBody = nil
+                exactBodyIncludesTitle = false
+            }
             let request = WriteVerificationRequest(operation: kind, ref: fields["ref"] ?? nil, title: fields["title"] ?? nil,
-                markdown: markdown, folder: fields["folder"] ?? nil, name: fields["name"] ?? nil,
+                markdown: markdown, bodyBefore: reply.bodyBefore.map { MarkdownToNotesHTML.exactPlainText(html: $0) },
+                expectedBody: exactBody, expectedBodyIncludesTitle: exactBodyIncludesTitle,
+                folder: fields["folder"] ?? nil, name: fields["name"] ?? nil,
                 parent: fields["parent"] ?? nil, account: fields["account"] ?? nil,
                 expectedFolderPath: reply.folderPath ?? Self.expectedFolderPath(operation: kind, fields: fields), result: result)
             do {
@@ -363,6 +395,7 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
         var folders: [ScriptingFolder]?
         var title: String?
         var body: String?
+        var bodyBefore: String?
         var name: String?
         var noteCount: Int?
         var childCount: Int?
@@ -373,7 +406,7 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
         var changed: Bool?
         var unknownOutcome = false
         enum CodingKeys: String, CodingKey {
-            case id, folderID, folderPath, notes, folders, title, body, name, noteCount, childCount, attachmentCount, isDeleted, errorCode, errorNumber, changed
+            case id, folderID, folderPath, notes, folders, title, body, bodyBefore, name, noteCount, childCount, attachmentCount, isDeleted, errorCode, errorNumber, changed
         }
     }
 

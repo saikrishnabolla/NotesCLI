@@ -69,8 +69,9 @@ public final class NotesExporter {
 
     public func run(_ options: ExportOptions) throws -> ExportReport {
         if options.format == .zip { return try zip(options) }
-        let root = options.output.standardizedFileURL
-        try fileManager.createPrivateDirectory(at: root)
+        let requestedRoot = options.output.standardizedFileURL
+        try fileManager.createPrivateDirectory(at: requestedRoot)
+        let root = requestedRoot.resolvingSymlinksInPath().standardizedFileURL
         let summaries = try reader.notes(NoteQuery(folder: options.folder))
         let accounts = try reader.accounts()
         let manifestURL = root.appendingPathComponent(".notescli-export.json")

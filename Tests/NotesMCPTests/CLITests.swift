@@ -78,6 +78,16 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(changed.0, 0, changed.2); XCTAssertFalse(changed.1.contains("Unchanged"))
         let addEditor = try run(["--backend", "fake", "add"], environment: ["EDITOR": "printf 'new body' >"])
         XCTAssertEqual(addEditor.0, 0, addEditor.2)
+        let scripted = try run(["--backend", "fake", "--json", "add", "Engine", "--body", "Body"])
+        let scriptedJSON = try JSONSerialization.jsonObject(with: Data(scripted.1.utf8)) as! [String: Any]
+        XCTAssertEqual(scriptedJSON["engine"] as? String, "scripting")
+        XCTAssertEqual((scriptedJSON["result"] as? [String: Any])?["outcome"] as? String, "verified")
+        let folder = try run(["--backend", "fake", "--json", "folder", "create", "Engine folder"])
+        let folderJSON = try JSONSerialization.jsonObject(with: Data(folder.1.utf8)) as! [[String: Any]]
+        XCTAssertEqual(folderJSON.first?["engine"] as? String, "scripting")
+        let batch = try run(["--backend", "fake", "--json", "delete", "welcome", "--yes"])
+        let batchJSON = try JSONSerialization.jsonObject(with: Data(batch.1.utf8)) as! [[String: Any]]
+        XCTAssertEqual(batchJSON.first?["engine"] as? String, "scripting")
     }
     func testExportsAndFileInput() throws {
         let directory = root.appendingPathComponent(".build/cli-tests-" + UUID().uuidString)
@@ -107,5 +117,67 @@ final class CLITests: XCTestCase {
         for shell in ["bash", "zsh", "fish"] {
             let completion = try run(["completion", shell]); XCTAssertEqual(completion.0, 0, completion.2); XCTAssertTrue(completion.1.contains("notescli"))
         }
+    }
+
+    func testUnifiedCommandTreeRoutesAndHidesLegacyNames() throws {
+        let help = try run(["--help"])
+        XCTAssertEqual(help.0, 0, help.2)
+        for command in ["checklist", "pin", "unpin", "tag", "link", "deeplink", "text", "format", "attach", "attachment", "table", "duplicate", "restore", "write"] {
+            XCTAssertTrue(help.1.contains("  \(command)"), command)
+        }
+        for legacy in ["native-checklist", "native-tag", "native-link", "native-text", "native-format", "native-attachment", "native-table", "native-duplicate", "native-restore", "native-move-folder", "write-markdown"] {
+            XCTAssertFalse(help.1.contains("  \(legacy)"), legacy)
+        }
+        for route in [["checklist", "--help"], ["tag", "--help"], ["link", "--help"], ["text", "--help"], ["format", "--help"], ["attachment", "--help"], ["table", "--help"], ["folder", "--help"]] {
+            let value = try run(route)
+            XCTAssertEqual(value.0, 0, "\(route): \(value.2)")
+        }
+    }
+
+    func testNativeWritesAreOptInAndLegacySyntaxStillParses() throws {
+        let commands = [
+            ["checklist", "add", "welcome", "item"], ["pin", "welcome"], ["unpin", "welcome"],
+            ["tag", "add", "welcome", "demo"], ["link", "add", "welcome", "shopping"],
+            ["text", "insert", "welcome", "x", "--position", "0"],
+            ["format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body"],
+            ["attach", "welcome", "/tmp/missing"], ["table", "create", "welcome", "--rows", "[[\"x\"]]"],
+            ["duplicate", "welcome"], ["restore", "welcome"], ["folder", "move", "Notes", "Notes"]
+        ]
+        for command in commands {
+            let value = try run(["--backend", "fake", "--json"] + command)
+            XCTAssertNotEqual(value.0, 0, "\(command) unexpectedly succeeded")
+            XCTAssertTrue(value.2.contains("native_required"), "\(command): \(value.2)")
+        }
+        let nativeReads = [
+            ["checklist", "list", "welcome"], ["link", "list", "welcome"],
+            ["text", "find", "welcome", "Welcome"],
+            ["native-checklist", "list", "welcome"], ["native-link", "list", "welcome"],
+            ["native-text", "search", "welcome", "--text", "Welcome"]
+        ]
+        for command in nativeReads {
+            let value = try run(["--backend", "fake", "--json"] + command)
+            XCTAssertTrue(value.2.contains("native_required"), "native read did not require opt-in: \(command): \(value.2)")
+        }
+        let aliases = [
+            ["native-checklist", "insert", "welcome", "--text", "item"],
+            ["native-tag", "add", "demo", "--ref", "welcome"],
+            ["native-link", "add", "welcome", "--target", "shopping"],
+            ["native-text", "insert", "welcome", "--text", "x", "--position", "0"],
+            ["native-format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body"],
+            ["native-attachment", "file", "welcome", "--path", "/tmp/missing"],
+            ["native-table", "create", "welcome", "--rows", "[[\"x\"]]"],
+            ["native-duplicate", "welcome"], ["native-restore", "welcome"],
+            ["native-move-folder", "Notes", "--parent", "Notes"]
+        ]
+        for command in aliases {
+            let value = try run(["--backend", "fake", "--json"] + command)
+            XCTAssertTrue(value.2.contains("native_required"), "legacy syntax did not route: \(command): \(value.2)")
+        }
+        let env = try run(["--backend", "fake", "--json", "checklist", "add", "welcome", "item", "--dry-run"], environment: ["NOTESCLI_ENGINE": "native"])
+        XCTAssertFalse(env.2.contains("native_required"), env.2)
+        XCTAssertFalse(env.2.contains("usage"), env.2)
+        let explicit = try run(["--backend", "fake", "--engine=native", "--json", "checklist", "add", "welcome", "item", "--dry-run"], environment: ["NOTESCLI_ENGINE": "scripting"])
+        XCTAssertEqual(explicit.0, 0, explicit.2)
+        XCTAssertTrue(explicit.1.contains(#""engine":"native""#), explicit.1)
     }
 }

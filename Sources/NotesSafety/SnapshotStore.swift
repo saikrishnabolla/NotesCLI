@@ -8,6 +8,21 @@ public struct SnapshotInfo: Codable, Sendable, Equatable {
     public var title: String
     public var folderPath: [String]
     public var directory: URL
+    public var restorable: Bool
+
+    public init(id: String, noteID: String, created: Date, title: String, folderPath: [String], directory: URL, restorable: Bool) {
+        self.id = id; self.noteID = noteID; self.created = created; self.title = title
+        self.folderPath = folderPath; self.directory = directory; self.restorable = restorable
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, noteID, created, title, folderPath, directory, restorable }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id); noteID = try values.decode(String.self, forKey: .noteID)
+        created = try values.decode(Date.self, forKey: .created); title = try values.decode(String.self, forKey: .title)
+        folderPath = try values.decode([String].self, forKey: .folderPath); directory = try values.decode(URL.self, forKey: .directory)
+        restorable = try values.decodeIfPresent(Bool.self, forKey: .restorable) ?? true
+    }
 }
 
 public struct NoteSnapshot: Codable, Sendable {
@@ -32,7 +47,8 @@ public struct SnapshotStore: Sendable {
         let directory = noteDirectory.appendingPathComponent(id, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let info = SnapshotInfo(id: id, noteID: note.summary.id.uuid, created: now, title: note.summary.title,
-                                folderPath: note.summary.folderPath, directory: directory)
+                                folderPath: note.summary.folderPath, directory: directory,
+                                restorable: note.attachments.isEmpty && note.summary.attachmentCount == 0)
         let markdown = note.document?.markdown(attachments: note.attachments) ?? ""
         let snapshot = NoteSnapshot(info: info, note: note, markdown: markdown)
         let encoder = JSONEncoder()
@@ -66,6 +82,14 @@ public struct SnapshotStore: Sendable {
             info = latest
         }
         return try decode(info.directory)
+    }
+
+    public func loadRestorable(_ noteID: String, snapshot: String? = nil) throws -> NoteSnapshot {
+        let value = try load(noteID, snapshot: snapshot)
+        guard value.info.restorable else {
+            throw NotesError("snapshot_has_attachments", "This snapshot contains attachments and cannot be restored without data loss.")
+        }
+        return value
     }
 
     private func decode(_ directory: URL) throws -> NoteSnapshot {

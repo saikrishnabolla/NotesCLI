@@ -96,13 +96,14 @@ public struct FreshWriteVerifier: Sendable {
         case .createNote:
             if note.summary.title != request.title { return "title is \(note.summary.title.debugDescription), expected \((request.title ?? "").debugDescription)" }
             if let path = request.expectedFolderPath, !equalPath(note.summary.folderPath, path) { return "folder path is \(note.summary.folderPath.joined(separator: " > "))" }
-            return bodyMismatch(note, markdown: request.markdown, exact: true)
+            return expectedBodyMismatch(request, note: note)
         case .appendToNote:
-            return bodyMismatch(note, markdown: request.markdown, exact: false)
+            guard request.bodyBefore != nil else { return "write did not capture the pre-append body" }
+            return expectedBodyMismatch(request, note: note)
         case .replaceBody:
-            return bodyMismatch(note, markdown: request.markdown, exact: true)
+            return expectedBodyMismatch(request, note: note)
         case .prependToNote, .insertUnderHeading, .replaceSection, .replaceText:
-            return bodyMismatch(note, markdown: request.markdown, exact: true, includesTitle: true)
+            return expectedBodyMismatch(request, note: note)
         case .renameNote:
             return note.summary.title == request.title ? nil : "title is \(note.summary.title.debugDescription), expected \((request.title ?? "").debugDescription)"
         case .moveNote:
@@ -117,23 +118,24 @@ public struct FreshWriteVerifier: Sendable {
         }
     }
 
-    private func bodyMismatch(_ note: Note, markdown: String?, exact: Bool, includesTitle: Bool = false) -> String? {
+    private func expectedBodyMismatch(_ request: WriteVerificationRequest, note: Note) -> String? {
+        guard let expected = request.expectedBody else { return "write did not capture the exact expected body" }
+        return bodyMismatch(note, expected: expected, includesTitle: request.expectedBodyIncludesTitle)
+    }
+
+    private func bodyMismatch(_ note: Note, expected: String, includesTitle: Bool = false) -> String? {
         guard let document = note.document else { return "note body is unavailable" }
-        let expected = normalize(MarkdownToNotesHTML.plainText(markdown ?? ""))
-        var actual = normalize(document.plainText(attachments: note.attachments))
-        let title = normalize(note.summary.title)
+        let expected = canonicalNewlines(expected)
+        var actual = canonicalNewlines(document.plainText(attachments: note.attachments))
+        let title = canonicalNewlines(note.summary.title)
         if !includesTitle {
             if actual == title { actual = "" }
             else if actual.hasPrefix(title + "\n") { actual.removeFirst(title.count + 1) }
         }
-        let matches = exact ? actual == expected : actual.contains(expected)
-        return matches ? nil : "body text did not \(exact ? "match" : "contain") the expected text"
+        return actual == expected ? nil : "body text did not exactly match the expected text"
     }
 
-    private func normalize(_ value: String) -> String {
-        value.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: "\n")
-    }
+    private func canonicalNewlines(_ value: String) -> String { value.replacingOccurrences(of: "\r\n", with: "\n") }
 
     private func equalPath(_ left: [String], _ right: [String]) -> Bool {
         left.count == right.count && zip(left, right).allSatisfy {

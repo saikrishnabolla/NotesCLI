@@ -38,6 +38,12 @@ public struct SyncReport: Codable, Equatable, Sendable {
 }
 
 private struct SyncState: Codable {
+    struct PendingOperation: Codable, Equatable {
+        enum Kind: String, Codable { case folderCreate, update, rename, move, delete }
+        var kind: Kind
+        var noteID: String?
+        var expected: String
+    }
     struct Entry: Codable {
         var path: String
         var hash: String
@@ -51,6 +57,7 @@ private struct SyncState: Codable {
     var version = 1
     var rootFolder: String
     var entries: [String: Entry]
+    var pending: [PendingOperation]? = nil
 }
 
 private struct LocalNote {
@@ -79,9 +86,10 @@ public final class MarkdownSync {
         let root = options.directory.standardizedFileURL.resolvingSymlinksInPath()
         if !options.dryRun { try fileManager.createPrivateDirectory(at: root) }
         let stateURL = root.appendingPathComponent(".notescli-sync.json")
-        var oldState = try loadState(stateURL, folder: options.folder)
-        var state = oldState
+        var state = try loadState(stateURL, folder: options.folder)
         let rootFolder = try resolveRoot(options.folder)
+        if !options.dryRun { try reconcilePending(&state, stateURL: stateURL) }
+        var oldState = state
         let remoteSummaries = try reader.notes(NoteQuery()).filter { !$0.isDeleted && $0.folderPath.starts(with: rootFolder.path) }
         let remoteByID = Dictionary(uniqueKeysWithValues: remoteSummaries.map { ($0.id.uuid, $0) })
         var local = try scan(root)
@@ -142,7 +150,7 @@ public final class MarkdownSync {
                 } else {
                     report.actions.append(.init(.restore, noteID: id, path: localNote.relativePath, message: "Recreate the missing Notes copy."))
                     if !options.dryRun {
-                        let folder = try ensureFolder(for: localNote.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders)
+                        let folder = try ensureFolder(for: localNote.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders, state: &state, stateURL: stateURL)
                         let result = try requireWriter().createNote(title: localNote.markdown.title, markdown: localNote.markdown.body, folder: folder)
                         if result.outcome != .verified {
                             try stagePendingCreate(result: result, file: localNote.markdown, path: localNote.relativePath,
@@ -171,7 +179,7 @@ public final class MarkdownSync {
                 if options.propagateDeletes {
                     report.actions.append(.init(.deleteNote, noteID: id, path: previous.path, message: "Move the Notes copy to Recently Deleted because the local file was deleted."))
                     if !options.dryRun {
-                        guard try accepted(requireWriter().deleteNote(id), action: "delete note") else { continue }
+                        guard try accepted(requireWriter().deleteNote(id), action: "delete note", pending: .init(kind: .delete, noteID: id, expected: ""), state: &state, stateURL: stateURL) else { continue }
                         state.entries.removeValue(forKey: id)
                     }
                 } else {
@@ -207,12 +215,12 @@ public final class MarkdownSync {
                     let filenameTitle = localNote.url.deletingPathExtension().lastPathComponent
                     let localTitle = localNote.markdown.title == previous.title && localNote.relativePath != previous.path ? filenameTitle : localNote.markdown.title
                     if localMetadataChanged && localTitle != remote.title {
-                        guard try accepted(requireWriter().renameNote(id, title: localTitle), action: "rename note") else { continue }
+                        guard try accepted(requireWriter().renameNote(id, title: localTitle), action: "rename note", pending: .init(kind: .rename, noteID: id, expected: localTitle), state: &state, stateURL: stateURL) else { continue }
                         localNote.markdown.title = localTitle
                     } else if remoteMetadataChanged && !localMetadataChanged { localNote.markdown.title = remote.title }
                     if localMetadataChanged && relativeFolder(localNote.relativePath) != remoteFolder {
-                        let destination = try ensureFolder(for: localNote.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders)
-                        guard try accepted(requireWriter().moveNote(id, toFolder: destination), action: "move note") else { continue }
+                        let destination = try ensureFolder(for: localNote.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders, state: &state, stateURL: stateURL)
+                        guard try accepted(requireWriter().moveNote(id, toFolder: destination), action: "move note", pending: .init(kind: .move, noteID: id, expected: destination), state: &state, stateURL: stateURL) else { continue }
                     }
                     localNote.markdown.modified = remote.modified
                     try write(localNote.markdown, to: localNote.url)
@@ -237,23 +245,23 @@ public final class MarkdownSync {
                 }
                 report.actions.append(.init(.updateNote, noteID: id, path: localNote.relativePath, message: "Merge non-overlapping edits into both copies."))
                 if !options.dryRun {
-                    guard try accepted(requireWriter().replaceBody(id, markdown: merged.text), action: "merge note") else { continue }
+                    guard try accepted(requireWriter().replaceBody(id, markdown: merged.text), action: "merge note", pending: .init(kind: .update, noteID: id, expected: StableHash.hex(merged.text)), state: &state, stateURL: stateURL) else { continue }
                     localNote.markdown.body = merged.text; localNote.markdown.modified = Date(); try write(localNote.markdown, to: localNote.url)
                     state.entries[id] = entry(file: localNote.markdown, path: localNote.relativePath, folder: relativeFolder(localNote.relativePath), modified: localNote.markdown.modified)
                 }
             } else if localChanged || localMetadataChanged {
                 report.actions.append(.init(.updateNote, noteID: id, path: localNote.relativePath, message: "Apply the local Markdown changes to Notes."))
                 if !options.dryRun {
-                    if localChanged, !(try accepted(requireWriter().replaceBody(id, markdown: localNote.markdown.body), action: "update note")) { continue }
+                    if localChanged, !(try accepted(requireWriter().replaceBody(id, markdown: localNote.markdown.body), action: "update note", pending: .init(kind: .update, noteID: id, expected: StableHash.hex(localNote.markdown.body)), state: &state, stateURL: stateURL)) { continue }
                     let filenameTitle = localNote.url.deletingPathExtension().lastPathComponent
                     let localTitle = localNote.markdown.title == previous.title && localNote.relativePath != previous.path ? filenameTitle : localNote.markdown.title
                     if localTitle != remote.title {
-                        guard try accepted(requireWriter().renameNote(id, title: localTitle), action: "rename note") else { continue }
+                        guard try accepted(requireWriter().renameNote(id, title: localTitle), action: "rename note", pending: .init(kind: .rename, noteID: id, expected: localTitle), state: &state, stateURL: stateURL) else { continue }
                         localNote.markdown.title = localTitle
                     }
                     if relativeFolder(localNote.relativePath) != remoteFolder {
-                        let destination = try ensureFolder(for: localNote.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders)
-                        guard try accepted(requireWriter().moveNote(id, toFolder: destination), action: "move note") else { continue }
+                        let destination = try ensureFolder(for: localNote.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders, state: &state, stateURL: stateURL)
+                        guard try accepted(requireWriter().moveNote(id, toFolder: destination), action: "move note", pending: .init(kind: .move, noteID: id, expected: destination), state: &state, stateURL: stateURL) else { continue }
                     }
                     localNote.markdown.modified = Date(); try write(localNote.markdown, to: localNote.url)
                     state.entries[id] = entry(file: localNote.markdown, path: localNote.relativePath, folder: relativeFolder(localNote.relativePath), modified: localNote.markdown.modified)
@@ -292,7 +300,7 @@ public final class MarkdownSync {
         for item in local where item.markdown.noteID == nil && !handledLocal.contains(item.relativePath) {
             report.actions.append(.init(.createNote, path: item.relativePath, message: "Create a Notes copy for the new Markdown file."))
             if !options.dryRun {
-                let folder = try ensureFolder(for: item.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders)
+                let folder = try ensureFolder(for: item.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders, state: &state, stateURL: stateURL)
                 let title = item.markdown.title.isEmpty ? item.url.deletingPathExtension().lastPathComponent : item.markdown.title
                 let result = try requireWriter().createNote(title: title, markdown: item.markdown.body, folder: folder)
                 if result.outcome != .verified {
@@ -376,7 +384,8 @@ public final class MarkdownSync {
         return path
     }
 
-    private func ensureFolder(for relativePath: String, rootFolder: Folder, options: SyncOptions, report: inout SyncReport, known: inout Set<String>) throws -> String {
+    private func ensureFolder(for relativePath: String, rootFolder: Folder, options: SyncOptions, report: inout SyncReport,
+                              known: inout Set<String>, state: inout SyncState, stateURL: URL) throws -> String {
         let parts = relativeFolder(relativePath)
         var parent = rootFolder.path.joined(separator: " > ")
         for part in parts {
@@ -384,7 +393,9 @@ public final class MarkdownSync {
             if !known.contains(path) {
                 report.actions.append(.init(.move, path: relativePath, message: "Create Notes folder \(path)."))
                 if !options.dryRun {
-                    guard try accepted(requireWriter().createFolder(name: part, parent: parent, account: rootFolder.accountID), action: "create folder") else { break }
+                    guard try accepted(requireWriter().createFolder(name: part, parent: parent, account: rootFolder.accountID),
+                                       action: "create folder", pending: .init(kind: .folderCreate, noteID: nil, expected: path),
+                                       state: &state, stateURL: stateURL) else { break }
                 }
                 known.insert(path)
             }
@@ -420,9 +431,47 @@ public final class MarkdownSync {
         return writer
     }
 
-    private func accepted(_ result: WriteResult, action: String) throws -> Bool {
-        if result.outcome == .unknown { throw NotesSyncError.writeUnknown("The outcome of \(action) is unknown. Read both sides before retrying.") }
+    private func accepted(_ result: WriteResult, action: String, pending: SyncState.PendingOperation,
+                          state: inout SyncState, stateURL: URL) throws -> Bool {
+        if result.outcome == .unknown {
+            var operations = state.pending ?? []
+            operations.append(pending)
+            state.pending = operations
+            try saveState(state, to: stateURL)
+            throw NotesSyncError.writeUnknown("The outcome of \(action) is unknown. Read both sides before retrying.")
+        }
         return result.outcome == .verified
+    }
+
+    private func reconcilePending(_ state: inout SyncState, stateURL: URL) throws {
+        guard let pending = state.pending, !pending.isEmpty else { return }
+        let folders = try reader.folders(account: nil)
+        var unresolved: [SyncState.PendingOperation] = []
+        for operation in pending {
+            let applied: Bool
+            switch operation.kind {
+            case .folderCreate:
+                applied = folders.contains { $0.path.joined(separator: " > ") == operation.expected }
+            case .update:
+                applied = operation.noteID.flatMap { try? reader.note($0) }
+                    .map { StableHash.hex(markdown($0)) == operation.expected } ?? false
+            case .rename:
+                applied = operation.noteID.flatMap { try? reader.note($0) }?.summary.title == operation.expected
+            case .move:
+                applied = operation.noteID.flatMap { try? reader.note($0) }?.summary.folderPath.joined(separator: " > ") == operation.expected
+            case .delete:
+                guard let id = operation.noteID else { applied = false; break }
+                do { applied = try reader.summary(id).isDeleted }
+                catch let error as NotesError { applied = error.code == "note_not_found" }
+                catch { applied = false }
+            }
+            if !applied { unresolved.append(operation) }
+        }
+        state.pending = unresolved.isEmpty ? nil : unresolved
+        try saveState(state, to: stateURL)
+        if !unresolved.isEmpty {
+            throw NotesSyncError.writeUnknown("A prior sync write still has an unknown outcome. No write was retried.")
+        }
     }
 
     private func resultID(_ result: WriteResult) -> String? {

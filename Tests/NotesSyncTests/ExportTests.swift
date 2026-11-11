@@ -46,6 +46,14 @@ final class ExportTests: XCTestCase {
         }
     }
 
+    func testExportCanonicalizesSymlinkedTemporaryRoot() throws {
+        let root = URL(fileURLWithPath: "/tmp/notescli-export-tests-" + UUID().uuidString, isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root.resolvingSymlinksInPath()) }
+        let report = try NotesExporter(reader: InMemoryNotes.sample()).run(ExportOptions(output: root))
+        XCTAssertEqual(report.exported, 2)
+        XCTAssertTrue(report.files.allSatisfy { FileManager.default.fileExists(atPath: $0) })
+    }
+
     func testObsidianDuplicateTitlesAndIncompleteNotes() throws {
         let root = try temporaryDirectory()
         let account = Account(id: "a", name: "A", kind: "local")

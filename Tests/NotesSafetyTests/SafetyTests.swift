@@ -4,6 +4,14 @@ import NotesCore
 @testable import NotesSafety
 
 final class SafetyTests: XCTestCase {
+    func testJournalResolutionIdentityDoesNotInferFromNamesOrTitles() throws {
+        let titleOnly = JournalEntry(id: "one", operation: "createNote", argumentsHash: "", arguments: Data(#"{"title":"Unique"}"#.utf8),
+                                     idempotencyKey: nil, started: Date(), outcome: .unknown, noteID: nil, result: nil, message: nil)
+        XCTAssertNil(titleOnly.stableDispatchIdentity)
+        let stable = JournalEntry(id: "two", operation: "renameNote", argumentsHash: "", arguments: Data(#"{"ref":"Old title","stable_id":"uuid-1"}"#.utf8),
+                                  idempotencyKey: nil, started: Date(), outcome: .unknown, noteID: nil, result: nil, message: nil)
+        XCTAssertEqual(stable.stableDispatchIdentity, "uuid-1")
+    }
     func testAllowlistMatchesOnlyConfiguredTrees() throws {
         let guardrail = WriteAllowlist("Work, Inbox > Agents")
         XCTAssertTrue(guardrail.allows(["Work"]))
@@ -57,13 +65,30 @@ final class SafetyTests: XCTestCase {
         XCTAssertNoThrow(try ConcurrencyGuard.require(note, ifModified: iso, expectRevision: nil))
         var subsecondNote = note
         subsecondNote.summary.modified = modified.addingTimeInterval(0.75)
-        XCTAssertNoThrow(try ConcurrencyGuard.require(subsecondNote, ifModified: iso, expectRevision: nil))
+        XCTAssertThrowsError(try ConcurrencyGuard.require(subsecondNote, ifModified: iso, expectRevision: nil)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "stale_note")
+        }
         XCTAssertNoThrow(try ConcurrencyGuard.require(note, ifModified: nil, expectRevision: ConcurrencyGuard.revision(note)))
         XCTAssertThrowsError(try ConcurrencyGuard.require(note, ifModified: "2020-01-01T00:00:00Z", expectRevision: nil)) { error in
             XCTAssertEqual((error as? NotesError)?.code, "stale_note")
         }
         XCTAssertThrowsError(try ConcurrencyGuard.require(note, ifModified: nil, expectRevision: "old")) { error in
             XCTAssertEqual((error as? NotesError)?.code, "stale_note")
+        }
+    }
+
+    func testSnapshotsWithAttachmentsAreMarkedUnrestorable() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SnapshotStore(rootURL: directory)
+        var note = try InMemoryNotes.sample().note("welcome")
+        note.attachments = [Attachment(id: "attachment", typeUTI: "public.png")]
+        note.summary.attachmentCount = 1
+        let saved = try store.save(note)
+        XCTAssertFalse(saved.restorable)
+        XCTAssertFalse(try XCTUnwrap(store.history(note.summary.id.uuid).first).restorable)
+        XCTAssertThrowsError(try store.loadRestorable(note.summary.id.uuid, snapshot: saved.id)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "snapshot_has_attachments")
         }
     }
 }

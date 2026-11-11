@@ -16,6 +16,12 @@ public struct JournalEntry: Codable, Sendable {
     public var noteID: String?
     public var result: WriteResult?
     public var message: String?
+
+    public var stableDispatchIdentity: String? {
+        guard let object = try? JSONSerialization.jsonObject(with: arguments) as? [String: Any],
+              let identity = object["stable_id"] as? String, !identity.isEmpty else { return nil }
+        return identity
+    }
 }
 
 public struct JournalBegin: Sendable {

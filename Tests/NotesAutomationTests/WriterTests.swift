@@ -173,6 +173,27 @@ final class WriterTests: XCTestCase {
         XCTAssertEqual(result.outcome, .unverified)
         XCTAssertTrue(result.message?.contains("mismatch: title was still old") == true)
     }
+
+    func testVerifierReceivesExactAppendAndReplaceBodies() throws {
+        let runner = StubRunner([
+            ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123","bodyBefore":"<h1>T</h1><div>before  </div>"}"#),
+            ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123","bodyBefore":"<h1>T</h1><div>old</div>"}"#)
+        ])
+        let writer = ScriptingNotesWriter(runner: runner, verifier: { request in
+            if request.operation == .appendToNote {
+                XCTAssertEqual(request.bodyBefore, "T\nbefore  \n")
+                XCTAssertEqual(request.expectedBody, "T\nbefore  \nappend\n")
+                XCTAssertTrue(request.expectedBodyIncludesTitle)
+            } else {
+                XCTAssertEqual(request.operation, .replaceBody)
+                XCTAssertEqual(request.expectedBody, "after  \n")
+                XCTAssertFalse(request.expectedBodyIncludesTitle)
+            }
+            return WriteVerificationResult(outcome: .verified)
+        })
+        XCTAssertEqual(try writer.appendToNote(id, markdown: "append").outcome, .verified)
+        XCTAssertEqual(try writer.replaceBody(id, markdown: "after  ").outcome, .verified)
+    }
     func testDisabledAttachmentsDowngradeWithoutDispatch() throws {
         let runner = StubRunner([ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
         let writer = ScriptingNotesWriter(runner: runner, attachLocalImages: false)

@@ -4,6 +4,7 @@ import Foundation
 /// Offsets and lengths count UTF-16 code units, matching Notes' own storage.
 public struct NoteDocument: Codable, Sendable, Equatable {
     public var text: String
+    public var tables: [String: [[String]]]?
     public var runs: [AttributeRun]
     public init(text: String, runs: [AttributeRun]) { self.text = text; self.runs = runs }
 }
@@ -27,6 +28,8 @@ public struct ParagraphStyle: Codable, Sendable, Equatable {
         case body, title, heading, subheading, monospaced, bulleted, dashed, numbered, checklist, blockquote
     }
     public var kind: Kind
+    public var alignment: Int?
+    public var blockQuoteLevel: Int?
     public var indent: Int
     public var checked: Bool?         // checklist items only
     public var checklistID: String?   // stable item id from Notes
@@ -37,6 +40,8 @@ public struct ParagraphStyle: Codable, Sendable, Equatable {
 }
 
 public struct FontStyle: Codable, Sendable, Equatable {
+    public var name: String?
+    public var pointSize: Float?
     public var bold = false, italic = false, underline = false, strikethrough = false
     public var superscript = 0          // >0 superscript, <0 subscript
     public init(bold: Bool = false, italic: Bool = false, underline: Bool = false, strikethrough: Bool = false, superscript: Int = 0) {
@@ -48,5 +53,7 @@ public struct FontStyle: Codable, Sendable, Equatable {
 public struct InlineRef: Codable, Sendable, Equatable {
     public var id: String
     public var typeUTI: String
+    public var displayText: String?
+    public var url: String?
     public init(id: String, typeUTI: String) { self.id = id; self.typeUTI = typeUTI }
 }

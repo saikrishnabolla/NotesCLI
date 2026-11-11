@@ -39,6 +39,17 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(confirmation.0, 1)
         XCTAssertTrue(confirmation.2.contains("confirmation_required"))
     }
+    func testQuietSuppressesHumanOutputButNotErrors() throws {
+        let quiet = try run(["--backend", "fake", "--quiet", "accounts"])
+        XCTAssertEqual(quiet.0, 0, quiet.2)
+        XCTAssertTrue(quiet.1.isEmpty)
+        XCTAssertTrue(quiet.2.isEmpty)
+
+        let failure = try run(["--backend", "fake", "--quiet", "show", "absent"])
+        XCTAssertEqual(failure.0, 3)
+        XCTAssertTrue(failure.1.isEmpty)
+        XCTAssertTrue(failure.2.contains("note_not_found"))
+    }
     func testAllWritesRefuseBeforeBackendOrEditor() throws {
         let commands = [["add"], ["append", "welcome", "--body", "x"], ["edit", "welcome"], ["rename", "welcome", "X"], ["move", "welcome", "Notes"], ["delete", "welcome", "--yes"], ["folder", "create", "X"], ["folder", "rename", "Notes", "X"], ["folder", "delete", "Notes", "--yes"]]
         for args in commands {
@@ -52,19 +63,26 @@ final class CLITests: XCTestCase {
             let args = ["--backend", "fake", "search", query, "--fuzzy", "--json"]
             let first = try run(args), second = try run(args)
             XCTAssertEqual(first.0, 0, first.2); XCTAssertEqual(first.1, second.1)
-            let notes = try JSONSerialization.jsonObject(with: Data(first.1.utf8)) as! [[String: Any]]
+            let page = try JSONSerialization.jsonObject(with: Data(first.1.utf8)) as! [String: Any]
+            let notes = page["notes"] as! [[String: Any]]
             XCTAssertEqual(notes.count, query == "shoppng" ? 2 : 1, query)
             XCTAssertEqual(notes.first?["title"] as? String, ["welcom", "NOTESCli"].contains(query) ? "Welcome" : "Shopping")
         }
         let ranked = try run(["--backend", "fake", "search", "shopping", "--fuzzy", "--json"])
-        let ranking = try JSONSerialization.jsonObject(with: Data(ranked.1.utf8)) as! [[String: Any]]
+        let ranking = (try JSONSerialization.jsonObject(with: Data(ranked.1.utf8)) as! [String: Any])["notes"] as! [[String: Any]]
         XCTAssertEqual(ranking.compactMap { $0["title"] as? String }, ["Shopping", "Welcome"])
         let limited = try run(["--backend", "fake", "search", "shopping", "--fuzzy", "--limit", "1", "--json"])
-        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(limited.1.utf8)) as! [Any]).count, 1)
+        let limitedPage = try JSONSerialization.jsonObject(with: Data(limited.1.utf8)) as! [String: Any]
+        XCTAssertEqual((limitedPage["notes"] as! [Any]).count, 1)
+        let cursor = try XCTUnwrap(limitedPage["nextCursor"] as? String)
+        let continued = try run(["--backend", "fake", "search", "shopping", "--fuzzy", "--limit", "1", "--cursor", cursor, "--json"])
+        let continuedPage = try JSONSerialization.jsonObject(with: Data(continued.1.utf8)) as! [String: Any]
+        XCTAssertEqual((continuedPage["notes"] as! [Any]).count, 1)
+        XCTAssertNil(continuedPage["nextCursor"])
         let absent = try run(["--backend", "fake", "search", "unrelated", "--fuzzy", "--json"])
-        XCTAssertEqual(absent.1.trimmingCharacters(in: .whitespacesAndNewlines), "[]")
+        XCTAssertEqual(((try JSONSerialization.jsonObject(with: Data(absent.1.utf8)) as! [String: Any])["notes"] as! [Any]).count, 0)
         let exact = try run(["--backend", "fake", "search", "cofee", "--json"])
-        XCTAssertEqual(exact.1.trimmingCharacters(in: .whitespacesAndNewlines), "[]")
+        XCTAssertEqual(((try JSONSerialization.jsonObject(with: Data(exact.1.utf8)) as! [String: Any])["notes"] as! [Any]).count, 0)
     }
     func testReadsWritesAndEditor() throws {
         let commands = [["folders", "--tree", "--account", "Demo"], ["list", "--folder", "Notes", "--account", "Demo", "--pinned", "--tag", "demo", "--since", "2020-01-01", "--until", "2030-01-01", "--limit", "1", "--include-deleted"], ["tags"], ["recent", "1"], ["show", "welcome", "--no-attachments"], ["add", "Draft", "--body", "Body"], ["append", "welcome", "--body", "More"], ["rename", "welcome", "New"], ["move", "welcome", "Notes"], ["delete", "welcome", "shopping", "--yes"], ["folder", "create", "Child", "--parent", "Notes", "--account", "Demo"], ["folder", "rename", "Notes", "Renamed"], ["folder", "delete", "Notes", "--yes"], ["open", "welcome"]]
@@ -88,6 +106,14 @@ final class CLITests: XCTestCase {
         let batch = try run(["--backend", "fake", "--json", "delete", "welcome", "--yes"])
         let batchJSON = try JSONSerialization.jsonObject(with: Data(batch.1.utf8)) as! [[String: Any]]
         XCTAssertEqual(batchJSON.first?["engine"] as? String, "scripting")
+
+        for command in [["open", "Demo", "--account"], ["open", "Notes", "--folder"]] {
+            let value = try run(["--backend", "fake"] + command)
+            XCTAssertEqual(value.0, 0, value.2)
+        }
+        let missingAttachment = try run(["--backend", "fake", "--json", "open", "welcome", "--attachment", "missing"])
+        XCTAssertEqual(missingAttachment.0, 3)
+        XCTAssertTrue(missingAttachment.2.contains("attachment_not_found"))
     }
     func testExportsAndFileInput() throws {
         let directory = root.appendingPathComponent(".build/cli-tests-" + UUID().uuidString)

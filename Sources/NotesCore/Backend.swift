@@ -9,22 +9,25 @@ public struct NoteQuery: Sendable {
     public var tag: String?
     public var modifiedAfter: Date?
     public var modifiedBefore: Date?
+    public var attachmentKinds: [String]
     public var limit: Int?
     public init(folder: String? = nil, account: String? = nil, text: String? = nil, includeDeleted: Bool = false,
                 pinnedOnly: Bool = false, tag: String? = nil, modifiedAfter: Date? = nil, modifiedBefore: Date? = nil,
-                limit: Int? = nil) {
+                limit: Int? = nil, attachmentKinds: [String] = []) {
         self.folder = folder; self.account = account; self.text = text; self.includeDeleted = includeDeleted
         self.pinnedOnly = pinnedOnly; self.tag = tag; self.modifiedAfter = modifiedAfter; self.modifiedBefore = modifiedBefore
         self.limit = limit
+        self.attachmentKinds = attachmentKinds
     }
 }
 
 /// Read side. Implemented by NotesStore (NoteStore.sqlite, read-only).
 public protocol NotesReading: Sendable {
     func accounts() throws -> [Account]
+    func defaultLocation() throws -> DefaultNotesLocation?
     func folders(account: String?) throws -> [Folder]
     func notes(_ query: NoteQuery) throws -> [NoteSummary]
-    /// Accepts a uuid, x-coredata id, or exact title (title must be unique).
+    /// Accepts a uuid, x-coredata id, short id, or exact title (title must be unique).
     func note(_ ref: String) throws -> Note
     func tags() throws -> [String: Int]
     func notes(_ query: NoteQuery, sort: NoteSort) throws -> [NoteSummary]
@@ -37,6 +40,15 @@ public protocol NotesReading: Sendable {
 }
 
 public extension NotesReading {
+    func defaultLocation() throws -> DefaultNotesLocation? {
+        let accounts = try accounts()
+        guard let account = accounts.first(where: \.isDefault) ?? accounts.first else { return nil }
+        let folder = try folders(account: account.id).first { $0.id == account.defaultFolderID }
+            ?? folders(account: account.id).first { $0.name == account.defaultFolderName }
+            ?? folders(account: account.id).first { !$0.isRecentlyDeleted && !$0.isSmartFolder }
+        return DefaultNotesLocation(accountID: account.id, accountName: account.name, folderID: folder?.id,
+                                    folderName: folder?.name, folderPath: folder?.path ?? [])
+    }
     func notes(_ query: NoteQuery, sort: NoteSort) throws -> [NoteSummary] {
         var query = query
         let limit = query.limit
@@ -57,7 +69,12 @@ public extension NotesReading {
     }
     func summary(_ ref: String) throws -> NoteSummary {
         let notes = try notes(NoteQuery(includeDeleted: true))
-        let ids = notes.filter { $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame || $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame }
+        let shortRef = ref.allSatisfy(\.isNumber) ? "n\(ref)" : ref
+        let ids = notes.filter {
+            $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame ||
+            $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
+            $0.id.shortID?.caseInsensitiveCompare(shortRef) == .orderedSame
+        }
         let matches = ids.isEmpty ? notes.filter { $0.title == ref } : ids
         guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
         guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }

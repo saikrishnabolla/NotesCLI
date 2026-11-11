@@ -7,7 +7,7 @@ import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, TableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self])
     @OptionGroup var options: GlobalOptions
 
     static func main() {
@@ -35,7 +35,8 @@ struct Accounts: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     func run() throws {
         let rows = try options.backends().reader.accounts()
-        if options.json { try Output.json(rows) } else { Output.table(["ID", "NAME", "KIND"], rows.map { [$0.id, $0.name, $0.kind] }) }
+        if options.json { try Output.json(rows) }
+        else { Output.table(["ID", "NAME", "KIND", "DEFAULT", "DEFAULT FOLDER"], rows.map { [$0.id, $0.name, $0.kind, $0.isDefault ? "yes" : "", $0.defaultFolderName ?? ""] }) }
     }
 }
 struct Folders: ParsableCommand {
@@ -65,7 +66,7 @@ struct List: ParsableCommand {
         try Output.notes(options.backends().reader.notes(NoteQuery(folder: folder, account: account, includeDeleted: includeDeleted, pinnedOnly: pinned, tag: tag, modifiedAfter: after, modifiedBefore: before, limit: limit)), json: options.json)
     }
 }
-enum NoteFormat: String, ExpressibleByArgument { case markdown, text, html, json }
+enum NoteFormat: String, ExpressibleByArgument { case markdown, text, html, json, outline }
 struct Show: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Argument var ref: String
@@ -73,7 +74,13 @@ struct Show: ParsableCommand {
     @Flag var noAttachments = false
     func run() throws {
         let note = try options.backends().reader.note(ref)
-        print(try NotePresentation.render(note, format: options.json ? "json" : format.rawValue, attachments: !noAttachments))
+        if format == .outline {
+            let outline = note.document?.outline() ?? []
+            if options.json { try Output.json(outline) }
+            else if !options.quiet { print(String(decoding: try NotePresentation.json(outline), as: UTF8.self)) }
+        } else if !options.quiet || options.json {
+            print(try NotePresentation.render(note, format: options.json ? "json" : format.rawValue, attachments: !noAttachments))
+        }
     }
 }
 struct Search: ParsableCommand {
@@ -429,10 +436,33 @@ struct DeleteFolder: ParsableCommand {
 struct Open: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Argument var ref: String
+    @Flag var folder = false
+    @Flag var account = false
+    @Option var attachment: String?
+    @Flag var reveal = false
+    func validate() throws {
+        if [folder, account, attachment != nil].filter({ $0 }).count > 1 { throw ValidationError("Choose one of --folder, --account, or --attachment.") }
+        if reveal && attachment == nil { throw ValidationError("--reveal requires --attachment.") }
+    }
     func run() throws {
-        let backend = try options.backends(), note = try backend.reader.note(ref)
-        try backend.openNote(note.summary.id)
-        if options.json { try Output.json(["opened": note.summary.id.uuid]) } else { print("Opened \(note.summary.title)") }
+        let backend = try options.backends()
+        let opened: String
+        if account {
+            let matches = try backend.reader.accounts().filter { $0.id.caseInsensitiveCompare(ref) == .orderedSame || $0.name == ref }
+            guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "account_not_found" : "ambiguous_account", "Account must resolve uniquely.") }
+            if !backend.isFake { try ReadOpen.account(matches[0]) }; opened = matches[0].id
+        } else if folder {
+            let matches = try backend.reader.folders(account: nil).filter { $0.id.caseInsensitiveCompare(ref) == .orderedSame || $0.name == ref || $0.path.joined(separator: " > ") == ref }
+            guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "folder_not_found" : "ambiguous_folder", "Folder must resolve uniquely.") }
+            if !backend.isFake { try ReadOpen.folder(matches[0]) }; opened = matches[0].id
+        } else if let attachment {
+            let matches = try backend.reader.attachments(ref).filter { $0.id.caseInsensitiveCompare(attachment) == .orderedSame }
+            guard matches.count == 1 else { throw NotesError("attachment_not_found", "No attachment matches the id.") }
+            if !backend.isFake { try ReadOpen.attachment(matches[0], reveal: reveal) }; opened = matches[0].id
+        } else {
+            let note = try backend.reader.note(ref); try backend.openNote(note.summary.id); opened = note.summary.id.shortID ?? note.summary.id.uuid
+        }
+        if options.json { try Output.json(["opened": opened]) } else if !options.quiet { print("Opened \(opened)") }
     }
 }
 struct Completion: ParsableCommand {

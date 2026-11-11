@@ -15,6 +15,7 @@ struct GlobalOptions: ParsableArguments {
     var engine: WriteEngine = .scripting
     @Flag(help: "Refuse all writes.") var readOnly = false
     @Flag(help: "Print JSON, including errors on stderr.") var json = false
+    @Flag(help: "Suppress non-essential human output. Errors are still printed.") var quiet = false
     func backends() throws -> Backends { try Backends.make(backend) }
     var resolvedEngine: WriteEngine {
         if CommandLine.arguments.contains(where: { $0 == "--engine" || $0.hasPrefix("--engine=") }) { return engine }
@@ -30,6 +31,7 @@ enum Output {
     static func error(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
     static func json<T: Encodable>(_ value: T) throws { print(String(decoding: try NotePresentation.json(value), as: UTF8.self)) }
     static func table(_ headers: [String], _ rows: [[String]]) {
+        if CommandLine.arguments.contains("--quiet") { return }
         let cleaned = rows.map { $0.map { $0.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " ").filter { !$0.isASCII || $0.asciiValue! >= 32 } } }
         let widths = headers.indices.map { i in min(64, max(headers[i].count, cleaned.map { $0[i].count }.max() ?? 0)) }
         for row in [headers] + cleaned {
@@ -41,7 +43,7 @@ enum Output {
     }
     static func notes(_ notes: [NoteSummary], json: Bool) throws {
         if json { try Self.json(notes) }
-        else { table(["ID", "TITLE", "FOLDER", "MODIFIED"], notes.map { [$0.id.uuid, $0.title + ($0.isLocked ? " [locked]" : ""), $0.folderPath.joined(separator: " > "), $0.modified.map { ISO8601DateFormatter().string(from: $0) } ?? ""] }) }
+        else { table(["SHORT ID", "ID", "TITLE", "FOLDER", "MODIFIED"], notes.map { [$0.id.shortID ?? "", $0.id.uuid, $0.title + ($0.isLocked ? " [locked]" : ""), $0.folderPath.joined(separator: " > "), $0.modified.map { ISO8601DateFormatter().string(from: $0) } ?? ""] }) }
     }
     static func write(_ result: WriteResult, json: Bool) throws {
         let response = EngineWriteResponse(engine: "scripting", result: result, operationID: result.operationID, syncPending: result.syncPending)

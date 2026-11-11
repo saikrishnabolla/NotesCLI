@@ -17,7 +17,10 @@ let package = Package(
         // Pure Swift: model, protobuf decoding, renderers. No Apple frameworks, so it builds on Linux.
         .target(name: "NotesCore"),
         // macOS: read-only NoteStore.sqlite snapshot reader.
-        .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3"), .linkedFramework("PDFKit")]),
+        .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [
+            .linkedLibrary("sqlite3"), .linkedFramework("PDFKit"), .linkedFramework("ImageIO"),
+            .linkedFramework("AVFoundation"), .linkedFramework("AppKit"), .linkedFramework("PencilKit")
+        ]),
         .target(name: "NotesIndex", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
         // macOS: writes through Notes.app scripting, verified by reading back.
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
@@ -27,7 +30,9 @@ let package = Package(
         // MCP server over stdio, same operations as the CLI.
         // Write journal, snapshots/undo, and the write-folder allowlist.
         .target(name: "NotesSafety", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
-        .target(name: "NotesMCP", dependencies: ["NotesCore", "NotesIndex", "NotesSafety", "NotesSync"]),
+        .target(name: "NotesMCP", dependencies: ["NotesCore", "NotesIndex", "NotesSafety", "NotesStore", "NotesSync"], linkerSettings: [
+            .linkedFramework("ImageIO"), .linkedFramework("CoreGraphics")
+        ]),
         .target(name: "NotesSync", dependencies: ["NotesCore"], linkerSettings: [
             .linkedLibrary("sqlite3"),
             .linkedFramework("CoreServices"),

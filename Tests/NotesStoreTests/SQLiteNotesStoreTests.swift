@@ -34,6 +34,7 @@ private final class SyntheticLibrary {
           ZMERGEABLEDATA1 BLOB, ZMERGEABLEDATA BLOB);
         CREATE TABLE ZICNOTEDATA (Z_PK INTEGER PRIMARY KEY,Z_ENT INTEGER,ZNOTE INTEGER,ZDATA BLOB);
         CREATE TABLE ZICNOTEPARTICIPANT (Z_PK INTEGER PRIMARY KEY,Z_ENT INTEGER,ZNOTE INTEGER,ZPARTICIPANTID TEXT,ZUSERID TEXT);
+        CREATE TABLE ZICCLOUDSTATE (Z_PK INTEGER PRIMARY KEY,ZCURRENTLOCALVERSION INTEGER,ZLATESTVERSIONSYNCEDTOCLOUD INTEGER,ZINCLOUD INTEGER,ZCLOUDSYNCINGOBJECT INTEGER);
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNAME,ZACCOUNTTYPE) VALUES (1,203,'account','Cloud',1),(2,203,'local','On My Mac',2);
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE2,ZOWNER,ZPARENT,ZFOLDERTYPE,ZSMARTFOLDERQUERYJSON) VALUES
           (10,202,'root','Work',1,NULL,0,NULL),(11,202,'child','Archive',1,10,0,NULL),(12,202,'trash','Deleted localized',1,NULL,1,NULL),(13,202,'smart','Tagged',1,NULL,2,'{"entity":"note","type":{"and":[{"deleted":false},{"tag":"work"}]}}');
@@ -54,6 +55,7 @@ private final class SyntheticLibrary {
           (33,204,'photo',20,'public.jpeg',34,'recognized','handwriting','extra');
         UPDATE ZICCLOUDSYNCINGOBJECT SET ZIMAGECLASSIFICATIONSUMMARY='document',ZSUMMARY='image summary' WHERE Z_PK=33;
         UPDATE ZICCLOUDSYNCINGOBJECT SET ZLASTOPENEDDATE=300,ZSORTORDER=2,ZNEEDSINITIALFETCHFROMCLOUD=0,ZNEEDSTOBEFETCHEDFROMCLOUD=0,ZNEEDSTOSAVEUSERSPECIFICRECORD=1,ZVERSIONOUTOFDATE=0,ZLASTSYNCDATE=250,ZISSHAREDIRTY=1 WHERE Z_PK=20;
+        INSERT INTO ZICCLOUDSTATE VALUES (1,4,3,1,20);
         INSERT INTO ZICNOTEPARTICIPANT VALUES (1,0,20,'participant','user');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZFILENAME,ZGENERATION1) VALUES (34,206,'media','image.jpg','v1');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZURLSTRING,ZTITLE) VALUES (35,204,'preview',20,'public.url','https://example.com','Example');
@@ -135,6 +137,8 @@ final class SQLiteNotesStoreTests: XCTestCase {
         let beforeWAL = try Data(contentsOf: URL(fileURLWithPath: fixture.database.path + "-wal"))
         let store = try fixture.store()
         XCTAssertEqual(try store.accounts().map(\.kind).sorted(),["icloud","local"])
+        XCTAssertEqual(try store.accounts().filter(\.isDefault).first?.name,"Cloud")
+        XCTAssertEqual(try store.defaultLocation()?.folderName,"Work")
         let child = try XCTUnwrap(store.folders(account:"Cloud").first { $0.id == "child" })
         XCTAssertEqual(child.path,["Work","Archive"])
         XCTAssertEqual(child.parentID,"root")
@@ -155,6 +159,9 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.notes(.init(limit:-1)))
         let note = try store.note("n1")
         XCTAssertEqual(note.summary.id.coreDataID,"x-coredata://STORE-UUID/ICNote/p20")
+        XCTAssertEqual(note.summary.id.shortID,"n20")
+        XCTAssertEqual(try store.note("n20").summary.id.uuid,"N1")
+        XCTAssertEqual(try store.note("20").summary.id.uuid,"N1")
         XCTAssertEqual(try store.note("x-coredata://STORE-UUID/ICNote/p20").summary.id.uuid,"N1")
         XCTAssertEqual(try store.note("Second").summary.id.uuid,"N2")
         XCTAssertThrowsError(try store.note("Duplicate")) { XCTAssertEqual(($0 as? NotesError)?.code,"ambiguous_note") }
@@ -176,6 +183,9 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(note.summary.displayOrder,2)
         XCTAssertEqual(note.summary.participants?.first?.participantID,"participant")
         XCTAssertEqual(note.summary.syncState?.needsSave,true)
+        XCTAssertEqual(note.summary.syncState?.currentLocalVersion,4)
+        XCTAssertEqual(note.summary.syncState?.latestVersionSyncedToCloud,3)
+        XCTAssertEqual(try store.notes(.init(attachmentKinds:["image"])).map(\.id.uuid),["N1"])
         XCTAssertEqual(try store.notes(.init(),sort:.opened).first?.id.uuid,"N1")
         XCTAssertEqual(try store.backlinks("N2").map(\.id.uuid),["N1"])
         let smart = try XCTUnwrap(store.smartFolders(evaluate:true).first)
@@ -210,7 +220,9 @@ final class SQLiteNotesStoreTests: XCTestCase {
         let hex = data.map { String(format:"%02x",$0) }.joined()
         try fixture.sql("INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZMERGEABLEDATA) VALUES (40,204,'table',21,'com.apple.notes.table',X'\(hex)'); DELETE FROM ZICNOTEDATA WHERE ZNOTE=21;")
         try fixture.body(21,"\u{fffc}",[P.int(1,1) + P.bytes(12,P.string(1,"table") + P.string(2,"com.apple.notes.table"))])
-        try fixture.sql("INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZFALLBACKIMAGEGENERATION) VALUES (41,204,'drawing',21,'com.apple.drawing','generation');")
+        let drawingJSON = try JSONSerialization.data(withJSONObject: ["strokes": [[["x": 0, "y": 0], ["x": 2, "y": 2]]]])
+        let drawingHex = drawingJSON.map { String(format:"%02x",$0) }.joined()
+        try fixture.sql("INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZFALLBACKIMAGEGENERATION,ZMERGEABLEDATA) VALUES (41,204,'drawing',21,'com.apple.drawing','generation',X'\(drawingHex)');")
         let fallback = fixture.directory.appendingPathComponent("Accounts/account/FallbackImages/drawing/generation")
         try FileManager.default.createDirectory(at:fallback,withIntermediateDirectories:true)
         try Data([1]).write(to:fallback.appendingPathComponent("FallbackImage.jpeg"))
@@ -221,6 +233,7 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(note.document?.tables?["table"],[["Cell"]])
         XCTAssertEqual(note.document?.markdown(),"| Cell |\n| --- |")
         XCTAssertEqual(note.attachments.first { $0.id == "drawing" }?.filePath,fallback.appendingPathComponent("FallbackImage.jpeg").path)
+        XCTAssertTrue(note.attachments.first { $0.id == "drawing" }?.drawingSVG?.contains("<path") == true)
     }
     func testColumnVariantsAndSnapshotReuse() throws {
         let fixture = try SyntheticLibrary(alternateColumns:true)

@@ -2,7 +2,11 @@ import Foundation
 import NotesCore
 import NotesIndex
 import NotesSafety
+import NotesStore
 import NotesSync
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 
 public struct MCPNativeResult {
     public var result: WriteResult?
@@ -62,6 +66,7 @@ public final class MCPServer {
         let strings: [String: Any] = ["type": "array", "items": string]
         let rows: [String: Any] = ["type": "array", "items": ["type": "array", "items": string]]
         let page = ["offset": integer, "limit": integer]
+        let cursorPage = ["cursor": string, "limit": integer]
         let writeCommon = ["dry_run": bool, "idempotency_key": string, "if_modified": string,
                            "expect_revision": string, "write_folders": string, "allow_attachment_loss": bool,
                            "allow_shared": bool, "wait_sync": bool, "sync_timeout": ["type": "number", "minimum": 0]]
@@ -70,16 +75,16 @@ public final class MCPServer {
             Tool(name: name, description: description, write: write, native: native, destructive: destructive,
                  required: required, properties: write ? properties.merging(writeCommon) { old, _ in old } : properties)
         }
-        let filters: [String: [String: Any]] = ["folder": string, "account": string, "pinned": bool, "tag": string,
+        let filters: [String: [String: Any]] = ["folder": string, "account": string, "pinned": bool, "tag": string, "has": string,
             "since": string, "until": string, "include_deleted": bool,
             "sort": ["type": "string", "enum": ["modified", "created", "opened", "title", "display"]]]
         var values: [Tool] = [
             t("list_accounts", "List Notes accounts."),
             t("list_folders", "List folders.", [], ["account": string]),
-            t("list_notes", "List notes with filters and paging.", [], filters.merging(page) { old, _ in old }),
-            t("search_notes", "Search note titles and bodies.", ["query"], ["query": string, "folder": string].merging(page) { old, _ in old }),
-            t("query_notes", "Search the local index with boolean, field, date, and kind expressions.", ["query"], ["query": string, "folder": string, "rebuild": bool].merging(page) { old, _ in old }),
-            t("get_note", "Read one note in Markdown, text, HTML, or JSON.", ["ref"], ["ref": string, "format": ["type": "string", "enum": ["markdown", "text", "html", "json"]], "attachments": bool].merging(page) { old, _ in old }),
+            t("list_notes", "List notes with filters and stable cursor paging.", [], filters.merging(cursorPage) { old, _ in old }),
+            t("search_notes", "Search note titles and bodies with stable cursor paging.", ["query"], ["query": string, "folder": string, "has": string].merging(cursorPage) { old, _ in old }),
+            t("query_notes", "Search the local index with boolean, field, date, kind, and stable cursor expressions.", ["query"], ["query": string, "folder": string, "rebuild": bool].merging(cursorPage) { old, _ in old }),
+            t("get_note", "Read one note in Markdown, text, HTML, JSON, or outline form.", ["ref"], ["ref": string, "format": ["type": "string", "enum": ["markdown", "text", "html", "json", "outline"]], "attachments": bool].merging(page) { old, _ in old }),
             t("get_notes", "Read several notes.", ["refs"], ["refs": strings, "format": ["type": "string", "enum": ["markdown", "text", "html", "json"]]].merging(page) { old, _ in old }),
             t("list_tags", "List tags and note counts."),
             t("list_attachments", "List attachment metadata for a note.", ["ref"], ["ref": string]),
@@ -167,6 +172,17 @@ public final class MCPServer {
                 t("restore_note", "Restore a note from Recently Deleted.", ["ref"], ["ref": string, "folder": string], write: true, native: true)
             ]
         }
+        // MARK: w3-read begin
+        values += [
+            t("index_status", "Get search index and background job progress."),
+            t("get_attachment", "Return an attachment as an image/audio content block or resource link.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string]),
+            t("anchor_add", "Create a persistent paragraph anchor.", ["ref"], ["ref": string, "heading": string, "offset": integer]),
+            t("anchor_list", "List persistent paragraph anchors.", [], ["ref": string]),
+            t("anchor_resolve", "Resolve a persistent paragraph anchor after edits.", ["id"], ["id": string]),
+            t("anchor_prune", "Remove anchors whose note or paragraph no longer exists."),
+            t("table_get", "Read decoded native tables.", ["ref"], ["ref": string, "attachment_id": string, "format": ["type": "string", "enum": ["markdown", "json", "csv"]]])
+        ]
+        // MARK: w3-read end
         return values.filter { (!readOnly || !$0.write) && (!$0.native || allowNative) }
     }
 
@@ -284,6 +300,132 @@ public final class MCPServer {
         return result
     }
 
+    private func attachmentKinds(_ raw: String?) throws -> [String] {
+        guard let raw else { return [] }
+        let allowed = Set(["image", "audio", "pdf", "scan", "drawing", "table", "checklist", "link", "file"])
+        let values = raw.split(separator: "|").map { String($0).lowercased() }
+        guard values.allSatisfy(allowed.contains) else { throw NotesError("invalid_attachment_kind", "Invalid attachment kind.") }
+        return values
+    }
+
+    private func noteCursor(_ note: NoteSummary, sort: NoteSort) -> StableCursorPayload {
+        switch sort {
+        case .modified: return StableCursorPayload(sort: sort.rawValue, key: String(note.modified?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), id: note.id.uuid)
+        case .created: return StableCursorPayload(sort: sort.rawValue, key: String(note.created?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), id: note.id.uuid)
+        case .opened: return StableCursorPayload(sort: sort.rawValue, key: String(note.lastOpened?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), secondary: String(note.modified?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), id: note.id.uuid)
+        case .title: return StableCursorPayload(sort: sort.rawValue, key: note.title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")), id: note.id.uuid)
+        case .display: return StableCursorPayload(sort: sort.rawValue, key: String(note.displayOrder ?? Double.greatestFiniteMagnitude), id: note.id.uuid)
+        }
+    }
+
+    private func follows(_ candidate: StableCursorPayload, _ cursor: StableCursorPayload) -> Bool {
+        switch NoteSort(rawValue: cursor.sort) ?? .modified {
+        case .modified, .created:
+            let left = Double(candidate.key) ?? 0, right = Double(cursor.key) ?? 0
+            return left < right || (left == right && candidate.id < cursor.id)
+        case .opened:
+            let left = Double(candidate.key) ?? 0, right = Double(cursor.key) ?? 0
+            let left2 = Double(candidate.secondary ?? "") ?? 0, right2 = Double(cursor.secondary ?? "") ?? 0
+            return left < right || (left == right && (left2 < right2 || (left2 == right2 && candidate.id < cursor.id)))
+        case .title: return candidate.key > cursor.key || (candidate.key == cursor.key && candidate.id > cursor.id)
+        case .display:
+            let left = Double(candidate.key) ?? 0, right = Double(cursor.key) ?? 0
+            return left > right || (left == right && candidate.id > cursor.id)
+        }
+    }
+
+    private func stableNotePage(_ notes: [NoteSummary], sort: NoteSort, cursor: String?, limit: Int) throws -> [String: Any] {
+        var values = notes
+        if let cursor {
+            let decoded = try StableCursor.decode(cursor)
+            guard decoded.sort == sort.rawValue else { throw NotesError("invalid_cursor", "The cursor uses a different sort order.") }
+            values = values.filter { follows(noteCursor($0, sort: sort), decoded) }
+        }
+        var selected = Array(values.prefix(min(limit, 1000)))
+        while selected.count > 1,
+              try JSONSerialization.data(withJSONObject: ["items": NotePresentation.object(selected)]).count >= Self.textLimit / 2 { selected.removeLast() }
+        var result: [String: Any] = ["items": try NotePresentation.object(selected), "limit": min(limit, 1000), "truncated": selected.count < values.count]
+        if selected.count < values.count, let last = selected.last { result["next_cursor"] = try StableCursor.encode(noteCursor(last, sort: sort)) }
+        return result
+    }
+
+    private func stableHitPage(_ hits: [NotesSearchHit], cursor: String?, limit: Int) throws -> [String: Any] {
+        func payload(_ hit: NotesSearchHit) -> StableCursorPayload {
+            StableCursorPayload(sort: "search", key: String(hit.score), secondary: String(hit.modified?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), id: hit.noteID)
+        }
+        var values = hits
+        if let cursor {
+            let decoded = try StableCursor.decode(cursor)
+            guard decoded.sort == "search" else { throw NotesError("invalid_cursor", "The cursor is not a search cursor.") }
+            values = values.filter { hit in
+                let value = payload(hit), score = Double(value.key) ?? 0, cursorScore = Double(decoded.key) ?? 0
+                let modified = Double(value.secondary ?? "") ?? 0, cursorModified = Double(decoded.secondary ?? "") ?? 0
+                return score < cursorScore || (score == cursorScore && (modified < cursorModified || (modified == cursorModified && value.id < decoded.id)))
+            }
+        }
+        var selected = Array(values.prefix(min(limit, 1000)))
+        while selected.count > 1,
+              try JSONSerialization.data(withJSONObject: ["items": NotePresentation.object(selected)]).count >= Self.textLimit / 2 { selected.removeLast() }
+        var result: [String: Any] = ["items": try NotePresentation.object(selected), "limit": min(limit, 1000), "truncated": selected.count < values.count]
+        if selected.count < values.count, let last = selected.last { result["next_cursor"] = try StableCursor.encode(payload(last)) }
+        return result
+    }
+
+    private func tableText(_ rows: [[String]], format: String) -> String {
+        if format == "csv" {
+            return rows.map { $0.map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }.joined(separator: ",") }.joined(separator: "\n")
+        }
+        guard let first = rows.first else { return "" }
+        func row(_ cells: [String]) -> String { "| " + cells.map { $0.replacingOccurrences(of: "|", with: "\\|").replacingOccurrences(of: "\n", with: "<br>") }.joined(separator: " | ") + " |" }
+        return ([row(first), "| " + first.map { _ in "---" }.joined(separator: " | ") + " |"] + rows.dropFirst().map(row)).joined(separator: "\n")
+    }
+
+    private func attachmentContent(ref: String, attachmentID: String) throws -> [String: Any] {
+        let matches = try reader.attachments(ref).filter { $0.id.caseInsensitiveCompare(attachmentID) == .orderedSame }
+        guard matches.count == 1 else { throw NotesError("attachment_not_found", "No attachment matches the id.") }
+        let attachment = matches[0]
+        guard let path = attachment.filePath ?? attachment.fallbackRasterPath else { throw NotesError("attachment_unavailable", "The attachment file is not downloaded.") }
+        let url = URL(fileURLWithPath: path), data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let budget = 34 * 1024
+        var blocks: [[String: Any]] = []
+        var mime = mimeType(attachment, url: url)
+        if attachment.kind == "image" || attachment.kind == "drawing" || attachment.kind == "scan" {
+            if let resized = resizedImage(url, maximumDimension: 1600, maximumBytes: budget) {
+                blocks.append(["type": "image", "data": resized.base64EncodedString(), "mimeType": "image/jpeg"]); mime = "image/jpeg"
+            }
+        } else if attachment.kind == "audio", data.count <= budget {
+            blocks.append(["type": "audio", "data": data.base64EncodedString(), "mimeType": mime])
+        }
+        if blocks.isEmpty {
+            blocks.append(["type": "resource_link", "name": attachment.filename ?? attachment.id, "uri": url.absoluteString,
+                           "description": "Attachment exceeds the inline 48 KB budget.", "mimeType": mime, "size": data.count])
+        }
+        let structured: [String: Any] = ["id": attachment.id, "kind": attachment.kind, "filename": attachment.filename ?? NSNull(),
+                                         "inline": blocks.first?["type"] as? String != "resource_link", "mime_type": mime, "size": data.count]
+        return ["content": blocks, "structuredContent": structured, "isError": false]
+    }
+
+    private func mimeType(_ attachment: Attachment, url: URL) -> String {
+        if let type = UTType(attachment.typeUTI), let mime = type.preferredMIMEType { return mime }
+        return UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+    }
+
+    private func resizedImage(_ url: URL, maximumDimension: Int, maximumBytes: Int) -> Data? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: maximumDimension
+              ] as CFDictionary) else { return nil }
+        for quality in [0.75, 0.55, 0.35, 0.2] {
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil) else { continue }
+            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+            if CGImageDestinationFinalize(destination), data.length <= maximumBytes { return data as Data }
+        }
+        return nil
+    }
+
     private func textPage(_ text: String, offset: Int, limit: Int) -> (String, Int?) {
         let characters = Array(text)
         guard offset < characters.count else { return ("", nil) }
@@ -310,7 +452,7 @@ public final class MCPServer {
             return try content(["dry_run": true, "tool": tool.name, "engine": "filesystem", "arguments": a, "message": "No changes made."])
         }
         switch tool.name {
-        case "list_accounts": return try content(["accounts": NotePresentation.object(reader.accounts())])
+        case "list_accounts": return try content(["accounts": NotePresentation.object(reader.accounts()), "default_location": try reader.defaultLocation().map(NotePresentation.object) ?? NSNull()])
         case "list_folders": return try content(["folders": NotePresentation.object(reader.folders(account: s("account")))])
         case "list_tags": return try content(["tags": reader.tags()])
         case "get_write_policy":
@@ -320,11 +462,14 @@ public final class MCPServer {
             return try content(["read_only": readOnly, "allow_native": allowNative, "write_folders": effectiveWriteFolders])
         case "get_note":
             let note = try reader.note(s("ref")!), format = s("format") ?? "markdown"
-            let rendered = try NotePresentation.render(note, format: format, attachments: a["attachments"] as? Bool ?? true)
+            let rendered = format == "outline"
+                ? String(decoding: try NotePresentation.json(note.document?.outline() ?? []), as: UTF8.self)
+                : try NotePresentation.render(note, format: format, attachments: a["attachments"] as? Bool ?? true)
             let value = textPage(rendered, offset: offset, limit: min(a["limit"] == nil ? 16_000 : limit, 16_000))
             var result: [String: Any] = ["summary": try NotePresentation.object(note.summary), "format": format, "body": value.0, "offset": offset, "truncated": value.1 != nil]
             if let next = value.1 { result["next_offset"] = next }
             if format == "json", value.1 == nil { result["note"] = try JSONSerialization.jsonObject(with: Data(rendered.utf8)) }
+            if format == "outline", value.1 == nil { result["outline"] = try JSONSerialization.jsonObject(with: Data(rendered.utf8)) }
             return try content(result)
         case "get_notes":
             let refs = a["refs"] as! [String], format = s("format") ?? "markdown", maximum = min(limit, 100)
@@ -343,16 +488,17 @@ public final class MCPServer {
             let sort = NoteSort(rawValue: s("sort") ?? "modified") ?? .modified
             let query = NoteQuery(folder: s("folder"), account: s("account"), text: s("query"), includeDeleted: b("include_deleted"),
                                   pinnedOnly: b("pinned"), tag: s("tag"), modifiedAfter: try s("since").map { try NotePresentation.date($0) },
-                                  modifiedBefore: try s("until").map { try NotePresentation.date($0) })
+                                  modifiedBefore: try s("until").map { try NotePresentation.date($0) },
+                                  attachmentKinds: try attachmentKinds(s("has")))
             let all = try reader.notes(query, sort: sort)
-            var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }
+            var result = try stableNotePage(all, sort: sort, cursor: s("cursor"), limit: limit)
             result["notes"] = result.removeValue(forKey: "items")
             return try content(result)
         case "query_notes":
             let index = LocalNotesIndex(url: stateRoot.appendingPathComponent("index.sqlite"))
             _ = try index.update(from: reader, rebuild: b("rebuild"))
             let all = try index.search(s("query")!, folder: s("folder"), limit: 5000)
-            var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }
+            var result = try stableHitPage(all, cursor: s("cursor"), limit: limit)
             result["hits"] = result.removeValue(forKey: "items")
             return try content(result)
         case "list_attachments": return try content(["attachments": NotePresentation.object(reader.attachments(s("ref")!))])
@@ -434,6 +580,39 @@ public final class MCPServer {
                 let report = try MarkdownSync(reader: reader, writer: writer).run(SyncOptions(directory: URL(fileURLWithPath: s("directory")!), folder: folder, propagateDeletes: b("propagate_deletes")))
                 return (WriteResult(outcome: .verified, message: "Sync pass completed."), try NotePresentation.object(report), nil)
             }
+        // MARK: w3-read begin
+        case "index_status":
+            let index = LocalNotesIndex(url: stateRoot.appendingPathComponent("index.sqlite"))
+            return try content(["index": NotePresentation.object(try index.status()), "job": NotePresentation.object(NotesIndexJobs.status())])
+        case "get_attachment":
+            return try attachmentContent(ref: s("ref")!, attachmentID: s("attachment_id")!)
+        case "anchor_add":
+            guard (s("heading") != nil) != (a["offset"] != nil) else { throw NotesError("invalid_anchor", "Choose one of heading or offset.") }
+            let anchor = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite"))
+                .add(note: reader.note(s("ref")!), heading: s("heading"), offset: a["offset"].map { _ in i("offset") })
+            return try content(["anchor": NotePresentation.object(anchor)])
+        case "anchor_list":
+            let anchors = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite")).list(noteRef: s("ref"))
+            return try content(["anchors": NotePresentation.object(anchors)])
+        case "anchor_resolve":
+            let resolved = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite")).resolve(s("id")!, reader: reader)
+            return try content(["resolution": NotePresentation.object(resolved)])
+        case "anchor_prune":
+            let count = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite")).prune(reader: reader)
+            return try content(["pruned": count])
+        case "table_get":
+            let note = try reader.note(s("ref")!), tables = note.document?.tables ?? [:]
+            let selected: [String: [[String]]]
+            if let id = s("attachment_id") {
+                guard let rows = tables[id] else { throw NotesError("table_not_found", "No table matches the attachment id.") }
+                selected = [id: rows]
+            } else { selected = tables }
+            guard !selected.isEmpty else { throw NotesError("table_not_found", "The note has no decoded table.") }
+            let format = s("format") ?? "json"
+            if format == "json" { return try content(["tables": NotePresentation.object(selected), "format": format]) }
+            let rendered = selected.sorted { $0.key < $1.key }.map { tableText($0.value, format: format) }.joined(separator: "\n\n")
+            return try content(["tables": NotePresentation.object(selected), "format": format, "body": rendered])
+        // MARK: w3-read end
         default: return try callScriptingWrite(tool, a)
         }
     }

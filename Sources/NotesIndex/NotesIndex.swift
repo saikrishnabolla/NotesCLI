@@ -13,6 +13,7 @@ public struct NotesIndexStatus: Codable, Sendable {
 
 public struct NotesSearchHit: Codable, Sendable {
     public var noteID: String
+    public var shortID: String?
     public var title: String
     public var folder: String
     public var snippet: String
@@ -31,10 +32,12 @@ public final class LocalNotesIndex: @unchecked Sendable {
     public init(url: URL = LocalNotesIndex.defaultURL) { self.url = url }
 
     @discardableResult
-    public func update(from reader: any NotesReading, rebuild: Bool = false) throws -> NotesIndexStatus {
+    public func update(from reader: any NotesReading, rebuild: Bool = false,
+                       progress: ((Int, Int) -> Void)? = nil) throws -> NotesIndexStatus {
         lock.lock(); defer { lock.unlock() }
         let db = try open(rebuild: rebuild); defer { sqlite3_close(db) }
         let summaries = try reader.notes(NoteQuery(includeDeleted: false))
+        progress?(0, summaries.count)
         let existing = try rows(db, "SELECT id, fingerprint FROM notes").reduce(into: [String: String]()) { result, row in
             if let id = row["id"], let fingerprint = row["fingerprint"] { result[id] = fingerprint }
         }
@@ -45,9 +48,9 @@ public final class LocalNotesIndex: @unchecked Sendable {
                 try run(db, "DELETE FROM notes WHERE id = ?", [.text(stale)])
                 try run(db, "DELETE FROM notes_fts WHERE id = ?", [.text(stale)])
             }
-            for summary in summaries {
+            for (position, summary) in summaries.enumerated() {
                 let fingerprint = Self.fingerprint(summary)
-                if existing[summary.id.uuid] == fingerprint { continue }
+                if existing[summary.id.uuid] == fingerprint { progress?(position + 1, summaries.count); continue }
                 let note = try? reader.note(summary.id.uuid)
                 let attachments = (try? reader.attachments(summary.id.uuid)) ?? note?.attachments ?? []
                 let body = note?.document?.plainText(attachments: attachments) ?? summary.snippet
@@ -55,10 +58,12 @@ public final class LocalNotesIndex: @unchecked Sendable {
                 let handwriting = attachments.compactMap(\.handwritingText).joined(separator: "\n")
                 let transcript = attachments.compactMap { [$0.transcriptText, $0.recording?.summary, $0.recording?.topLineSummary].compactMap { $0 }.joined(separator: "\n") }.joined(separator: "\n")
                 let pdf = attachments.compactMap(\.pdfText).joined(separator: "\n")
-                let kinds = Array(Set(attachments.map(\.kind) + (attachments.isEmpty ? [] : ["attachment"]) + (summary.hasChecklist ? ["checklist"] : []))).sorted().joined(separator: ",")
+                let attachmentKinds = attachments.map(\.kind)
+                let kinds = Array(Set(attachmentKinds + (attachmentKinds.contains("note-link") ? ["link"] : [])
+                    + (attachments.isEmpty ? [] : ["attachment"]) + (summary.hasChecklist ? ["checklist"] : []))).sorted().joined(separator: ",")
                 let folder = summary.folderPath.joined(separator: " > ")
-                try run(db, "INSERT OR REPLACE INTO notes(id,fingerprint,title,body,folder,tags,kinds,created,modified,pinned,locked,ocr,handwriting,transcript,pdf) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-                    .text(summary.id.uuid), .text(fingerprint), .text(summary.title), .text(body), .text(folder), .text(summary.tags.joined(separator: " ")), .text(kinds),
+                try run(db, "INSERT OR REPLACE INTO notes(id,short_id,fingerprint,title,body,folder,tags,kinds,created,modified,pinned,locked,ocr,handwriting,transcript,pdf) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+                    .text(summary.id.uuid), .text(summary.id.shortID ?? ""), .text(fingerprint), .text(summary.title), .text(body), .text(folder), .text(summary.tags.joined(separator: " ")), .text(kinds),
                     .double(summary.created?.timeIntervalSince1970), .double(summary.modified?.timeIntervalSince1970), .integer(summary.isPinned ? 1 : 0), .integer(summary.isLocked ? 1 : 0),
                     .text(ocr), .text(handwriting), .text(transcript), .text(pdf)
                 ])
@@ -66,6 +71,7 @@ public final class LocalNotesIndex: @unchecked Sendable {
                 try run(db, "INSERT INTO notes_fts(id,title,body,ocr,handwriting,transcript,pdf,tags) VALUES(?,?,?,?,?,?,?,?)", [
                     .text(summary.id.uuid), .text(summary.title), .text(body), .text(ocr), .text(handwriting), .text(transcript), .text(pdf), .text(summary.tags.joined(separator: " "))
                 ])
+                progress?(position + 1, summaries.count)
             }
             try run(db, "INSERT OR REPLACE INTO metadata(key,value) VALUES('last_indexed',?)", [.text(String(Date().timeIntervalSince1970))])
             try exec(db, "COMMIT")
@@ -91,12 +97,12 @@ public final class LocalNotesIndex: @unchecked Sendable {
         var values: [Value] = []
         var whereSQL = try compile(expression, values: &values, now: now)
         if let folder, !folder.isEmpty { whereSQL = "(\(whereSQL)) AND folder LIKE ? COLLATE NOCASE"; values.append(.text("%\(folder)%")) }
-        let sql = "SELECT id,title,body,folder,tags,kinds,modified,ocr,handwriting,transcript,pdf FROM notes WHERE \(whereSQL) LIMIT 5000"
+        let sql = "SELECT id,short_id,title,body,folder,tags,kinds,modified,ocr,handwriting,transcript,pdf FROM notes WHERE \(whereSQL) LIMIT 5000"
         var found = try queryRows(db, sql, values)
         let terms = expression.terms
         var typo = false
         if found.isEmpty, expression.isPlainText {
-            let fuzzySQL = "SELECT id,title,body,folder,tags,kinds,modified,ocr,handwriting,transcript,pdf FROM notes" + (folder?.isEmpty == false ? " WHERE folder LIKE ? COLLATE NOCASE" : "") + " LIMIT 5000"
+            let fuzzySQL = "SELECT id,short_id,title,body,folder,tags,kinds,modified,ocr,handwriting,transcript,pdf FROM notes" + (folder?.isEmpty == false ? " WHERE folder LIKE ? COLLATE NOCASE" : "") + " LIMIT 5000"
             let fuzzyValues: [Value] = folder?.isEmpty == false ? [.text("%\(folder!)%")] : []
             found = try queryRows(db, fuzzySQL, fuzzyValues)
                 .filter { Self.fuzzyMatch(terms, in: [$0["title"], $0["body"], $0["tags"]].compactMap { $0 }.joined(separator: " ")) }
@@ -108,7 +114,7 @@ public final class LocalNotesIndex: @unchecked Sendable {
             let bodyMatches = terms.reduce(0) { $0 + Self.occurrences($1, in: body) }
             let score = typo ? 1 : Double(titleMatches * 100 + bodyMatches * 10 + terms.count)
             let snippet = Self.snippet(body.isEmpty ? title : body, terms: terms)
-            return NotesSearchHit(noteID: row["id"] ?? "", title: title, folder: row["folder"] ?? "", snippet: snippet.plain,
+            return NotesSearchHit(noteID: row["id"] ?? "", shortID: row["short_id"].flatMap { $0.isEmpty ? nil : $0 }, title: title, folder: row["folder"] ?? "", snippet: snippet.plain,
                                   highlights: snippet.highlights, score: score,
                                   modified: row["modified"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
         }.sorted { ($0.score, $0.modified ?? .distantPast, $0.noteID) > ($1.score, $1.modified ?? .distantPast, $1.noteID) }
@@ -131,7 +137,9 @@ public final class LocalNotesIndex: @unchecked Sendable {
         do {
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             try exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON")
-            try exec(db, "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,folder TEXT NOT NULL,tags TEXT NOT NULL,kinds TEXT NOT NULL,created REAL,modified REAL,pinned INTEGER NOT NULL,locked INTEGER NOT NULL,ocr TEXT NOT NULL,handwriting TEXT NOT NULL,transcript TEXT NOT NULL,pdf TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id UNINDEXED,title,body,ocr,handwriting,transcript,pdf,tags,tokenize='unicode61 remove_diacritics 2')")
+            try exec(db, "CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,short_id TEXT NOT NULL DEFAULT '',fingerprint TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,folder TEXT NOT NULL,tags TEXT NOT NULL,kinds TEXT NOT NULL,created REAL,modified REAL,pinned INTEGER NOT NULL,locked INTEGER NOT NULL,ocr TEXT NOT NULL,handwriting TEXT NOT NULL,transcript TEXT NOT NULL,pdf TEXT NOT NULL); CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id UNINDEXED,title,body,ocr,handwriting,transcript,pdf,tags,tokenize='unicode61 remove_diacritics 2')")
+            let columns = Set(try rows(db, "PRAGMA table_info(notes)").compactMap { $0["name"] })
+            if !columns.contains("short_id") { try exec(db, "ALTER TABLE notes ADD COLUMN short_id TEXT NOT NULL DEFAULT ''") }
         } catch { sqlite3_close(db); throw error }
         return db
     }
@@ -146,7 +154,7 @@ public final class LocalNotesIndex: @unchecked Sendable {
     }
 
     private static func fingerprint(_ summary: NoteSummary) -> String {
-        [String(summary.modified?.timeIntervalSince1970 ?? 0), summary.title, summary.snippet,
+        [String(summary.modified?.timeIntervalSince1970 ?? 0), summary.id.shortID ?? "", summary.title, summary.snippet,
          summary.folderPath.joined(separator: "/"), summary.tags.joined(separator: ","), String(summary.isPinned),
          String(summary.isLocked), String(summary.attachmentCount), String(summary.syncState?.needsInitialFetch ?? false),
          String(summary.syncState?.needsFetch ?? false)].joined(separator: "|")

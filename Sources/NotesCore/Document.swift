@@ -57,3 +57,40 @@ public struct InlineRef: Codable, Sendable, Equatable {
     public var url: String?
     public init(id: String, typeUTI: String) { self.id = id; self.typeUTI = typeUTI }
 }
+
+public struct NoteOutlineNode: Codable, Sendable, Equatable {
+    public var title: String
+    public var level: Int
+    public var offset: Int
+    public var length: Int
+    public var children: [NoteOutlineNode]
+    public init(title: String, level: Int, offset: Int, length: Int, children: [NoteOutlineNode] = []) {
+        self.title = title; self.level = level; self.offset = offset; self.length = length; self.children = children
+    }
+}
+
+public extension NoteDocument {
+    func outline() -> [NoteOutlineNode] {
+        let source = text as NSString
+        var headings: [NoteOutlineNode] = []
+        var offset = 0
+        for run in runs {
+            let length = min(max(0, run.length), max(0, source.length - offset))
+            defer { offset += length }
+            guard let kind = run.paragraph?.kind, [.title, .heading, .subheading].contains(kind), length > 0 else { continue }
+            let range = NSRange(location: offset, length: length)
+            let raw = source.substring(with: range)
+            let title = raw.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+            guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let level = kind == .title ? 1 : kind == .heading ? 2 : 3
+            headings.append(NoteOutlineNode(title: title, level: level, offset: offset, length: title.utf16.count))
+        }
+        var roots: [NoteOutlineNode] = []
+        func append(_ node: NoteOutlineNode, to nodes: inout [NoteOutlineNode]) {
+            guard let last = nodes.indices.last, nodes[last].level < node.level else { nodes.append(node); return }
+            append(node, to: &nodes[last].children)
+        }
+        for heading in headings { append(heading, to: &roots) }
+        return roots
+    }
+}

@@ -5,7 +5,10 @@ import Foundation
 public struct NoteID: Hashable, Codable, Sendable, CustomStringConvertible {
     public var uuid: String
     public var coreDataID: String?
-    public init(uuid: String, coreDataID: String? = nil) { self.uuid = uuid; self.coreDataID = coreDataID }
+    public var shortID: String?
+    public init(uuid: String, coreDataID: String? = nil, shortID: String? = nil) {
+        self.uuid = uuid; self.coreDataID = coreDataID; self.shortID = shortID
+    }
     public var description: String { uuid }
 }
 
@@ -13,7 +16,53 @@ public struct Account: Codable, Sendable, Hashable {
     public var id: String          // ZIDENTIFIER
     public var name: String
     public var kind: String        // "icloud", "local", "imap", "exchange", "unknown"
-    public init(id: String, name: String, kind: String) { self.id = id; self.name = name; self.kind = kind }
+    public var isDefault: Bool
+    public var defaultFolderID: String?
+    public var defaultFolderName: String?
+    public init(id: String, name: String, kind: String, isDefault: Bool = false,
+                defaultFolderID: String? = nil, defaultFolderName: String? = nil) {
+        self.id = id; self.name = name; self.kind = kind; self.isDefault = isDefault
+        self.defaultFolderID = defaultFolderID; self.defaultFolderName = defaultFolderName
+    }
+}
+
+public struct DefaultNotesLocation: Codable, Sendable, Hashable {
+    public var accountID: String
+    public var accountName: String
+    public var folderID: String?
+    public var folderName: String?
+    public var folderPath: [String]
+    public init(accountID: String, accountName: String, folderID: String? = nil,
+                folderName: String? = nil, folderPath: [String] = []) {
+        self.accountID = accountID; self.accountName = accountName; self.folderID = folderID
+        self.folderName = folderName; self.folderPath = folderPath
+    }
+}
+
+public struct StableCursorPayload: Codable, Sendable, Hashable {
+    public var sort: String
+    public var key: String
+    public var secondary: String?
+    public var id: String
+    public init(sort: String, key: String, secondary: String? = nil, id: String) {
+        self.sort = sort; self.key = key; self.secondary = secondary; self.id = id
+    }
+}
+
+public enum StableCursor {
+    public static func encode(_ payload: StableCursorPayload) throws -> String {
+        let data = try JSONEncoder().encode(payload)
+        return data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    }
+    public static func decode(_ value: String) throws -> StableCursorPayload {
+        var base64 = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64), let payload = try? JSONDecoder().decode(StableCursorPayload.self, from: data) else {
+            throw NotesError("invalid_cursor", "The cursor is invalid.")
+        }
+        return payload
+    }
 }
 
 public struct Folder: Codable, Sendable, Hashable {
@@ -42,8 +91,9 @@ public struct NoteParticipant: Codable, Sendable, Hashable {
     public var participantID: String?
     public var userID: String?
     public var displayName: String?
-    public init(participantID: String? = nil, userID: String? = nil, displayName: String? = nil) {
-        self.participantID = participantID; self.userID = userID; self.displayName = displayName
+    public var email: String?
+    public init(participantID: String? = nil, userID: String? = nil, displayName: String? = nil, email: String? = nil) {
+        self.participantID = participantID; self.userID = userID; self.displayName = displayName; self.email = email
     }
 }
 
@@ -56,12 +106,18 @@ public struct NoteSyncState: Codable, Sendable, Hashable {
     public var versionOutOfDate: Bool?
     public var cloudState: Int?
     public var lastSyncDate: Date?
+    public var currentLocalVersion: Int?
+    public var latestVersionSyncedToCloud: Int?
+    public var isInCloud: Bool?
     public init(needsInitialFetch: Bool? = nil, needsFetch: Bool? = nil, needsFetchAssets: Bool? = nil,
                 needsSave: Bool? = nil, hasChanges: Bool? = nil, versionOutOfDate: Bool? = nil,
-                cloudState: Int? = nil, lastSyncDate: Date? = nil) {
+                cloudState: Int? = nil, lastSyncDate: Date? = nil, currentLocalVersion: Int? = nil,
+                latestVersionSyncedToCloud: Int? = nil, isInCloud: Bool? = nil) {
         self.needsInitialFetch = needsInitialFetch; self.needsFetch = needsFetch; self.needsFetchAssets = needsFetchAssets
         self.needsSave = needsSave; self.hasChanges = hasChanges
         self.versionOutOfDate = versionOutOfDate; self.cloudState = cloudState; self.lastSyncDate = lastSyncDate
+        self.currentLocalVersion = currentLocalVersion; self.latestVersionSyncedToCloud = latestVersionSyncedToCloud
+        self.isInCloud = isInCloud
     }
 }
 
@@ -153,11 +209,15 @@ public struct Attachment: Codable, Sendable, Hashable {
     public var fallbackRasterPath: String?
     public var displayText: String?
     public var participantID: String?
+    public var participantName: String?
+    public var participantEmail: String?
+    public var participantUserID: String?
     public var targetNoteID: String?
     public var mathExpression: String?
     public var mathResult: String?
     public var graphExpression: String?
     public var isDivider: Bool?
+    public var drawingSVG: String?
     public init(id: String, typeUTI: String, filename: String? = nil, filePath: String? = nil,
                 title: String? = nil, url: String? = nil, ocrText: String? = nil,
                 handwritingText: String? = nil, additionalIndexableText: String? = nil,
@@ -166,9 +226,10 @@ public struct Attachment: Codable, Sendable, Hashable {
                 recording: RecordingMetadata? = nil, duration: Double? = nil,
                 childAttachmentIDs: [String]? = nil, pageImagePaths: [String]? = nil,
                 fallbackRasterPath: String? = nil, displayText: String? = nil,
-                participantID: String? = nil, targetNoteID: String? = nil,
+                participantID: String? = nil, participantName: String? = nil,
+                participantEmail: String? = nil, participantUserID: String? = nil, targetNoteID: String? = nil,
                 mathExpression: String? = nil, mathResult: String? = nil,
-                graphExpression: String? = nil, isDivider: Bool? = nil) {
+                graphExpression: String? = nil, isDivider: Bool? = nil, drawingSVG: String? = nil) {
         self.id = id; self.typeUTI = typeUTI; self.filename = filename; self.filePath = filePath
         self.title = title; self.url = url; self.ocrText = ocrText
         self.handwritingText = handwritingText; self.additionalIndexableText = additionalIndexableText
@@ -176,9 +237,11 @@ public struct Attachment: Codable, Sendable, Hashable {
         self.transcriptText = transcriptText; self.transcriptWords = transcriptWords; self.recording = recording
         self.duration = duration; self.childAttachmentIDs = childAttachmentIDs; self.pageImagePaths = pageImagePaths
         self.fallbackRasterPath = fallbackRasterPath; self.displayText = displayText
-        self.participantID = participantID; self.targetNoteID = targetNoteID
+        self.participantID = participantID; self.participantName = participantName
+        self.participantEmail = participantEmail; self.participantUserID = participantUserID
+        self.targetNoteID = targetNoteID
         self.mathExpression = mathExpression; self.mathResult = mathResult
-        self.graphExpression = graphExpression; self.isDivider = isDivider
+        self.graphExpression = graphExpression; self.isDivider = isDivider; self.drawingSVG = drawingSVG
     }
 
     public var kind: String {
@@ -195,7 +258,7 @@ public struct Attachment: Codable, Sendable, Hashable {
         if value.contains("link") { return "note-link" }
         if value.contains("divider") { return "divider" }
         if value.contains("math") || value.contains("calculate") || value.contains("graph") || mathResult != nil { return "math" }
-        return "attachment"
+        return "file"
     }
 
     public var searchableText: String {

@@ -5,6 +5,26 @@ import NotesStore
 @testable import NotesIndex
 
 final class NotesIndexTests: XCTestCase {
+    func testBackgroundJobReportsProgressAndCancels() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notes-index-job-test-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let progress = directory.appendingPathComponent("progress.json")
+        setenv("NOTESCLI_INDEX_PROGRESS_PATH", progress.path, 1)
+        defer { unsetenv("NOTESCLI_INDEX_PROGRESS_PATH") }
+
+        let started = try NotesIndexJobs.start(executable: "/bin/sleep", arguments: ["30"])
+        XCTAssertEqual(started.state, "running")
+        XCTAssertNotNil(started.pid)
+        NotesIndexJobs.report(current: 1, total: 2)
+        let running = NotesIndexJobs.status()
+        XCTAssertEqual(running.current, 1)
+        XCTAssertEqual(running.total, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: progress.path))
+        let cancelled = try NotesIndexJobs.cancel()
+        XCTAssertEqual(cancelled.state, "cancelled")
+    }
+
     func testIncrementalBooleanFieldAndTypoSearch() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notes-index-test-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -15,8 +35,11 @@ final class NotesIndexTests: XCTestCase {
         shopping.attachments = [Attachment(id: "image", typeUTI: "public.png", ocrText: "receipt")]
         shopping.summary.attachmentCount = 1
         let reader = InMemoryNotes(accounts: try sample.accounts(), folders: try sample.folders(account: nil), notes: [welcome, shopping])
-        let first = try index.update(from: reader, rebuild: true)
+        var progress: [(Int, Int)] = []
+        let first = try index.update(from: reader, rebuild: true) { progress.append(($0, $1)) }
         XCTAssertEqual(first.noteCount, 2)
+        XCTAssertEqual(progress.first?.0, 0)
+        XCTAssertEqual(progress.last?.0, 2)
         XCTAssertGreaterThan(first.fileSize, 4_096)
         let fileMode = try XCTUnwrap((FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("index.sqlite").path)[.posixPermissions] as? NSNumber)?.intValue)
         let directoryMode = try XCTUnwrap((FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)?.intValue)

@@ -9,11 +9,12 @@ This reference follows `notescli --help` from version 1.0.0.
 --engine <engine>    Write engine: scripting or native. Also accepts NOTESCLI_ENGINE.
 --read-only          Refuse all writes.
 --json               Print JSON, including errors on stderr.
+--quiet              Suppress non-essential human output. Errors still print.
 --version            Show the version.
 -h, --help           Show help information.
 ```
 
-Use `--json` for scripts and agents. A note reference can be a UUID, Core Data ID, or an unambiguous title.
+Use `--json` for scripts and agents. A note reference can be a UUID, Core Data ID, short ID such as `n123`, bare numeric ID such as `123`, or an unambiguous title. Short IDs come from Notes' stable `Z_PK` value and appear in note listings.
 
 ## Read commands
 
@@ -22,29 +23,45 @@ notescli accounts
 notescli folders [--account <account>] [--tree]
 notescli list [--folder <folder>] [--account <account>] [--pinned]
               [--tag <tag>] [--since <since>] [--until <until>]
+              [--has image|audio|pdf|scan|drawing|table|checklist|link|file]
+              [--cursor <cursor>]
               [--limit <limit>] [--sort modified|created|opened|title|display]
               [--include-deleted]
-notescli show <ref> [--format markdown|text|html|json] [--no-attachments]
+notescli show <ref> [--format markdown|text|html|json|outline] [--no-attachments]
 notescli show-many <refs> ... [--format markdown|text|html|json]
 notescli search <query> [--folder <folder>] [--limit <limit>]
-                [--fuzzy | --index] [--rebuild]
+                [--has image|audio|pdf|scan|drawing|table|checklist|link|file]
+                [--cursor <cursor>] [--fuzzy | --index] [--rebuild]
 notescli tags
 notescli recent [<n>]
 notescli fetch <ref> | --all [--wait <seconds>]
-notescli index [--rebuild] [--status]
+notescli index [--rebuild] [--background | --status | --cancel]
 notescli stats
 notescli count [--folder <folder>] [--account <account>] [--include-deleted]
 notescli selection
 notescli deeplink <ref>
 notescli backlinks <ref>
-notescli attachments <ref> [--save <directory>]
+notescli attachments <ref> [--save <directory> | --preview <directory>]
+notescli table show <ref> [--attachment <id>] [--format markdown|json|csv]
+notescli anchor add <ref> (--heading <text> | --offset <utf16-offset>)
+notescli anchor list [<ref>]
+notescli anchor resolve <id>
+notescli anchor prune
+notescli wait-sync <ref> [--timeout <seconds>]
 notescli raw <ref>
 notescli deleted
 notescli smart-folders [--evaluate]
 notescli open <ref>
+notescli open <account> --account
+notescli open <folder> --folder
+notescli open <note> --attachment <id> [--reveal]
 ```
 
-`recent` defaults to 10 notes. `list` excludes Recently Deleted unless you pass `--include-deleted`.
+`recent` defaults to 10 notes. `list` excludes Recently Deleted unless you pass `--include-deleted`. `list` and `search` return an opaque `nextCursor` in JSON when more results exist. Pass it back with `--cursor`; it stores the sort key and note ID instead of an offset.
+
+`show --format outline` returns a heading tree with UTF-16 offsets. Anchors are stored in `~/Library/Application Support/NotesCLI/anchors.sqlite` and relocate from a saved text fingerprint after edits. `wait-sync` succeeds only after the store reports that the latest local version reached iCloud and no save flags remain.
+
+Attachment previews are PNG files: resized images, the first video frame, or the first PDF page. Classic `com.apple.drawing` strokes render as SVG when stroke data is present. If decoding fails, the attachment keeps its raster fallback path. Mention output includes the stored participant name, email, and user ID when available.
 
 ## Note writes
 

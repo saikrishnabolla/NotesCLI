@@ -12,13 +12,14 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
     }
 
     public static func sample() -> InMemoryNotes {
-        let account = Account(id: "fake-account", name: "Demo", kind: "local")
+        let account = Account(id: "fake-account", name: "Demo", kind: "local", isDefault: true,
+                              defaultFolderID: "fake-folder", defaultFolderName: "Notes")
         let folder = Folder(id: "fake-folder", name: "Notes", accountID: account.id, parentID: nil,
                             path: ["Notes"], isSmartFolder: false, isRecentlyDeleted: false, noteCount: 2)
         let date = Date(timeIntervalSince1970: 1_800_000_000)
-        let notes = [("welcome", "Welcome", "Welcome to notescli. Browse your shopping notes. #demo"),
-                     ("shopping", "Shopping", "Apples, coffee, and bread. #shopping")].map { id, title, body in
-            Note(summary: NoteSummary(id: NoteID(uuid: id), title: title, snippet: body,
+        let notes = [("welcome", "n1", "Welcome", "Welcome to notescli. Browse your shopping notes. #demo"),
+                     ("shopping", "n2", "Shopping", "Apples, coffee, and bread. #shopping")].map { id, shortID, title, body in
+            Note(summary: NoteSummary(id: NoteID(uuid: id, shortID: shortID), title: title, snippet: body,
                  folderID: folder.id, folderPath: folder.path, accountID: account.id,
                  created: date, modified: date, isPinned: id == "welcome", isLocked: false,
                  isDeleted: false, hasChecklist: false, attachmentCount: 0,
@@ -43,7 +44,12 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
         return matches[0]
     }
     private func index(_ ref: String) throws -> Int {
-        if let i = noteStore.firstIndex(where: { $0.summary.id.uuid == ref || $0.summary.id.coreDataID == ref }) { return i }
+        let shortRef = ref.allSatisfy(\.isNumber) ? "n\(ref)" : ref
+        if let i = noteStore.firstIndex(where: {
+            $0.summary.id.uuid == ref ||
+            $0.summary.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
+            $0.summary.id.shortID?.caseInsensitiveCompare(shortRef) == .orderedSame
+        }) { return i }
         let matches = noteStore.indices.filter { noteStore[$0].summary.title == ref }
         guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "note_not_found" : "ambiguous_note", "Note must resolve uniquely.") }
         return matches[0]
@@ -68,6 +74,11 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
                     && (query.tag == nil || s.tags.contains(query.tag!.trimmingCharacters(in: CharacterSet(charactersIn: "#"))))
                     && (query.modifiedAfter == nil || (s.modified ?? .distantPast) >= query.modifiedAfter!)
                     && (query.modifiedBefore == nil || (s.modified ?? .distantFuture) <= query.modifiedBefore!)
+                    && (query.attachmentKinds.isEmpty || query.attachmentKinds.allSatisfy { kind in
+                        kind == "checklist" ? s.hasChecklist : n.attachments.contains {
+                            $0.kind == kind || (kind == "link" && $0.kind == "note-link")
+                        }
+                    })
                     && (query.text == nil || (s.title + " " + s.snippet + " " + (n.document?.text ?? "")).localizedCaseInsensitiveContains(query.text!))
             }.map(\.summary).sorted {
                 if $0.modified != $1.modified { return ($0.modified ?? .distantPast) > ($1.modified ?? .distantPast) }
@@ -103,7 +114,7 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
             else if let first = folderStore.first(where: { !$0.isRecentlyDeleted && !$0.isSmartFolder }) { f = first }
             else { throw NotesError("folder_not_found", "Create a folder first.") }
             guard !f.isRecentlyDeleted && !f.isSmartFolder else { throw NotesError("invalid_folder", "Cannot create a note in this folder.") }
-            let id = NoteID(uuid: nextID()); let now = Date()
+            let id = NoteID(uuid: nextID(), shortID: "n\(noteStore.count + 1)"); let now = Date()
             var n = Note(summary: NoteSummary(id: id, title: title, snippet: "", folderID: f.id,
                 folderPath: f.path, accountID: f.accountID, created: now, modified: now, isPinned: false,
                 isLocked: false, isDeleted: false, hasChecklist: false, attachmentCount: 0, tags: []), document: nil, attachments: [])

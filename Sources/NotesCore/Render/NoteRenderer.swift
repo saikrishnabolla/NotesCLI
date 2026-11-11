@@ -159,9 +159,13 @@ public enum NoteRenderer {
         }
         let uti = ref.typeUTI.lowercased()
         if a?.isDivider == true || uti.contains("divider") { return format == .html ? "<hr>" : "---" }
+        if let svg = a?.drawingSVG {
+            switch format { case .plain: return "SVG drawing"; case .markdown, .html: return svg }
+        }
         if uti.contains("hashtag") || uti.contains("mention") {
             let prefix = uti.contains("hashtag") ? "#" : "@"
-            let label = ref.displayText ?? a?.title ?? ref.id
+            let identity = [a?.participantName, a?.participantEmail, a?.participantUserID].compactMap { $0 }.joined(separator: " · ")
+            let label = identity.isEmpty ? (ref.displayText ?? a?.title ?? ref.id) : identity
             return escaped(label.hasPrefix(prefix) ? label : prefix + label, format)
         }
         let title = ref.displayText ?? a?.title ?? a?.filename ?? "attachment: \(ref.typeUTI)"

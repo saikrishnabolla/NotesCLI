@@ -26,12 +26,20 @@ public enum NotePresentation {
         }
         guard ["markdown", "text", "html"].contains(format) else { throw NotesError("invalid_format", "Use markdown, text, html, or json.") }
         guard let doc = note.document else { return format == "html" ? "<p>[Locked note]</p>" : "[Locked note]" }
+        let attachmentMap = Dictionary(uniqueKeysWithValues: note.attachments.map { ($0.id, $0) })
         let ns = doc.text as NSString
         var offset = 0, body = ""
         for run in doc.runs {
             let length = min(max(0, run.length), ns.length - offset)
             var part = ns.substring(with: NSRange(location: offset, length: length)); offset += length
             if run.attachment != nil && !attachments { part = part.replacingOccurrences(of: "\u{fffc}", with: "") }
+            if attachments, let ref = run.attachment, ref.typeUTI.lowercased().contains("mention") {
+                let attachment = attachmentMap[ref.id]
+                let identity = [attachment?.participantName ?? ref.displayText, attachment?.participantEmail, attachment?.participantUserID]
+                    .compactMap { $0 }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }.joined(separator: " · ")
+                let mention = "@" + (identity.isEmpty ? ref.id : identity)
+                part = part.replacingOccurrences(of: "\u{fffc}", with: mention)
+            }
             if format == "html" {
                 part = escapeHTML(part)
                 if run.font.bold { part = "<strong>\(part)</strong>" }

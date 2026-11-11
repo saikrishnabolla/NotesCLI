@@ -18,12 +18,14 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     private let noteRows: [Int64: StoreRow]
     private let objectsByID: [String: StoreRow]
     private let attachmentRows: [Int64: [StoreRow]]
+    private let canReadDefaultLocation: Bool
 
     /// A process-wide snapshot is reused. `refresh` is for explicit refresh/read-back after automation.
     public init(databaseURL: URL = SQLiteNotesStore.defaultDatabaseURL, groupContainerURL: URL? = nil, refresh: Bool = false) throws {
         let library = try SnapshotCache.shared.load(databaseURL, refresh: refresh)
         self.library = library
         self.container = groupContainerURL ?? databaseURL.deletingLastPathComponent()
+        self.canReadDefaultLocation = databaseURL.standardizedFileURL == Self.defaultDatabaseURL.standardizedFileURL
         let accounts = library.rows("ICAccount")
         var accountByPK: [Int64: Account] = [:]
         for row in accounts {
@@ -100,14 +102,18 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             func flag(_ name: String) -> Bool? { row.integers[name].map { $0 == 1 } }
             let participantList = library.participants[pk]
             let shared = !(participantList ?? []).isEmpty || row.data("ZSERVERSHAREDATA") != nil
+            let cloud = library.cloudStates[pk]
             let sync = NoteSyncState(needsInitialFetch: flag("ZNEEDSINITIALFETCHFROMCLOUD"),
                                      needsFetch: flag("ZNEEDSTOBEFETCHEDFROMCLOUD"),
                                      needsFetchAssets: flag("ZNEEDSTOFETCHUSERSPECIFICRECORDASSETS"),
                                      needsSave: flag("ZNEEDSTOSAVEUSERSPECIFICRECORD"), hasChanges: flag("ZNOTEHASCHANGES"),
                                      versionOutOfDate: flag("ZVERSIONOUTOFDATE"), cloudState: row.int("ZCLOUDSTATE").map(Int.init),
-                                     lastSyncDate: row.date("ZLASTSYNCDATE"))
+                                     lastSyncDate: row.date("ZLASTSYNCDATE"),
+                                     currentLocalVersion: cloud?.currentLocalVersion,
+                                     latestVersionSyncedToCloud: cloud?.latestVersionSyncedToCloud,
+                                     isInCloud: cloud?.isInCloud)
             if sync.needsInitialFetch == true { placeholders.insert(uuid.lowercased()) }
-            summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags, hasChecklistInProgress: flag("ZHASCHECKLISTINPROGRESS"), lastOpened: row.date("ZLASTOPENEDDATE"), displayOrder: row.double("ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE"), isShared: shared, participants: participantList, syncState: sync, isSystemPaper: flag("ZISSYSTEMPAPER")))
+            summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID, shortID: "n\(pk)"), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags, hasChecklistInProgress: flag("ZHASCHECKLISTINPROGRESS"), lastOpened: row.date("ZLASTOPENEDDATE"), displayOrder: row.double("ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE"), isShared: shared, participants: participantList, syncState: sync, isSystemPaper: flag("ZISSYSTEMPAPER")))
             pks[uuid.lowercased()] = pk
             if !deleted, !placeholders.contains(uuid.lowercased()), let folderPK { folderByPK[folderPK]?.noteCount += 1 }
             else if folder?.isRecentlyDeleted == true, row.int("ZMARKEDFORDELETION") != 1, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
@@ -122,7 +128,34 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         self.noteRows = noteRows
         self.folderList = folderByPK.values.sorted { $0.path.joined(separator: " > ").localizedStandardCompare($1.path.joined(separator: " > ")) == .orderedAscending }
     }
-    public func accounts() throws -> [Account] { accountList }
+    public func accounts() throws -> [Account] {
+        guard let location = try defaultLocation() else { return accountList }
+        return accountList.map { account in
+            var account = account
+            if account.id == location.accountID {
+                account.isDefault = true; account.defaultFolderID = location.folderID
+                account.defaultFolderName = location.folderName
+            }
+            return account
+        }
+    }
+    public func defaultLocation() throws -> DefaultNotesLocation? {
+        if canReadDefaultLocation, let scripted = Self.scriptedDefaultLocation() {
+            let account = accountList.first { $0.id.caseInsensitiveCompare(scripted.accountID) == .orderedSame || $0.name == scripted.accountName }
+            let folders = folderList.filter { $0.accountID == account?.id }
+            let folder = folders.first { $0.id.caseInsensitiveCompare(scripted.folderID ?? "") == .orderedSame }
+                ?? folders.first { $0.name == scripted.folderName }
+            if let account {
+                return DefaultNotesLocation(accountID: account.id, accountName: account.name, folderID: folder?.id,
+                                            folderName: folder?.name ?? scripted.folderName, folderPath: folder?.path ?? [])
+            }
+        }
+        guard let account = accountList.first(where: { $0.kind == "icloud" }) ?? accountList.first else { return nil }
+        let folders = folderList.filter { $0.accountID == account.id && !$0.isRecentlyDeleted && !$0.isSmartFolder }
+        let folder = folders.first { $0.parentID == nil && $0.name == "Notes" } ?? folders.first { $0.parentID == nil } ?? folders.first
+        return DefaultNotesLocation(accountID: account.id, accountName: account.name, folderID: folder?.id,
+                                    folderName: folder?.name, folderPath: folder?.path ?? [])
+    }
     public func folders(account: String? = nil) throws -> [Folder] {
         guard let account else { return folderList }
         let ids = Set(accountList.filter { $0.id.caseInsensitiveCompare(account) == .orderedSame || $0.name == account }.map(\.id))
@@ -145,6 +178,12 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             if let ids = accountIDs, !ids.contains(summary.accountID) { continue }
             if let ids = folderIDs, !ids.contains(summary.folderID ?? "") { continue }
             if let tag, !summary.tags.contains(where: { $0.caseInsensitiveCompare(tag) == .orderedSame }) { continue }
+            if !query.attachmentKinds.isEmpty {
+                let kinds = try Set(attachments(summary.id.uuid).map(\.kind))
+                if !query.attachmentKinds.allSatisfy({ kind in
+                    kind == "checklist" ? summary.hasChecklist : kinds.contains(kind) || (kind == "link" && kinds.contains("note-link"))
+                }) { continue }
+            }
             if let date = query.modifiedAfter, (summary.modified ?? .distantPast) <= date { continue }
             if let date = query.modifiedBefore, (summary.modified ?? .distantFuture) >= date { continue }
             if let text = query.text, !text.isEmpty {
@@ -211,7 +250,12 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
 
     private func resolve(_ ref: String) throws -> NoteSummary {
         let visible = summaries.filter { !placeholderIDs.contains($0.id.uuid.lowercased()) }
-        let byID = visible.filter { $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame || $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame }
+        let shortRef = ref.allSatisfy(\.isNumber) ? "n\(ref)" : ref
+        let byID = visible.filter {
+            $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame ||
+            $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
+            $0.id.shortID?.caseInsensitiveCompare(shortRef) == .orderedSame
+        }
         let matches = byID.isEmpty ? visible.filter { $0.title == ref && !$0.isDeleted } : byID
         guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
         guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }
@@ -349,8 +393,16 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             words = decoded.words; recording = decoded.metadata; transcript = NotesRecordingDecoder.joined(decoded.words)
         }
         let lower = uti.lowercased(), token = row.string("ZTOKENCONTENTIDENTIFIER")
+        let notePK = row.int("ZNOTE1", "ZNOTE")
+        let participant = notePK.flatMap { library.participants[$0] }?.first {
+            $0.participantID?.caseInsensitiveCompare(token ?? "") == .orderedSame ||
+            $0.userID?.caseInsensitiveCompare(token ?? "") == .orderedSame
+        }
         let isCalculation = lower.contains("math") || lower.contains("calculate")
         let display = row.string("ZALTTEXT", "ZDISPLAYTEXT", "ZSTANDARDIZEDCONTENT", "ZFALLBACKTITLE")
+        let participantName = lower.contains("mention") ? (display ?? row.string("ZUSERTITLE") ?? participant?.displayName) : nil
+        let participantEmail = participant?.email ?? (participantName?.contains("@") == true ? participantName : nil)
+        let drawingSVG = lower.contains("drawing") ? row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA").flatMap { ClassicDrawingSVG.decode($0) ?? NotesDrawingDecoder.svg($0) } : nil
         return Attachment(id: id, typeUTI: uti, filename: filename, filePath: path,
                           title: row.string("ZTITLE", "ZFALLBACKTITLE", "ZALTTEXT", "ZDISPLAYTEXT"),
                           url: row.string("ZURLSTRING", "ZREMOTEFILEURLSTRING"), ocrText: recognized,
@@ -358,12 +410,28 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
                           imageClassification: row.string("ZIMAGECLASSIFICATIONSUMMARY"), imageSummary: row.string("ZSUMMARY"),
                           pdfText: pdfText, transcriptText: transcript, transcriptWords: words, recording: recording,
                           duration: row.double("ZDURATION"), fallbackRasterPath: raster, displayText: display,
-                          participantID: lower.contains("mention") ? token : nil,
+                          participantID: lower.contains("mention") ? (participant?.participantID ?? token) : nil,
+                          participantName: participantName, participantEmail: participantEmail,
+                          participantUserID: lower.contains("mention") ? participant?.userID : nil,
                           targetNoteID: lower.contains("link") ? token : nil,
                           mathExpression: isCalculation || lower.contains("graph") ? row.string("ZSTANDARDIZEDCONTENT", "ZALTTEXT") : nil,
                           mathResult: isCalculation ? row.string("ZDISPLAYTEXT", "ZFALLBACKTITLE") : nil,
                           graphExpression: lower.contains("graph") ? row.string("ZSTANDARDIZEDCONTENT", "ZALTTEXT") : nil,
-                          isDivider: lower.contains("divider") ? true : nil)
+                          isDivider: lower.contains("divider") ? true : nil, drawingSVG: drawingSVG)
+    }
+
+    private static func scriptedDefaultLocation() -> DefaultNotesLocation? {
+        let source = #"function run(){const n=Application('com.apple.Notes');const a=n.defaultAccount();const f=a.defaultFolder();return JSON.stringify({accountID:String(a.id()),accountName:String(a.name()),folderID:String(f.id()),folderName:String(f.name())});}"#
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-l", "JavaScript", "-e", source]
+        process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        do { try process.run(); process.waitUntilExit() } catch { return nil }
+        guard process.terminationStatus == 0,
+              let object = try? JSONSerialization.jsonObject(with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: String],
+              let accountID = object["accountID"], let accountName = object["accountName"] else { return nil }
+        return DefaultNotesLocation(accountID: accountID, accountName: accountName, folderID: object["folderID"],
+                                    folderName: object["folderName"])
     }
 
     private func galleryOrder(_ data: Data?, available: [String]) -> [String] {

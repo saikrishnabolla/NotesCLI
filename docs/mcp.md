@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 39 tools. Read-only mode exposes the 20 read tools. `notescli mcp --allow-native` exposes 31 more tools that use Apple's private Notes framework.
+The default server exposes 46 tools. Read-only mode exposes the 27 read tools. `notescli mcp --allow-native` exposes 31 more tools that use Apple's private Notes framework.
 
 ## Tools
 
@@ -17,6 +17,8 @@ list_accounts  list_folders  list_notes  search_notes  query_notes
 get_note  get_notes  list_tags  list_attachments  list_backlinks
 get_deeplink  list_smart_folders  list_deleted  recent_notes  today_notes
 count_notes  get_stats  get_raw_note  related_notes  get_write_policy
+index_status  get_attachment  anchor_add  anchor_list  anchor_resolve
+anchor_prune  table_get
 ```
 
 Scripting, export, and sync tools:
@@ -41,7 +43,13 @@ table_create  table_set  table_add_row  table_add_column
 table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
 ```
 
-The server also provides `notes://folders`, the `notes://note/{uuid}` resource template, and the `find_note` and `weekly_review` prompts. List and body results use `offset` and `limit` when a response could exceed 48 KB.
+The server also provides `notes://folders`, the `notes://note/{uuid}` resource template, and the `find_note` and `weekly_review` prompts. Note references accept UUIDs, Core Data IDs, short IDs such as `n123`, bare numeric IDs such as `123`, and unambiguous titles.
+
+`list_notes`, `search_notes`, and `query_notes` return an opaque `next_cursor` made from the sort key and note ID. Pass it back as `cursor`. Body reads still use `offset` and `limit`. Responses stay within the 48 KB budget.
+
+`get_note` accepts `format=outline` and returns a heading tree with UTF-16 offsets. `list_notes` and `search_notes` accept `has` with `image`, `audio`, `pdf`, `scan`, `drawing`, `table`, `checklist`, `link`, or `file`. `list_accounts` includes `default_location`.
+
+`get_attachment` returns resized PNG/JPEG image blocks up to 1600 pixels and inline audio blocks when they fit. Larger files return a resource link. `table_get` returns decoded native tables as Markdown, JSON, or CSV. The anchor tools use `~/Library/Application Support/NotesCLI/anchors.sqlite`. `index_status` returns index details and background-job progress.
 
 ## Install client config
 

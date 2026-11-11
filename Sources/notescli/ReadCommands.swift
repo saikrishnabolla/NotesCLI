@@ -17,6 +17,8 @@ struct ReadList: ParsableCommand {
     @Option var since: String?
     @Option var until: String?
     @Option var limit: Int?
+    @Option(name: .long, help: "Require an attachment kind. Repeat or separate kinds with |.") var has: [String] = []
+    @Option(help: "Continue from an opaque stable cursor.") var cursor: String?
     @Option var sort: NoteSort = .modified
     @Flag var includeDeleted = false
     func validate() throws { try positive(limit, name: "limit") }
@@ -24,8 +26,13 @@ struct ReadList: ParsableCommand {
         let after = try since.map { try NotePresentation.date($0) }, before = try until.map { try NotePresentation.date($0) }
         if let after, let before, after > before { throw ValidationError("--since must precede --until.") }
         let query = NoteQuery(folder: folder, account: account, includeDeleted: includeDeleted, pinnedOnly: pinned,
-                              tag: tag, modifiedAfter: after, modifiedBefore: before, limit: limit)
-        try Output.notes(options.backends().reader.notes(query, sort: sort), json: options.json)
+                              tag: tag, modifiedAfter: after, modifiedBefore: before, attachmentKinds: try parseAttachmentKinds(has))
+        let page = try ReadCursorPaging.page(options.backends().reader.notes(query, sort: sort), sort: sort, cursor: cursor, limit: limit)
+        if options.json { try Output.json(page) }
+        else {
+            try Output.notes(page.notes, json: false)
+            if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
+        }
     }
 }
 
@@ -38,17 +45,23 @@ struct IndexedSearch: ParsableCommand {
     @Flag var fuzzy = false
     @Flag(name: .long, help: "Use the local FTS index and boolean query syntax.") var index = false
     @Flag(help: "Rebuild the local index before searching.") var rebuild = false
+    @Option(name: .long, help: "Require an attachment kind. Repeat or separate kinds with |.") var has: [String] = []
+    @Option(help: "Continue from an opaque stable cursor.") var cursor: String?
     func validate() throws { try positive(limit, name: "limit") }
     func run() throws {
         let reader = try options.backends().reader
         if index {
             let local = LocalNotesIndex(); _ = try local.update(from: reader, rebuild: rebuild)
-            let hits = try local.search(query, folder: folder, limit: limit ?? 50)
-            if options.json { try Output.json(hits) }
-            else { Output.table(["ID", "TITLE", "FOLDER", "SCORE", "SNIPPET"], hits.map { [$0.noteID, $0.title, $0.folder, String(format: "%.0f", $0.score), $0.snippet] }) }
+            let kindQuery = try parseAttachmentKinds(has).map { "has:\($0)" }.joined(separator: " AND ")
+            let effectiveQuery = kindQuery.isEmpty ? query : "(\(query)) AND \(kindQuery)"
+            let page = try ReadCursorPaging.searchPage(local.search(effectiveQuery, folder: folder, limit: 5000), cursor: cursor, limit: limit ?? 50)
+            if options.json { try Output.json(page) }
+            else {
+                Output.table(["SHORT ID", "ID", "TITLE", "FOLDER", "SCORE", "SNIPPET"], page.hits.map { [$0.shortID ?? "", $0.noteID, $0.title, $0.folder, String(format: "%.0f", $0.score), $0.snippet] })
+                if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
+            }
             return
         }
-        let notes: [NoteSummary]
         if fuzzy {
             let candidates = try reader.notes(NoteQuery(folder: folder))
             var scored: [(summary: NoteSummary, score: Int)] = []
@@ -58,9 +71,21 @@ struct IndexedSearch: ParsableCommand {
                 if score > 0 { scored.append((summary, score)) }
             }
             scored.sort { $0.score == $1.score ? $0.summary.id.uuid < $1.summary.id.uuid : $0.score > $1.score }
-            notes = Array(scored.prefix(limit ?? scored.count).map { $0.summary })
-        } else { notes = try reader.notes(NoteQuery(folder: folder, text: query, limit: limit)) }
-        try Output.notes(notes, json: options.json)
+            let page = try ReadCursorPaging.fuzzyPage(scored, cursor: cursor, limit: limit)
+            if options.json { try Output.json(page) }
+            else {
+                try Output.notes(page.notes, json: false)
+                if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
+            }
+            return
+        }
+        let notes = try reader.notes(NoteQuery(folder: folder, text: query, attachmentKinds: try parseAttachmentKinds(has)))
+        let page = try ReadCursorPaging.page(notes, sort: .modified, cursor: cursor, limit: limit)
+        if options.json { try Output.json(page) }
+        else {
+            try Output.notes(page.notes, json: false)
+            if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
+        }
     }
 }
 
@@ -130,9 +155,42 @@ struct IndexCommand: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Flag var rebuild = false
     @Flag var status = false
+    @Flag var background = false
+    @Flag var cancel = false
+    @Flag(name: .customLong("background-worker"), help: .hidden) var backgroundWorker = false
+    func validate() throws {
+        if [status, background, cancel, backgroundWorker].filter({ $0 }).count > 1 { throw ValidationError("Choose one index action.") }
+    }
     func run() throws {
         let index = LocalNotesIndex()
-        let value = try status ? index.status() : index.update(from: options.backends().reader, rebuild: rebuild)
+        if background {
+            var arguments: [String] = []
+            if let backend = options.backend { arguments += ["--backend", backend] }
+            arguments += ["index", "--background-worker"]
+            if rebuild { arguments.append("--rebuild") }
+            let executable = URL(fileURLWithPath: CommandLine.arguments[0], relativeTo: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)).standardizedFileURL.path
+            let value = try NotesIndexJobs.start(executable: executable, arguments: arguments)
+            if options.json { try Output.json(value) } else { Output.table(["STATE", "PID"], [[value.state, value.pid.map(String.init) ?? ""]]) }
+            return
+        }
+        if cancel {
+            let value = try NotesIndexJobs.cancel()
+            if options.json { try Output.json(value) } else { Output.table(["STATE", "PID"], [[value.state, value.pid.map(String.init) ?? ""]]) }
+            return
+        }
+        if status {
+            let value = IndexStatusOutput(index: try index.status(), job: NotesIndexJobs.status())
+            if options.json { try Output.json(value) }
+            else { Output.table(["PATH", "NOTES", "BYTES", "LAST INDEXED", "JOB", "PROGRESS"], [[value.index.path, String(value.index.noteCount), String(value.index.fileSize), value.index.lastIndexed.map { ISO8601DateFormatter().string(from: $0) } ?? "never", value.job.state, "\(value.job.current)/\(value.job.total)"]]) }
+            return
+        }
+        if backgroundWorker {
+            do {
+                _ = try index.update(from: options.backends().reader, rebuild: rebuild) { NotesIndexJobs.report(current: $0, total: $1) }
+                NotesIndexJobs.finish(); return
+            } catch { NotesIndexJobs.finish(error: error); throw error }
+        }
+        let value = try index.update(from: options.backends().reader, rebuild: rebuild)
         if options.json { try Output.json(value) }
         else { Output.table(["PATH", "NOTES", "BYTES", "LAST INDEXED"], [[value.path, String(value.noteCount), String(value.fileSize), value.lastIndexed.map { ISO8601DateFormatter().string(from: $0) } ?? "never"]]) }
     }
@@ -228,8 +286,16 @@ struct AttachmentsCommand: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Argument var ref: String
     @Option var save: String?
+    @Option var preview: String?
     func run() throws {
         var attachments = try options.backends().reader.attachments(ref)
+        if let preview {
+            let root = URL(fileURLWithPath: NSString(string: preview).expandingTildeInPath, isDirectory: true).standardizedFileURL
+            let values = try AttachmentPreviewer.write(attachments, to: root)
+            if options.json { try Output.json(values) }
+            else { Output.table(["ID", "KIND", "PREVIEW"], values.map { [$0.attachmentID, $0.kind, $0.path] }) }
+            return
+        }
         if let save {
             let root = URL(fileURLWithPath: NSString(string: save).expandingTildeInPath, isDirectory: true).standardizedFileURL
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

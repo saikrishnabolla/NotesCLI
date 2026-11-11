@@ -29,7 +29,7 @@ final class ProtocolTests: XCTestCase {
             let server = MCPServer(reader: fake, writer: fake, readOnly: readOnly)
             let result = try request(server, method: "tools/list")["result"] as! [String: Any]
             let tools = result["tools"] as! [[String: Any]]
-            XCTAssertEqual(tools.count, readOnly ? 20 : 39)
+            XCTAssertEqual(tools.count, readOnly ? 27 : 46)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "delete_note" }, !readOnly)
             for tool in tools { XCTAssertEqual((tool["inputSchema"] as? [String: Any])?["type"] as? String, "object") }
             if readOnly {
@@ -38,9 +38,9 @@ final class ProtocolTests: XCTestCase {
             }
         }
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "count_notes", "get_stats", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown"])
+        XCTAssertEqual(Array(names.suffix(7)), ["index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 70)
+        XCTAssertEqual(nativeTools.count, 77)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
         XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
@@ -86,16 +86,18 @@ final class ProtocolTests: XCTestCase {
         let server = MCPServer(reader: InMemoryNotes.sample())
         let first = try structured(call(server, "list_notes", ["limit": 1]))
         XCTAssertEqual((first["notes"] as? [Any])?.count, 1)
-        XCTAssertEqual(first["next_offset"] as? Int, 1)
-        let second = try structured(call(server, "list_notes", ["limit": 1, "offset": 1]))
-        XCTAssertNil(second["next_offset"])
+        let cursor = try XCTUnwrap(first["next_cursor"] as? String)
+        let second = try structured(call(server, "list_notes", ["limit": 1, "cursor": cursor]))
+        XCTAssertNil(second["next_cursor"])
         let search = try structured(call(server, "search_notes", ["query": "coffee"]))
         XCTAssertEqual((search["notes"] as? [Any])?.count, 1)
         for format in ["markdown", "text", "html", "json"] {
             let note = try structured(call(server, "get_note", ["ref": "welcome", "format": format]))
             XCTAssertNotNil(note[format == "json" ? "note" : "body"])
         }
-        XCTAssertNotNil(try structured(call(server, "list_accounts"))["accounts"])
+        let accounts = try structured(call(server, "list_accounts"))
+        XCTAssertNotNil(accounts["accounts"])
+        XCTAssertEqual((accounts["default_location"] as? [String: Any])?["folderName"] as? String, "Notes")
         XCTAssertNotNil(try structured(call(server, "list_folders"))["folders"])
         XCTAssertNotNil(try structured(call(server, "list_tags"))["tags"])
         XCTAssertEqual((try structured(call(server, "get_notes", ["refs": ["welcome", "shopping"]]))["notes"] as? [Any])?.count, 2)
@@ -154,7 +156,29 @@ final class ProtocolTests: XCTestCase {
         for i in 0..<100 { _ = try fake.createNote(title: "Long \(i) " + String(repeating: "x", count: 1000), markdown: "Body", folder: nil) }
         let page = try self.structured(call(server, "list_notes", ["limit": 1000]))
         XCTAssertLessThan((page["notes"] as! [Any]).count, 103)
-        XCTAssertNotNil(page["next_offset"])
+        XCTAssertNotNil(page["next_cursor"])
+    }
+    func testStableCursorSurvivesInsertionBeforeTheCursor() throws {
+        let sample = InMemoryNotes.sample()
+        let firstServer = MCPServer(reader: sample)
+        let first = try structured(call(firstServer, "list_notes", ["limit": 1]))
+        let firstID = try XCTUnwrap((first["notes"] as? [[String: Any]])?.first?["id"] as? [String: Any])
+        let firstUUID = try XCTUnwrap(firstID["uuid"] as? String)
+        let cursor = try XCTUnwrap(first["next_cursor"] as? String)
+
+        let account = try XCTUnwrap(try sample.accounts().first)
+        let folder = try XCTUnwrap(try sample.folders(account: nil).first)
+        let inserted = Note(summary: NoteSummary(
+            id: NoteID(uuid: "inserted", shortID: "n99"), title: "Inserted", snippet: "", folderID: folder.id,
+            folderPath: folder.path, accountID: account.id, created: nil, modified: Date(timeIntervalSince1970: 1_900_000_000),
+            isPinned: false, isLocked: false, isDeleted: false, hasChecklist: false, attachmentCount: 0, tags: []
+        ), document: NoteDocument(text: "", runs: []), attachments: [])
+        let mutated = InMemoryNotes(accounts: [account], folders: [folder], notes: [try sample.note("welcome"), try sample.note("shopping"), inserted])
+        let second = try structured(call(MCPServer(reader: mutated), "list_notes", ["limit": 10, "cursor": cursor]))
+        let remaining = (second["notes"] as? [[String: Any]])?.compactMap { ($0["id"] as? [String: Any])?["uuid"] as? String } ?? []
+        XCTAssertFalse(remaining.contains("inserted"))
+        XCTAssertFalse(remaining.contains(firstUUID))
+        XCTAssertEqual(remaining.count, 1)
     }
     func testDates() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -163,6 +187,55 @@ final class ProtocolTests: XCTestCase {
         XCTAssertLessThan(try NotePresentation.date("yesterday", now: now), try NotePresentation.date("today", now: now))
         for input in ["2026-11-11", "2026-11-11T12:00:00Z", "2026-11-11T12:00:00.123Z"] { XCTAssertNoThrow(try NotePresentation.date(input)) }
         XCTAssertThrowsError(try NotePresentation.date("2026-99-99"))
+    }
+
+    func testReadParityToolsUseSyntheticData() throws {
+        let sample = InMemoryNotes.sample(), account = try XCTUnwrap(try sample.accounts().first), folder = try XCTUnwrap(try sample.folders(account: nil).first)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-read-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let imageURL = root.appendingPathComponent("image.png")
+        try Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAD0lEQVR42mNk+M8ABBgAEQAB/7M2VQAAAABJRU5ErkJggg==")!.write(to: imageURL)
+        let audioURL = root.appendingPathComponent("recording.mp3")
+        try Data([0x49, 0x44, 0x33]).write(to: audioURL)
+        let largeAudioURL = root.appendingPathComponent("large-recording.mp3")
+        try Data(repeating: 0, count: 40 * 1024).write(to: largeAudioURL)
+        let text = "Title\nSection\n"
+        var document = NoteDocument(text: text, runs: [
+            AttributeRun(length: 6, paragraph: ParagraphStyle(kind: .title)),
+            AttributeRun(length: 8, paragraph: ParagraphStyle(kind: .heading))
+        ])
+        document.tables = ["table-1": [["A", "B"], ["1", "2"]]]
+        let summary = NoteSummary(id: NoteID(uuid: "rich", shortID: "n50"), title: "Rich", snippet: "", folderID: folder.id,
+                                  folderPath: folder.path, accountID: account.id, created: nil, modified: Date(), isPinned: false,
+                                  isLocked: false, isDeleted: false, hasChecklist: false, attachmentCount: 4, tags: [])
+        let rich = Note(summary: summary, document: document, attachments: [
+            Attachment(id: "image-1", typeUTI: "public.png", filePath: imageURL.path),
+            Attachment(id: "table-1", typeUTI: "com.apple.notes.table"),
+            Attachment(id: "audio-1", typeUTI: "public.mp3", filePath: audioURL.path),
+            Attachment(id: "audio-large", typeUTI: "public.mp3", filePath: largeAudioURL.path)
+        ])
+        let reader = InMemoryNotes(accounts: [account], folders: [folder], notes: [rich])
+        let server = MCPServer(reader: reader, stateRoot: root)
+
+        let outline = try structured(call(server, "get_note", ["ref": "n50", "format": "outline"]))
+        XCTAssertEqual((outline["outline"] as? [Any])?.count, 1)
+        let table = try structured(call(server, "table_get", ["ref": "50", "attachment_id": "table-1", "format": "csv"]))
+        XCTAssertTrue((table["body"] as? String)?.contains("\"A\",\"B\"") == true)
+        let filtered = try structured(call(server, "list_notes", ["has": "image"]))
+        XCTAssertEqual((filtered["notes"] as? [Any])?.count, 1)
+        let added = try structured(call(server, "anchor_add", ["ref": "rich", "offset": 0]))
+        let anchor = try XCTUnwrap((added["anchor"] as? [String: Any])?["id"] as? String)
+        XCTAssertEqual((try structured(call(server, "anchor_resolve", ["id": anchor]))["resolution"] as? [String: Any])?["offset"] as? Int, 0)
+        XCTAssertEqual((try structured(call(server, "anchor_list"))["anchors"] as? [Any])?.count, 1)
+        XCTAssertNotNil(try structured(call(server, "index_status"))["job"])
+        let binary = try call(server, "get_attachment", ["ref": "rich", "attachment_id": "image-1"])
+        XCTAssertEqual((binary["content"] as? [[String: Any]])?.first?["type"] as? String, "image")
+        XCTAssertLessThanOrEqual(try JSONSerialization.data(withJSONObject: binary["content"]!).count, MCPServer.textLimit)
+        let audio = try call(server, "get_attachment", ["ref": "rich", "attachment_id": "audio-1"])
+        XCTAssertEqual((audio["content"] as? [[String: Any]])?.first?["type"] as? String, "audio")
+        let resource = try call(server, "get_attachment", ["ref": "rich", "attachment_id": "audio-large"])
+        XCTAssertEqual((resource["content"] as? [[String: Any]])?.first?["type"] as? String, "resource_link")
     }
 
     func testWritesUseAllowlistJournalAndSnapshots() throws {

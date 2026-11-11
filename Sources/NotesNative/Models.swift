@@ -1,0 +1,122 @@
+import Foundation
+import NotesCore
+
+public struct NativeDoctorReport: Codable, Sendable {
+    public var frameworkLoaded: Bool
+    public var frameworkPath: String
+    public var macOS: String
+    public var missing: [String]
+    public var error: String?
+    public var classes: [String: NativeClassReport]
+}
+
+public struct NativeClassReport: Codable, Sendable {
+    public var resolved: Bool
+    public var selectors: [String: Bool]
+}
+
+public struct NativeVerification: Codable, Sendable {
+    public var nativeReadback: [String: String]
+    public var sqliteReadback: [String: String]?
+}
+
+public struct NativeWriteResult: Codable, Sendable {
+    public var writeResult: WriteResult
+    public var verification: NativeVerification
+}
+
+public struct ChecklistItem: Codable, Sendable, Equatable {
+    public var index: Int
+    public var text: String
+    public var done: Bool
+    public var range: UTF16Range
+}
+
+public struct UTF16Range: Codable, Sendable, Equatable {
+    public var location: Int
+    public var length: Int
+    public init(location: Int, length: Int) { self.location = location; self.length = length }
+}
+
+public enum NativeParagraphStyle: String, Codable, Sendable, CaseIterable {
+    case title, heading, subheading, body, monospaced, bulleted, dashed, numbered, checklist, blockquote
+    public var number: Int {
+        switch self {
+        case .title: 0; case .heading: 1; case .subheading: 2; case .body, .blockquote: 3
+        case .monospaced: 4; case .bulleted: 100; case .dashed: 101; case .numbered: 102; case .checklist: 103
+        }
+    }
+}
+
+public struct InlineFormat: Codable, Sendable {
+    public var bold: Bool?
+    public var italic: Bool?
+    public var underline: Bool?
+    public var strike: Bool?
+    public var link: String?
+    public var clearLink = false
+    public var color: String?
+    public var clearColor = false
+    public init(bold: Bool? = nil, italic: Bool? = nil, underline: Bool? = nil, strike: Bool? = nil,
+                link: String? = nil, clearLink: Bool = false, color: String? = nil, clearColor: Bool = false) {
+        self.bold = bold; self.italic = italic; self.underline = underline; self.strike = strike
+        self.link = link; self.clearLink = clearLink; self.color = color; self.clearColor = clearColor
+    }
+}
+
+public struct NativeNoteLink: Codable, Sendable, Equatable {
+    public var sourceID: String
+    public var targetID: String
+    public var text: String
+    public var attachmentID: String
+    public var range: UTF16Range?
+}
+
+public struct NativeAttachmentResult: Codable, Sendable {
+    public var attachmentID: String
+    public var typeUTI: String
+    public var position: Int
+    public var write: NativeWriteResult
+}
+
+public struct NativeTable: Codable, Sendable, Equatable {
+    public var attachmentID: String
+    public var rows: [[String]]
+}
+
+public enum ChecklistSelection: Sendable {
+    case index(Int)
+    case text(String)
+}
+
+public protocol NotesNativeWriting {
+    func doctor() -> NativeDoctorReport
+    func checklistItems(_ ref: String) throws -> [ChecklistItem]
+    func insertChecklist(_ ref: String, text: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func toggleChecklist(_ ref: String, selection: ChecklistSelection, done: Bool?, allowShared: Bool) throws -> NativeWriteResult
+    func setAllChecklist(_ ref: String, done: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func deleteCompleted(_ ref: String, allowShared: Bool) throws -> NativeWriteResult
+    func setPinned(_ ref: String, pinned: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func addTag(_ ref: String, tag: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func removeTag(_ ref: String, tag: String, allowShared: Bool) throws -> NativeWriteResult
+    func renameTag(_ tag: String, to: String, expectedCount: Int) throws -> NativeWriteResult
+    func deleteTag(_ tag: String, expectedCount: Int) throws -> NativeWriteResult
+    func insertNoteLink(_ ref: String, target: String, text: String?, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func links(_ ref: String) throws -> [NativeNoteLink]
+    func backlinks(_ ref: String) throws -> [NativeNoteLink]
+    func insertText(_ ref: String, text: String, position: Int, allowShared: Bool) throws -> NativeWriteResult
+    func deleteRange(_ ref: String, range: UTF16Range, allowShared: Bool) throws -> NativeWriteResult
+    func replaceRange(_ ref: String, range: UTF16Range, text: String, allowShared: Bool) throws -> NativeWriteResult
+    func searchOffsets(_ ref: String, text: String, caseInsensitive: Bool) throws -> [UTF16Range]
+    func setParagraphStyle(_ ref: String, range: UTF16Range, style: NativeParagraphStyle, indent: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func setInlineFormat(_ ref: String, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult
+    func insertFile(_ ref: String, file: URL, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
+    func deleteAttachment(_ ref: String, attachmentID: String, allowShared: Bool) throws -> NativeWriteResult
+    func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func editTable(_ ref: String, attachmentID: String, row: Int, column: Int, text: String, allowShared: Bool) throws -> NativeWriteResult
+    func resizeTable(_ ref: String, attachmentID: String, axis: String, index: Int, add: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func duplicate(_ ref: String, title: String?, allowShared: Bool) throws -> NativeWriteResult
+    func restore(_ ref: String, folder: String?, allowShared: Bool) throws -> NativeWriteResult
+    func moveFolder(_ ref: String, parent: String?, allowShared: Bool) throws -> NativeWriteResult
+    func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult
+}

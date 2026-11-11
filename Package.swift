@@ -19,6 +19,9 @@ let package = Package(
         .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
         // macOS: writes through Notes.app scripting, verified by reading back.
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
+        // macOS: rich writes through NotesShared, loaded only at runtime.
+        .target(name: "NotesNativeObjC", linkerSettings: [.linkedFramework("CoreData"), .linkedFramework("AppKit")]),
+        .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"]),
         // MCP server over stdio, same operations as the CLI.
         .target(name: "NotesMCP", dependencies: ["NotesCore"]),
         .target(name: "NotesSync", dependencies: ["NotesCore"], linkerSettings: [
@@ -26,12 +29,13 @@ let package = Package(
             .linkedFramework("CoreServices"),
         ]),
         .executableTarget(name: "notescli", dependencies: [
-            "NotesCore", "NotesStore", "NotesAutomation", "NotesMCP", "NotesSync",
+            "NotesCore", "NotesStore", "NotesAutomation", "NotesNative", "NotesMCP", "NotesSync",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ]),
         .testTarget(name: "NotesCoreTests", dependencies: ["NotesCore"]),
         .testTarget(name: "NotesStoreTests", dependencies: ["NotesStore", "NotesCore"]),
         .testTarget(name: "NotesAutomationTests", dependencies: ["NotesAutomation", "NotesCore"]),
+        .testTarget(name: "NotesNativeTests", dependencies: ["NotesNative", "NotesAutomation", "NotesCore", "NotesStore"]),
         .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore"]),
         .testTarget(name: "NotesSyncTests", dependencies: ["NotesSync", "NotesCore"]),
     ]

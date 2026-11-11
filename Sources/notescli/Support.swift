@@ -5,7 +5,7 @@ import NotesMCP
 import Darwin
 
 struct GlobalOptions: ParsableArguments {
-    @Option(help: "Backend: default or fake. Also accepts NOTECTL_BACKEND.") var backend: String?
+    @Option(help: "Backend: default or fake. Also accepts NOTESCLI_BACKEND.") var backend: String?
     @Flag(help: "Refuse all writes.") var readOnly = false
     @Flag(help: "Print JSON, including errors on stderr.") var json = false
     func backends() throws -> Backends { try Backends.make(backend) }
@@ -49,7 +49,7 @@ func confirm(_ prompt: String, yes: Bool) throws {
     guard ["y", "yes"].contains(readLine()?.lowercased() ?? "") else { throw NotesError("cancelled", "Deletion cancelled.") }
 }
 func editor(_ original: String) throws -> String {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notectl-editor-" + UUID().uuidString)
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-editor-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     defer { try? FileManager.default.removeItem(at: directory) }
     let file = directory.appendingPathComponent("note.md")
@@ -57,7 +57,7 @@ func editor(_ original: String) throws -> String {
     let command = ProcessInfo.processInfo.environment["EDITOR"] ?? "vi"
     guard !command.trimmingCharacters(in: .whitespaces).isEmpty else { throw NotesError("invalid_editor", "EDITOR is empty.") }
     let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/sh")
-    process.arguments = ["-c", command + " \"$1\"", "notectl-editor", file.path]
+    process.arguments = ["-c", command + " \"$1\"", "notescli-editor", file.path]
     process.standardInput = FileHandle.standardInput; process.standardOutput = FileHandle.standardError; process.standardError = FileHandle.standardError
     try process.run(); process.waitUntilExit()
     guard process.terminationStatus == 0 else { throw NotesError("editor_failed", "Editor exited with status \(process.terminationStatus).") }

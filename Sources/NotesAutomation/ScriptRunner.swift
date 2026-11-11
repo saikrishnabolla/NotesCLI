@@ -33,7 +33,7 @@ public struct OSAScriptRunner: ScriptRunning {
         guard !arguments.contains(where: { $0.contains("\0") }) else {
             throw NotesError("invalid_argument", "Script arguments cannot contain NUL characters.")
         }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notectl-" + UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let script = directory.appendingPathComponent("script")

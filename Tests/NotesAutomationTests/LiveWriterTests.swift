@@ -5,15 +5,15 @@ import NotesCore
 
 final class LiveWriterTests: XCTestCase {
     func testLiveLifecycle() throws {
-        guard ProcessInfo.processInfo.environment["NOTECTL_LIVE_TESTS"] == "1" else {
-            throw XCTSkip("Set NOTECTL_LIVE_TESTS=1; writes use only notectl-test in the default account.")
+        guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_TESTS"] == "1" else {
+            throw XCTSkip("Set NOTESCLI_LIVE_TESTS=1; writes use only notescli-test in the default account.")
         }
         // Stop before any script if consent is denied or would require a prompt.
         try NotesAutomationPermission.check()
         print("LIVE permission: PASS (already authorized)")
         let writer = ScriptingNotesWriter(timeout: 15)
         let token = UUID().uuidString
-        let title = "notectl-test-" + token
+        let title = "notescli-test-" + token
         var ownedFolders: [String] = []
         var activeNotes: Set<String> = []
         var stop = false
@@ -31,7 +31,7 @@ final class LiveWriterTests: XCTestCase {
         func guardedRead(_ ref: String) throws -> ScriptingNotesWriter.Reply {
             guard activeNotes.contains(ref) else { throw NotesError("unsafe_test_target", "Not created by this test.") }
             let result = try writer.execute("read", fields: ["ref": ref], isWrite: false)
-            guard result.title?.hasPrefix("notectl-test-") == true else { throw NotesError("unsafe_test_target", "Unexpected test title.") }
+            guard result.title?.hasPrefix("notescli-test-") == true else { throw NotesError("unsafe_test_target", "Unexpected test title.") }
             return result
         }
         defer {
@@ -52,21 +52,21 @@ final class LiveWriterTests: XCTestCase {
         do {
             let rootID: String
             do {
-                let existing = try writer.execute("folderInfo", fields: ["ref": "notectl-test"], isWrite: false)
+                let existing = try writer.execute("folderInfo", fields: ["ref": "notescli-test"], isWrite: false)
                 rootID = try XCTUnwrap(existing.folderID)
             } catch let error as NotesError where error.code == "folder_not_found" {
-                rootID = try XCTUnwrap(completed(writer.createFolder(name: "notectl-test")).folderID)
+                rootID = try XCTUnwrap(completed(writer.createFolder(name: "notescli-test")).folderID)
                 ownedFolders.append(rootID)
             }
             let subID: String
             do {
-                let existing = try writer.execute("folderInfo", fields: ["ref": "notectl-test > sub"], isWrite: false)
+                let existing = try writer.execute("folderInfo", fields: ["ref": "notescli-test > sub"], isWrite: false)
                 subID = try XCTUnwrap(existing.folderID)
             } catch let error as NotesError where error.code == "folder_not_found" {
                 subID = try XCTUnwrap(completed(writer.createFolder(name: "sub", parent: rootID)).folderID)
                 ownedFolders.append(subID)
             }
-            print("LIVE folders: PASS (notectl-test > sub)")
+            print("LIVE folders: PASS (notescli-test > sub)")
             let created = try completed(writer.createNote(title: title, markdown: "## Heading\n\n**bold** and `code`\n\n- [ ] task", folder: rootID))
             var ref = try XCTUnwrap(created.noteID?.coreDataID)
             activeNotes.insert(ref)
@@ -103,7 +103,7 @@ final class LiveWriterTests: XCTestCase {
             XCTAssertEqual(read.title, title + "-renamed")
             print("LIVE replace: PASS body=\(read.body ?? "nil")")
 
-            let folderName = "notectl-test-folder-" + token
+            let folderName = "notescli-test-folder-" + token
             let extraFolder = try XCTUnwrap(completed(writer.createFolder(name: folderName, parent: rootID)).folderID)
             ownedFolders.append(extraFolder)
             _ = try completed(writer.renameFolder(extraFolder, name: folderName + "-renamed"))
@@ -115,7 +115,7 @@ final class LiveWriterTests: XCTestCase {
             }
             print("LIVE folder create/rename/delete: PASS (deleted folder no longer resolves)")
 
-            let image = FileManager.default.temporaryDirectory.appendingPathComponent("notectl-test-\(token).png")
+            let image = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-test-\(token).png")
             let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")!
             try png.write(to: image)
             defer { try? FileManager.default.removeItem(at: image) }

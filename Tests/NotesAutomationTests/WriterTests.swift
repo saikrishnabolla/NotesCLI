@@ -117,7 +117,7 @@ final class WriterTests: XCTestCase {
     func testFolderMutationsAndEmptyName() throws {
         let runner = StubRunner(Array(repeating: ScriptOutput(stdout: #"{"folderID":"folder"}"#), count: 3))
         let writer = ScriptingNotesWriter(runner: runner)
-        XCTAssertEqual(try writer.createFolder(name: "sub", parent: "notectl-test", account: "default").folderID, "folder")
+        XCTAssertEqual(try writer.createFolder(name: "sub", parent: "notescli-test", account: "default").folderID, "folder")
         _ = try writer.renameFolder("folder", name: "renamed")
         _ = try writer.deleteFolder("folder")
         XCTAssertThrowsError(try writer.createFolder(name: " "))
@@ -125,7 +125,7 @@ final class WriterTests: XCTestCase {
     }
     func testMissingImageDowngrades() throws {
         let runner = StubRunner([ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
-        let result = try ScriptingNotesWriter(runner: runner).createNote(title: "test", markdown: "![missing](/notectl-missing-file.png)")
+        let result = try ScriptingNotesWriter(runner: runner).createNote(title: "test", markdown: "![missing](/notescli-missing-file.png)")
         XCTAssertEqual(result.message, #"downgraded: ["image"]"#)
         XCTAssertEqual(runner.calls.count, 1)
     }

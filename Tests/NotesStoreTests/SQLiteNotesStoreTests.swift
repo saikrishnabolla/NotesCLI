@@ -9,7 +9,7 @@ private final class SyntheticLibrary {
     let database: URL
     var connection: OpaquePointer?
     init(alternateColumns: Bool = false) throws {
-        directory = FileManager.default.temporaryDirectory.appendingPathComponent("notectl-fixture-" + UUID().uuidString)
+        directory = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-fixture-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         database = directory.appendingPathComponent("NoteStore.sqlite")
         guard sqlite3_open(database.path, &connection) == SQLITE_OK else { throw NotesError("fixture", "Cannot create fixture") }
@@ -176,7 +176,7 @@ final class SQLiteNotesStoreTests: XCTestCase {
 
 final class LiveNotesStoreTests: XCTestCase {
     func testDecodeEveryNoteAndBenchmark() throws {
-        guard ProcessInfo.processInfo.environment["NOTECTL_LIVE_TESTS"] == "1" else { throw XCTSkip("Set NOTECTL_LIVE_TESTS=1 for read-only library verification") }
+        guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_TESTS"] == "1" else { throw XCTSkip("Set NOTESCLI_LIVE_TESTS=1 for read-only library verification") }
         let coldStart = Date()
         let store = try SQLiteNotesStore(refresh:true)
         let notes = try store.notes(.init(includeDeleted:true))
@@ -202,7 +202,7 @@ final class LiveNotesStoreTests: XCTestCase {
             catch { reasons["unexpected_error",default:0] += 1 }
         }
         let failures = reasons.values.reduce(0,+)
-        print("NOTECTL_LIVE total=\(notes.count) decoded=\(decoded) locked=\(locked) failures=\(failures) reasons=\(reasons.sorted { $0.key < $1.key }) cold_list_seconds=\(coldSeconds) warm_list_seconds=\(warmSeconds)")
+        print("NOTESCLI_LIVE total=\(notes.count) decoded=\(decoded) locked=\(locked) failures=\(failures) reasons=\(reasons.sorted { $0.key < $1.key }) cold_list_seconds=\(coldSeconds) warm_list_seconds=\(warmSeconds)")
         XCTAssertEqual(notes.count,decoded+locked+failures)
         XCTAssertEqual(failures,0,"Library verification had failures; see aggregate reason counts")
     }

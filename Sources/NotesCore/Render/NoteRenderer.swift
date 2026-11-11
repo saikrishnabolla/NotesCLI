@@ -115,7 +115,7 @@ public enum NoteRenderer {
             let firstComponent = value.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
             return firstComponent.contains(":") ? "" : value
         }
-        return ["http", "https", "mailto", "tel", "applenotes", "notectl-attachment", "file"].contains(scheme) ? value : ""
+        return ["http", "https", "mailto", "tel", "applenotes", "notescli-attachment", "file"].contains(scheme) ? value : ""
     }
     private static func inline(_ text: String, _ run: AttributeRun, _ document: NoteDocument, _ attachments: [String: Attachment], _ format: Format, code: Bool) -> String {
         var leading = "", trailing = "", content = text
@@ -164,7 +164,7 @@ public enum NoteRenderer {
             return escaped(label.hasPrefix(prefix) ? label : prefix + label, format)
         }
         let title = ref.displayText ?? a?.title ?? a?.filename ?? "attachment: \(ref.typeUTI)"
-        let url = ref.url ?? a?.url ?? a?.filePath ?? "notectl-attachment:\(ref.id)"
+        let url = ref.url ?? a?.url ?? a?.filePath ?? "notescli-attachment:\(ref.id)"
         if format == .plain { return title }
         let image = a?.filePath != nil && (uti.contains("image") || ["public.jpeg", "public.png", "public.heic", "com.compuserve.gif", "public.tiff"].contains(uti))
         if format == .markdown { return "\(image ? "!" : "")[\(escaped(title, .markdown))](\(destination(safeURL(url))))" }

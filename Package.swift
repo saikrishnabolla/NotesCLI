@@ -2,10 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "notectl",
+    name: "NotesCLI",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "notectl", targets: ["notectl"]),
+        .executable(name: "notescli", targets: ["notescli"]),
         .library(name: "NotesCore", targets: ["NotesCore"]),
     ],
     dependencies: [
@@ -20,7 +20,7 @@ let package = Package(
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
         // MCP server over stdio, same operations as the CLI.
         .target(name: "NotesMCP", dependencies: ["NotesCore"]),
-        .executableTarget(name: "notectl", dependencies: [
+        .executableTarget(name: "notescli", dependencies: [
             "NotesCore", "NotesStore", "NotesAutomation", "NotesMCP",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ]),

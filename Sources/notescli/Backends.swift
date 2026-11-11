@@ -9,7 +9,7 @@ struct Backends {
     let openNote: (NoteID) throws -> Void
 
     static func make(_ name: String?) throws -> Backends {
-        let name = name ?? ProcessInfo.processInfo.environment["NOTECTL_BACKEND"] ?? "default"
+        let name = name ?? ProcessInfo.processInfo.environment["NOTESCLI_BACKEND"] ?? "default"
         if name == "fake" {
             let fake = InMemoryNotes.sample()
             return Backends(reader: fake, writer: { fake }, openNote: { _ in })

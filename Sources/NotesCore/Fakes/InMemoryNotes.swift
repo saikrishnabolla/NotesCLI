@@ -16,7 +16,7 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
         let folder = Folder(id: "fake-folder", name: "Notes", accountID: account.id, parentID: nil,
                             path: ["Notes"], isSmartFolder: false, isRecentlyDeleted: false, noteCount: 2)
         let date = Date(timeIntervalSince1970: 1_800_000_000)
-        let notes = [("welcome", "Welcome", "Welcome to notectl. Browse your shopping notes. #demo"),
+        let notes = [("welcome", "Welcome", "Welcome to notescli. Browse your shopping notes. #demo"),
                      ("shopping", "Shopping", "Apples, coffee, and bread. #shopping")].map { id, title, body in
             Note(summary: NoteSummary(id: NoteID(uuid: id), title: title, snippet: body,
                  folderID: folder.id, folderPath: folder.path, accountID: account.id,

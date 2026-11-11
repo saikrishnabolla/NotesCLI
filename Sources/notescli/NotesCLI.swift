@@ -5,8 +5,8 @@ import NotesMCP
 import Darwin
 
 @main
-struct Notectl: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "notectl", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, List.self, Show.self, Search.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, Doctor.self, MCP.self, Completion.self])
+struct NotesCLI: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [Accounts.self, Folders.self, List.self, Show.self, Search.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, Open.self, Doctor.self, MCP.self, Completion.self])
     @OptionGroup var options: GlobalOptions
 
     static func main() {
@@ -218,6 +218,6 @@ struct Completion: ParsableCommand {
     @Argument var shell: String = "zsh"
     func run() throws {
         guard let shell = CompletionShell(rawValue: shell) else { throw ValidationError("Use bash, zsh, or fish.") }
-        print(Notectl.completionScript(for: shell))
+        print(NotesCLI.completionScript(for: shell))
     }
 }

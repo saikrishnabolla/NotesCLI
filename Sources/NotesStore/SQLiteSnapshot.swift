@@ -45,9 +45,9 @@ enum SQLiteSnapshot {
     static func load(_ source: URL) throws -> StoreLibrary {
         let fm = FileManager.default
         guard fm.isReadableFile(atPath: source.path) else {
-            throw NotesError("full_disk_access_denied", "Cannot read the Notes database.", hint: "Grant Full Disk Access to the terminal or app running notectl.")
+            throw NotesError("full_disk_access_denied", "Cannot read the Notes database.", hint: "Grant Full Disk Access to the terminal or app running notescli.")
         }
-        let directory = fm.temporaryDirectory.appendingPathComponent("notectl-" + UUID().uuidString, isDirectory: true)
+        let directory = fm.temporaryDirectory.appendingPathComponent("notescli-" + UUID().uuidString, isDirectory: true)
         try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: directory) }
         let destination = directory.appendingPathComponent("NoteStore.sqlite")

@@ -80,7 +80,7 @@ public final class MCPServer {
             case "initialize":
                 guard let version = params["protocolVersion"] as? String else { return error(id: id, code: -32602, message: "protocolVersion is required") }
                 result = ["protocolVersion": Self.versions.contains(version) ? version : Self.versions[0],
-                          "capabilities": ["tools": ["listChanged": false]], "serverInfo": ["name": "notectl", "version": "1.0.0"]]
+                          "capabilities": ["tools": ["listChanged": false]], "serverInfo": ["name": "notescli", "version": "1.0.0"]]
             case "ping": result = [:]
             case "tools/list": result = ["tools": tools.map { ["name": $0.name, "description": $0.description, "inputSchema": $0.schema, "annotations": ["readOnlyHint": !$0.write, "destructiveHint": $0.name == "delete_note" || $0.name == "delete_folder" || $0.name == "update_note"]] as [String: Any] }]
             case "tools/call":

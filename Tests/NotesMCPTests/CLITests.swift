@@ -4,8 +4,8 @@ import Foundation
 final class CLITests: XCTestCase {
     private var root: URL { URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() }
     private func run(_ args: [String], input: String = "", environment: [String: String] = [:]) throws -> (Int32, String, String) {
-        let paths = [".build/debug/notectl", ".build/out/Products/Debug/notectl", ".build/arm64-apple-macosx/debug/notectl"]
-        let binary = try XCTUnwrap(paths.map { root.appendingPathComponent($0) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }, "Build notectl before running CLI tests")
+        let paths = [".build/debug/notescli", ".build/out/Products/Debug/notescli", ".build/arm64-apple-macosx/debug/notescli"]
+        let binary = try XCTUnwrap(paths.map { root.appendingPathComponent($0) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }, "Build notescli before running CLI tests")
         let process = Process(); process.executableURL = binary; process.arguments = args; process.currentDirectoryURL = root
         process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
         let stdout = Pipe(), stderr = Pipe(), stdin = Pipe()
@@ -21,7 +21,7 @@ final class CLITests: XCTestCase {
             let r = try run(args); XCTAssertEqual(r.0, 0, r.2)
             XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(r.1.utf8)) as? [[String: Any]])?.first?["name"] as? String, "Demo")
         }
-        let env = try run(["accounts", "--json"], environment: ["NOTECTL_BACKEND": "fake"])
+        let env = try run(["accounts", "--json"], environment: ["NOTESCLI_BACKEND": "fake"])
         XCTAssertEqual(env.0, 0, env.2)
         for args in [["list", "--limit", "-1"], ["show", "welcome", "--format", "bogus"], ["append", "welcome"], ["add", "--body", "A", "--stdin"], ["list", "--since", "bad-date"], ["delete"]] {
             let r = try run(["--backend", "fake", "--json"] + args)
@@ -42,19 +42,19 @@ final class CLITests: XCTestCase {
     func testAllWritesRefuseBeforeBackendOrEditor() throws {
         let commands = [["add"], ["append", "welcome", "--body", "x"], ["edit", "welcome"], ["rename", "welcome", "X"], ["move", "welcome", "Notes"], ["delete", "welcome", "--yes"], ["folder", "create", "X"], ["folder", "rename", "Notes", "X"], ["folder", "delete", "Notes", "--yes"]]
         for args in commands {
-            let r = try run(["--read-only", "--json"] + args, environment: ["NOTECTL_BACKEND": "default", "EDITOR": "false"])
+            let r = try run(["--read-only", "--json"] + args, environment: ["NOTESCLI_BACKEND": "default", "EDITOR": "false"])
             XCTAssertEqual(r.0, 4, "\(args): \(r.2)")
             XCTAssertTrue(r.2.contains("read_only"), "\(args): \(r.2)")
         }
     }
     func testFuzzyRankingAndDeterminism() throws {
-        for query in ["cofee", "shoppng", "aples bread", "welcom", "NOTEctl"] {
+        for query in ["cofee", "shoppng", "aples bread", "welcom", "NOTESCli"] {
             let args = ["--backend", "fake", "search", query, "--fuzzy", "--json"]
             let first = try run(args), second = try run(args)
             XCTAssertEqual(first.0, 0, first.2); XCTAssertEqual(first.1, second.1)
             let notes = try JSONSerialization.jsonObject(with: Data(first.1.utf8)) as! [[String: Any]]
             XCTAssertEqual(notes.count, query == "shoppng" ? 2 : 1, query)
-            XCTAssertEqual(notes.first?["title"] as? String, ["welcom", "NOTEctl"].contains(query) ? "Welcome" : "Shopping")
+            XCTAssertEqual(notes.first?["title"] as? String, ["welcom", "NOTESCli"].contains(query) ? "Welcome" : "Shopping")
         }
         let ranked = try run(["--backend", "fake", "search", "shopping", "--fuzzy", "--json"])
         let ranking = try JSONSerialization.jsonObject(with: Data(ranked.1.utf8)) as! [[String: Any]]
@@ -105,7 +105,7 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(r.1.split(separator: "\n").count, 2)
         XCTAssertFalse(r.1.contains("create_note"))
         for shell in ["bash", "zsh", "fish"] {
-            let completion = try run(["completion", shell]); XCTAssertEqual(completion.0, 0, completion.2); XCTAssertTrue(completion.1.contains("notectl"))
+            let completion = try run(["completion", shell]); XCTAssertEqual(completion.0, 0, completion.2); XCTAssertTrue(completion.1.contains("notescli"))
         }
     }
 }

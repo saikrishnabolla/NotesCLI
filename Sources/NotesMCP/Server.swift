@@ -1206,6 +1206,7 @@ public final class MCPServer: @unchecked Sendable {
         let note = targetNotes.first
         var paths = targetNotes.map(\.summary.folderPath)
         if tool.name == "create_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
+        if tool.name == "restore_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         // MARK: w9-paper begin
         if tool.name == "drawing_create", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         // MARK: w9-paper end
@@ -1224,10 +1225,17 @@ public final class MCPServer: @unchecked Sendable {
     private func safeWrite(tool: Tool, arguments: [String: Any], note: Note?, paths: [[String]], engine: String,
                            snapshotNotes: [Note] = [],
                            action: () throws -> (WriteResult, Any?, String?)) throws -> [String: Any] {
-        let configured = arguments["write_folders"] as? String ?? writeFolders ?? ProcessInfo.processInfo.environment["NOTESCLI_WRITE_FOLDERS"]
-        let allowlist = WriteAllowlist(configured)
-        if allowlist.isRestricted && paths.isEmpty { throw NotesError("write_not_allowed", "The target folder could not be resolved for the write allowlist.") }
-        for path in paths { try allowlist.require(path) }
+        let serverAllowlist = WriteAllowlist(writeFolders ?? ProcessInfo.processInfo.environment["NOTESCLI_WRITE_FOLDERS"])
+        let requestAllowlist = WriteAllowlist(arguments["write_folders"] as? String)
+        let allowlists = [serverAllowlist, requestAllowlist].filter(\.isRestricted)
+        if tool.name == "restore_note", !allowlists.isEmpty,
+           (arguments["folder"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            throw NotesError("write_not_allowed", "A destination folder is required to restore a note under a write allowlist.")
+        }
+        if !allowlists.isEmpty && paths.isEmpty { throw NotesError("write_not_allowed", "The target folder could not be resolved for the write allowlist.") }
+        for allowlist in allowlists {
+            for path in paths { try allowlist.require(path) }
+        }
         if let note {
             try ConcurrencyGuard.require(note, ifModified: arguments["if_modified"] as? String, expectRevision: arguments["expect_revision"] as? String)
             if note.summary.isShared == true {

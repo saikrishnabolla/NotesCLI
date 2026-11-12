@@ -1,6 +1,6 @@
 # Command reference
 
-This reference follows `notescli --help` from version 1.1.0.
+This reference follows `notescli --help` from version 1.1.1.
 
 ## Global options
 
@@ -203,9 +203,10 @@ notescli completion [zsh|bash|fish]
 
 ```text
 notescli mcp [--allow-native]
-notescli mcp install [--client claude-code|claude-desktop|codex|cursor|vscode|all] [--read-only]
-notescli mcp uninstall [--client claude-code|claude-desktop|codex|cursor|vscode|all]
-notescli mcp status [--client claude-code|claude-desktop|codex|cursor|vscode|all]
+notescli mcp install [--client claude-code|claude-desktop|codex|cursor|vscode|tailscale|all] [--read-only] [--allow-native] [--write-folders FOLDERS]
+notescli mcp uninstall [--client claude-code|claude-desktop|codex|cursor|vscode|tailscale|all]
+notescli mcp status [--client claude-code|claude-desktop|codex|cursor|vscode|tailscale|all]
+notescli mcp token show|rotate
 ```
 
 Running `notescli mcp` with no subcommand starts the stdio server. Client selection defaults to `all`.

@@ -16,8 +16,8 @@ The formula lives in the [saikrishnabolla/homebrew-notescli](https://github.com/
 Download the `.tar.gz` file and its `.sha256` file from the same release. Check the archive, then install it on your `PATH`:
 
 ```bash
-grep 'tar.gz$' notescli-1.1.0-macos-universal.sha256 | shasum -a 256 -c -
-tar -xzf notescli-1.1.0-macos-universal.tar.gz
+grep 'tar.gz$' notescli-1.1.1-macos-universal.sha256 | shasum -a 256 -c -
+tar -xzf notescli-1.1.1-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
 mkdir -p "$HOME/Applications"
 ditto "NotesCLI Capability Host.app" "$HOME/Applications/NotesCLI Capability Host.app"

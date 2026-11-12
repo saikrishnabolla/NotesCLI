@@ -230,6 +230,80 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex/config.toml").path))
     }
 
+    func testMCPInstallRejectsWriteFoldersForNonTailscaleClients() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let result = try run([
+            "mcp", "install", "--client", "codex", "--write-folders", "Notes", "--json",
+        ], environment: environment)
+        XCTAssertEqual(result.0, 2, result.2)
+        XCTAssertTrue(result.2.contains("tailscale"), result.2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex/config.toml").path))
+    }
+
+    func testMCPInstallRejectsMalformedTailscaleWriteFoldersBeforeSetup() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let result = try run([
+            "mcp", "install", "--client", "tailscale", "--write-folders", "Notes >", "--json",
+        ], environment: environment)
+        XCTAssertEqual(result.0, 2, result.2)
+        XCTAssertTrue(result.2.contains("write-folders"), result.2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("Library/Application Support/NotesCLI/mcp-http.json").path))
+
+        let whitespace = try run([
+            "mcp", "install", "--client", "tailscale", "--write-folders", "   ", "--json",
+        ], environment: environment)
+        XCTAssertEqual(whitespace.0, 2, whitespace.2)
+        XCTAssertTrue(whitespace.2.contains("write-folders"), whitespace.2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("Library/Application Support/NotesCLI/mcp-http.json").path))
+
+        let clearing = try run([
+            "mcp", "install", "--client", "tailscale", "--write-folders", "", "--json",
+        ], environment: environment)
+        XCTAssertEqual(clearing.0, 1, clearing.1 + clearing.2)
+        XCTAssertTrue((clearing.1 + clearing.2).contains("capability_host_required"), clearing.1 + clearing.2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("Library/Application Support/NotesCLI/mcp-http.json").path))
+    }
+
+    func testTailscaleConfigVersionProtectsPersistedWritePolicy() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let config = home.appendingPathComponent("Library/Application Support/NotesCLI/mcp-http.json")
+        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let environment = [
+            "HOME": home.path, "CFFIXED_USER_HOME": home.path,
+            "NOTESCLI_BACKEND": "invalid", "NOTESCLI_CAPABILITY_HOST": "direct",
+        ]
+        func writeConfig(version: Int, writeFolders: String?) throws {
+            var value: [String: Any] = [
+                "version": version, "host": "127.0.0.1", "port": 17362, "path": "/notescli",
+                "token": String(repeating: "t", count: 32), "tailscaleHostname": "notes.test.ts.net",
+                "tailscaleIPs": [String](), "readOnly": false, "allowNative": true,
+            ]
+            if let writeFolders { value["writeFolders"] = writeFolders }
+            try JSONSerialization.data(withJSONObject: value).write(to: config, options: .atomic)
+        }
+
+        try writeConfig(version: 1, writeFolders: nil)
+        let legacy = try run(["mcp", "serve", "--http"], environment: environment)
+        XCTAssertTrue(legacy.2.contains("invalid_backend"), legacy.2)
+
+        try writeConfig(version: 2, writeFolders: "Notes")
+        let protected = try run(["mcp", "serve", "--http"], environment: environment)
+        XCTAssertTrue(protected.2.contains("invalid_backend"), protected.2)
+
+        try writeConfig(version: 1, writeFolders: "Notes")
+        let unsafeLegacy = try run(["mcp", "serve", "--http"], environment: environment)
+        XCTAssertTrue(unsafeLegacy.2.contains("invalid_http_config"), unsafeLegacy.2)
+
+        try writeConfig(version: 2, writeFolders: "   ")
+        let emptyProtected = try run(["mcp", "serve", "--http"], environment: environment)
+        XCTAssertTrue(emptyProtected.2.contains("invalid_http_config"), emptyProtected.2)
+    }
+
     func testMCPInstallPassesAllowNativeToClaudeCode() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -387,7 +461,7 @@ final class CLITests: XCTestCase {
         let json = try run(["--backend", "fake", "--json"])
         XCTAssertEqual(json.0, 0, json.2)
         let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
-        XCTAssertEqual(home["version"] as? String, "1.1.0")
+        XCTAssertEqual(home["version"] as? String, "1.1.1")
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },

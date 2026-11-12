@@ -25,6 +25,18 @@ final class SafetyTests: XCTestCase {
         XCTAssertTrue(WriteAllowlist(nil).allows(["Anywhere"]))
     }
 
+    func testMalformedAllowlistFailsClosed() {
+        for value in ["Notes >", "> Notes", "Notes >> Private", "Notes,,Private"] {
+            let guardrail = WriteAllowlist(value)
+            XCTAssertTrue(guardrail.isRestricted, value)
+            XCTAssertFalse(guardrail.allows(["Notes"]), value)
+            XCTAssertFalse(guardrail.allows(["Notes", "Private"]), value)
+            XCTAssertFalse(guardrail.allows(["Private"]), value)
+        }
+        XCTAssertFalse(WriteAllowlist("   ").isRestricted)
+        XCTAssertTrue(WriteAllowlist("   ").allows(["Anywhere"]))
+    }
+
     func testJournalReplaysAKeyAndRejectsDifferentArguments() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

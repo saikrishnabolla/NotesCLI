@@ -5,8 +5,9 @@ import NotesSafety
 import Security
 
 struct MCPHTTPConfiguration: Codable {
-    static let currentVersion = 1
-    var version = currentVersion
+    static let currentVersion = 2
+    static let legacyVersion = 1
+    var version: Int
     var host = "127.0.0.1"
     var port = 7362
     var path = "/notescli"
@@ -15,22 +16,28 @@ struct MCPHTTPConfiguration: Codable {
     var tailscaleIPs: [String]
     var readOnly: Bool
     var allowNative: Bool
+    var writeFolders: String?
 
     private enum CodingKeys: String, CodingKey {
-        case version, host, port, path, token, tailscaleHostname, tailscaleIPs, readOnly, allowNative
+        case version, host, port, path, token, tailscaleHostname, tailscaleIPs, readOnly, allowNative, writeFolders
     }
 
-    init(token: String, tailscaleHostname: String, tailscaleIPs: [String], readOnly: Bool, allowNative: Bool) {
+    init(token: String, tailscaleHostname: String, tailscaleIPs: [String], readOnly: Bool, allowNative: Bool,
+         writeFolders: String? = nil) {
+        let normalizedWriteFolders = writeFolders?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveWriteFolders = normalizedWriteFolders?.isEmpty == false ? normalizedWriteFolders : nil
+        version = effectiveWriteFolders == nil ? Self.legacyVersion : Self.currentVersion
         self.token = token
         self.tailscaleHostname = tailscaleHostname
         self.tailscaleIPs = tailscaleIPs
         self.readOnly = readOnly
         self.allowNative = allowNative
+        self.writeFolders = effectiveWriteFolders
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        version = try values.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
+        version = try values.decodeIfPresent(Int.self, forKey: .version) ?? Self.legacyVersion
         host = try values.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
         port = try values.decodeIfPresent(Int.self, forKey: .port) ?? 7362
         path = try values.decodeIfPresent(String.self, forKey: .path) ?? "/notescli"
@@ -39,6 +46,7 @@ struct MCPHTTPConfiguration: Codable {
         tailscaleIPs = try values.decodeIfPresent([String].self, forKey: .tailscaleIPs) ?? []
         readOnly = try values.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
         allowNative = try values.decodeIfPresent(Bool.self, forKey: .allowNative) ?? false
+        writeFolders = try values.decodeIfPresent(String.self, forKey: .writeFolders)
     }
 
     var endpoint: String { "https://\(tailscaleHostname)\(path)" }
@@ -71,7 +79,13 @@ enum TailscaleMCP {
     static func loadConfiguration() throws -> MCPHTTPConfiguration {
         let data = try Data(contentsOf: MCPHTTPPaths.config)
         let value = try JSONDecoder().decode(MCPHTTPConfiguration.self, from: data)
-        guard value.version == MCPHTTPConfiguration.currentVersion,
+        let configuredAllowlist = WriteAllowlist(value.writeFolders)
+        let hasValidWriteFolders = value.writeFolders == nil || (
+            value.writeFolders?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false && configuredAllowlist.isValid
+        )
+        guard [MCPHTTPConfiguration.legacyVersion, MCPHTTPConfiguration.currentVersion].contains(value.version),
+              value.version != MCPHTTPConfiguration.legacyVersion || value.writeFolders == nil,
+              hasValidWriteFolders,
               value.host == "127.0.0.1", (1...65535).contains(value.port),
               value.path == "/notescli", value.token.utf8.count >= 32,
               !value.tailscaleHostname.isEmpty else {
@@ -80,7 +94,8 @@ enum TailscaleMCP {
         return value
     }
 
-    static func install(executable: String, readOnly: Bool, allowNative: Bool) throws -> MCPHTTPConfiguration {
+    static func install(executable: String, readOnly: Bool, allowNative: Bool,
+                        writeFolders: String?) throws -> MCPHTTPConfiguration {
         guard CapabilityHostClient.isAvailable() else {
             throw NotesError("capability_host_required", "Install and start NotesCLI Capability Host before publishing MCP.",
                              hint: "Run 'notescli onboard'.")
@@ -99,12 +114,25 @@ enum TailscaleMCP {
         if let existingConfiguration { config = existingConfiguration }
         else {
             config = MCPHTTPConfiguration(token: try newToken(), tailscaleHostname: tailscale.hostname,
-                                          tailscaleIPs: tailscale.ips, readOnly: readOnly, allowNative: allowNative)
+                                          tailscaleIPs: tailscale.ips, readOnly: readOnly, allowNative: allowNative,
+                                          writeFolders: writeFolders)
         }
         config.tailscaleHostname = tailscale.hostname
         config.tailscaleIPs = tailscale.ips
         config.readOnly = readOnly
         config.allowNative = allowNative
+        if let writeFolders {
+            if writeFolders.isEmpty {
+                config.writeFolders = nil
+            } else {
+                let normalized = writeFolders.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalized.isEmpty, WriteAllowlist(normalized).isValid else {
+                    throw NotesError("invalid_write_folders", "The Tailscale write-folder ceiling is invalid.")
+                }
+                config.writeFolders = normalized
+            }
+            config.version = config.writeFolders == nil ? MCPHTTPConfiguration.legacyVersion : MCPHTTPConfiguration.currentVersion
+        }
         do {
             try save(config)
             try installLaunchAgent(executable: stableExecutable(executable))
@@ -185,6 +213,7 @@ enum TailscaleMCP {
             "endpoint": config?.endpoint ?? NSNull(),
             "read_only": config?.readOnly ?? false,
             "allow_native": config?.allowNative ?? false,
+            "write_folders": config?.writeFolders ?? NSNull(),
         ]
     }
 

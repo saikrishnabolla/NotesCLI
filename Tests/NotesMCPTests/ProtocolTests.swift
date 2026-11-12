@@ -627,6 +627,59 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(items.count, 2)
         XCTAssertTrue(items.allSatisfy { $0["error"] == nil })
     }
+
+    func testPerCallWriteFoldersCanNarrowButNotBroadenServerPolicy() throws {
+        let fake = InMemoryNotes.sample()
+        let serverRestricted = MCPServer(reader: fake, writer: fake, writeFolders: "Personal")
+        let broadened = try structured(call(serverRestricted, "update_note", [
+            "ref": "welcome", "body": "changed", "write_folders": "Notes", "dry_run": true,
+        ]))
+        XCTAssertEqual((broadened["error"] as? [String: Any])?["code"] as? String, "write_not_allowed")
+
+        let serverAllowed = MCPServer(reader: fake, writer: fake, writeFolders: "Notes")
+        let narrowed = try structured(call(serverAllowed, "update_note", [
+            "ref": "welcome", "body": "changed", "write_folders": "Personal", "dry_run": true,
+        ]))
+        XCTAssertEqual((narrowed["error"] as? [String: Any])?["code"] as? String, "write_not_allowed")
+
+        let matching = try structured(call(serverAllowed, "update_note", [
+            "ref": "welcome", "body": "changed", "write_folders": "Notes", "dry_run": true,
+        ]))
+        XCTAssertEqual(matching["dry_run"] as? Bool, true)
+    }
+
+    func testRestoreChecksDestinationAgainstServerWritePolicy() throws {
+        let sample = InMemoryNotes.sample()
+        let account = try XCTUnwrap(try sample.accounts().first)
+        let notesFolder = try XCTUnwrap(try sample.folders(account: nil).first)
+        let personalFolder = Folder(
+            id: "personal-folder", name: "Personal", accountID: account.id, parentID: nil,
+            path: ["Personal"], isSmartFolder: false, isRecentlyDeleted: false, noteCount: 0
+        )
+        let fake = InMemoryNotes(
+            accounts: [account], folders: [notesFolder, personalFolder], notes: [try sample.note("welcome")]
+        )
+        let server = MCPServer(
+            reader: fake, writer: fake, allowNative: true,
+            nativeHandler: { _, _ in try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true]) },
+            writeFolders: "Notes"
+        )
+
+        let denied = try structured(call(server, "restore_note", [
+            "ref": "welcome", "folder": "Personal", "dry_run": true,
+        ]))
+        XCTAssertEqual((denied["error"] as? [String: Any])?["code"] as? String, "write_not_allowed")
+
+        let omitted = try structured(call(server, "restore_note", [
+            "ref": "welcome", "dry_run": true,
+        ]))
+        XCTAssertEqual((omitted["error"] as? [String: Any])?["code"] as? String, "write_not_allowed")
+
+        let allowed = try structured(call(server, "restore_note", [
+            "ref": "welcome", "folder": "Notes", "dry_run": true,
+        ]))
+        XCTAssertEqual(allowed["dry_run"] as? Bool, true)
+    }
 }
 
 final class OptionalSelectorCapabilityTests: XCTestCase {
@@ -644,6 +697,6 @@ final class ServerVersionTests: XCTestCase {
         let server = MCPServer(reader: fake, writer: fake)
         let response = try XCTUnwrap(server.handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-06-18", "capabilities": [String: Any](), "clientInfo": ["name": "t", "version": "1"]]]))
         let info = try XCTUnwrap((response["result"] as? [String: Any])?["serverInfo"] as? [String: Any])
-        XCTAssertEqual(info["version"] as? String, "1.1.0")
+        XCTAssertEqual(info["version"] as? String, "1.1.1")
     }
 }

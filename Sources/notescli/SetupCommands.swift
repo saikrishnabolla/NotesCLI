@@ -75,6 +75,7 @@ struct MCPServe: ParsableCommand {
         let mcp = MCPServer(reader: backend.reader, writer: writer, readOnly: config.readOnly,
                             allowNative: config.allowNative, nativeHandler: native,
                             syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
+                            writeFolders: config.writeFolders,
                             stateRoot: NotesSafetyPaths.applicationSupport, exposureProfile: .remote,
                             readFidelity: backend.fidelity.rawValue, unavailableReadFields: backend.unavailableFields)
         let endpoint = try HTTPMCPServer.Configuration(
@@ -451,6 +452,8 @@ struct MCPInstall: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.")
     var allowNative = false
+    @Option(help: "Hard ceiling of comma-separated folder trees for Tailscale writes.")
+    var writeFolders: String?
 
     private var resolvedAllowNative: Bool { allowNative || CommandLine.arguments.contains("--allow-native") }
     private var resolvedReadOnly: Bool { options.readOnly || CommandLine.arguments.contains("--read-only") }
@@ -459,12 +462,21 @@ struct MCPInstall: ParsableCommand {
         if resolvedReadOnly && resolvedAllowNative {
             throw ValidationError("--read-only cannot be combined with --allow-native.")
         }
+        if writeFolders != nil && client != .tailscale {
+            throw ValidationError("--write-folders is supported only with --client tailscale.")
+        }
+        if let writeFolders,
+           (!writeFolders.isEmpty && writeFolders.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ||
+           !WriteAllowlist(writeFolders).isValid {
+            throw ValidationError("--write-folders contains an empty folder or path component.")
+        }
     }
 
     func run() throws {
         if client == .tailscale {
             let config = try TailscaleMCP.install(executable: MCPConfiguration.executable,
-                                                  readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
+                                                  readOnly: resolvedReadOnly, allowNative: resolvedAllowNative,
+                                                  writeFolders: writeFolders)
             try InstallManifest.recordMCPClient(.tailscale, readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
             try InstallManifest.recordFile(MCPHTTPPaths.config, category: .config)
             try InstallManifest.recordFile(MCPHTTPPaths.launchAgent, category: .runtime)

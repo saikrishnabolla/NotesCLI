@@ -91,12 +91,14 @@ Restart desktop clients after changing their config.
 ## Tailscale endpoint
 
 ```bash
-notescli mcp install --client tailscale --allow-native
+notescli mcp install --client tailscale --allow-native --write-folders "Notes > Oracle"
 notescli mcp token show
 notescli mcp token rotate
 ```
 
 The installer starts a loopback-only LaunchAgent and mounts `/notescli` with `tailscale serve`. It keeps existing Serve routes. Requests need the bearer token printed by `mcp token show`. Remote MCP hides tools that accept arbitrary local file paths.
+
+Reinstalling without `--write-folders` keeps the existing ceiling. Pass `--write-folders ""` to clear it.
 
 The server supports MCP through the 2026-07-28 revision. It runs independent reads in parallel, serializes writes, handles cancellation, and serves an interactive result card to clients that support MCP Apps.
 
@@ -126,7 +128,7 @@ Every MCP write tool accepts `dry_run: true`. A real write returns an `outcome`:
 
 Use a folder named `notescli-test` and titles beginning with `notescli-test-` for agent experiments. Delete moves items to Recently Deleted.
 
-Every Notes write uses the folder allowlist, concurrency checks, journal, snapshots, and fresh readback. Pass `write_folders` per call or set `NOTESCLI_WRITE_FOLDERS` for the server. Read-only mode hides filesystem write tools as well as Notes write tools.
+Every Notes write uses the folder allowlist, concurrency checks, journal, snapshots, and fresh readback. `--write-folders` sets a hard ceiling for the Tailscale server; `write_folders` on a call can narrow that ceiling but cannot broaden it. Read-only mode hides filesystem write tools as well as Notes write tools.
 
 Native tools stay hidden unless the server starts with `--allow-native`. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
 

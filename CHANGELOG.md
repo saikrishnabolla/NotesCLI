@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+### Security
+
+- A Tailscale MCP server can set a hard write-folder ceiling that remote calls may narrow but cannot broaden. Malformed limits fail closed, and restores check their destination folder.
+
 ## 1.1.0
 
 ### Added

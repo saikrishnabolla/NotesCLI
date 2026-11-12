@@ -31,7 +31,7 @@ ruby - "$FORMULA" "$VERSION" "$URL" "$SHA256" <<'RUBY'
 path, version, url, sha = ARGV
 text = File.read(path)
 raise "missing url" unless text.sub!(/^  url ".*"$/, "  url #{url.dump}")
-raise "missing version" unless text.sub!(/^  version ".*"$/, "  version #{version.dump}")
+text.sub!(/^  version ".*"$/, "  version #{version.dump}")
 raise "missing sha256" unless text.sub!(/^  sha256 ".*"$/, "  sha256 #{sha.dump}")
 File.write(path, text)
 RUBY

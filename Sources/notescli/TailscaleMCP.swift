@@ -88,7 +88,7 @@ enum TailscaleMCP {
         let tailscale = try tailscaleStatus()
         let existingConfiguration = try? loadConfiguration()
         let expectedTarget = "http://127.0.0.1:\(existingConfiguration?.port ?? 7362)"
-        let previousRoute = routeTarget(binary: tailscale.binary, path: "/notescli")
+        let previousRoute = try routeTarget(binary: tailscale.binary, path: "/notescli")
         if let target = previousRoute, target != expectedTarget {
             throw NotesError("tailscale_route_not_owned", "Refusing to replace a Tailscale /notescli route that points somewhere else.")
         }
@@ -114,6 +114,9 @@ enum TailscaleMCP {
             guard result.status == 0 else {
                 throw NotesError("tailscale_serve_failed", result.output.isEmpty ? "Tailscale could not publish the NotesCLI endpoint." : result.output)
             }
+            guard try routeTarget(binary: tailscale.binary, path: config.path) == "http://127.0.0.1:\(config.port)" else {
+                throw NotesError("tailscale_route_mismatch", "Tailscale did not install the expected NotesCLI route.")
+            }
             try waitForHealth(config.endpoint + "/health", code: "tailscale_endpoint_unhealthy")
             return config
         } catch {
@@ -136,11 +139,14 @@ enum TailscaleMCP {
         if let binary = tailscaleBinary() {
             let path = config?.path ?? "/notescli"
             let expected = "http://127.0.0.1:\(config?.port ?? 7362)"
-            if let target = routeTarget(binary: binary, path: path) {
+            if let target = try routeTarget(binary: binary, path: path) {
                 if target == expected {
                     let removal = run(binary, ["serve", "--https=443", "--set-path=\(path)", "off"], environment: ["TAILSCALE_BE_CLI": "1"])
                     if removal.status != 0, !removal.output.lowercased().contains("not found") {
                         throw NotesError("tailscale_serve_failed", removal.output.isEmpty ? "Tailscale could not remove the NotesCLI endpoint." : removal.output)
+                    }
+                    guard try routeTarget(binary: binary, path: path) == nil else {
+                        throw NotesError("tailscale_route_mismatch", "Tailscale did not remove the NotesCLI route.")
                     }
                 } else {
                     result = "kept foreign route"
@@ -167,7 +173,10 @@ enum TailscaleMCP {
         let config = try? loadConfiguration()
         let job = launchctl(["print", "gui/\(getuid())/\(label)"])
         let mounted = config.map { value in
-            tailscaleBinary().flatMap { routeTarget(binary: $0, path: value.path) } == "http://127.0.0.1:\(value.port)"
+            guard let binary = tailscaleBinary(), let target = try? routeTarget(binary: binary, path: value.path) else {
+                return false
+            }
+            return target == "http://127.0.0.1:\(value.port)"
         } ?? false
         return [
             "configured": config != nil,
@@ -224,14 +233,14 @@ enum TailscaleMCP {
         if let previousRoute {
             let restored = run(binary, ["serve", "--bg", "--https=443", "--set-path=\(config.path)", previousRoute],
                                environment: ["TAILSCALE_BE_CLI": "1"])
-            guard restored.status == 0, routeTarget(binary: binary, path: config.path) == previousRoute else {
+            guard restored.status == 0, try routeTarget(binary: binary, path: config.path) == previousRoute else {
                 throw NotesError("tailscale_rollback_failed", restored.output.isEmpty ?
                                  "The previous Tailscale route could not be restored." : restored.output)
             }
-        } else if routeTarget(binary: binary, path: config.path) == "http://127.0.0.1:\(config.port)" {
+        } else if try routeTarget(binary: binary, path: config.path) == "http://127.0.0.1:\(config.port)" {
             let removed = run(binary, ["serve", "--https=443", "--set-path=\(config.path)", "off"],
                               environment: ["TAILSCALE_BE_CLI": "1"])
-            guard removed.status == 0, routeTarget(binary: binary, path: config.path) == nil else {
+            guard removed.status == 0, try routeTarget(binary: binary, path: config.path) == nil else {
                 throw NotesError("tailscale_rollback_failed", removed.output.isEmpty ?
                                  "The failed Tailscale route could not be removed." : removed.output)
             }
@@ -319,14 +328,31 @@ enum TailscaleMCP {
         return nil
     }
 
-    private static func routeTarget(binary: String, path: String) -> String? {
+    private static func routeTarget(binary: String, path: String) throws -> String? {
         let serve = run(binary, ["serve", "status", "--json"], environment: ["TAILSCALE_BE_CLI": "1"])
-        guard serve.status == 0, let data = serve.output.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let web = root["Web"] as? [String: Any] else { return nil }
+        guard serve.status == 0 else {
+            throw NotesError("tailscale_status_failed", serve.output.isEmpty ?
+                             "Tailscale Serve status could not be read." : serve.output)
+        }
+        guard let data = serve.output.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NotesError("tailscale_status_invalid", "Tailscale Serve returned invalid JSON.")
+        }
+        guard let rawWeb = root["Web"] else { return nil }
+        guard let web = rawWeb as? [String: Any] else {
+            throw NotesError("tailscale_status_invalid", "Tailscale Serve returned an invalid Web map.")
+        }
         for value in web.values {
-            guard let site = value as? [String: Any], let handlers = site["Handlers"] as? [String: Any],
-                  let handler = handlers[path] as? [String: Any], let proxy = handler["Proxy"] as? String else { continue }
+            guard let site = value as? [String: Any] else {
+                throw NotesError("tailscale_status_invalid", "Tailscale Serve returned an invalid site entry.")
+            }
+            guard let rawHandlers = site["Handlers"], let handlers = rawHandlers as? [String: Any] else {
+                throw NotesError("tailscale_status_invalid", "Tailscale Serve returned an invalid Handlers map.")
+            }
+            guard let rawHandler = handlers[path] else { continue }
+            guard let handler = rawHandler as? [String: Any], let proxy = handler["Proxy"] as? String else {
+                throw NotesError("tailscale_status_invalid", "The Tailscale /notescli route has an unsupported handler.")
+            }
             return proxy
         }
         return nil

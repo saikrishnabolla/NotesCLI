@@ -47,7 +47,9 @@ struct MCPRoot: ParsableCommand {
         let backend = try options.backends()
         let selectedWriter: (any NotesWriting)? = options.readOnly ? nil : try backend.writer()
         let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
-        let exposure: MCPToolExposureProfile = ProcessInfo.processInfo.environment["NOTESCLI_MCP_REMOTE_SAFE"] == "1" ? .remote : .local
+        let environment = ProcessInfo.processInfo.environment
+        let exposure: MCPToolExposureProfile = environment["NOTESCLI_MCP_REMOTE_SAFE"] == "1" ||
+            environment["NOTESCLI_HOST_ACTIVE"] == "1" ? .remote : .local
         let server = MCPServer(reader: backend.reader, writer: selectedWriter, readOnly: options.readOnly,
                                allowNative: allowNative, nativeHandler: handler,
                                syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
@@ -81,15 +83,9 @@ struct MCPServe: ParsableCommand {
             allowedHosts: config.allowedHosts,
             allowedOrigins: config.allowedOrigins
         )
-        let modernConnection = mcp.makeConnection()
         let server = HTTPMCPServer(configuration: endpoint, handlerFactory: {
-            let legacyConnection = mcp.makeConnection()
-            return { request in
-                let metadata = (request["params"] as? [String: Any])?["_meta"] as? [String: Any]
-                let modern = metadata?[MCPProtocol.protocolVersionKey] as? String == MCPProtocol.modernVersion ||
-                    request["method"] as? String == "server/discover"
-                return mcp.handle(request, connection: modern ? modernConnection : legacyConnection)
-            }
+            let connection = mcp.makeConnection()
+            return { mcp.handle($0, connection: connection) }
         })
         _ = try server.start()
 

@@ -95,10 +95,42 @@ public final class HTTPMCPServer: @unchecked Sendable {
         case headerTooLarge
     }
 
-    private struct LegacySession {
+    private struct Session {
         let handler: Handler
         var lastAccess: UInt64
         var activeRequests: Int
+    }
+
+    private final class ModernInvocation: @unchecked Sendable {
+        let handler: Handler
+        let request: [String: Any]
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var storedResponse: [String: Any]?
+
+        init(handler: @escaping Handler, request: [String: Any]) {
+            self.handler = handler
+            self.request = request
+        }
+
+        func run() {
+            started.signal()
+            let response = handler(request)
+            lock.withLock { storedResponse = response }
+            finished.signal()
+        }
+
+        var response: [String: Any]? { lock.withLock { storedResponse } }
+
+        func cancel() {
+            guard let id = request["id"] else { return }
+            _ = handler([
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": ["requestId": id, "reason": "HTTP client disconnected"],
+            ])
+        }
     }
 
     private let configuration: Configuration
@@ -110,7 +142,7 @@ public final class HTTPMCPServer: @unchecked Sendable {
     private let connectionSlots: DispatchSemaphore
     private var running: RunningState?
     private var activeConnections: Set<Int32> = []
-    private var legacySessions: [String: LegacySession] = [:]
+    private var sessions: [String: Session] = [:]
 
     public init(configuration: Configuration, handlerFactory: @escaping HandlerFactory) {
         self.configuration = configuration
@@ -195,7 +227,7 @@ public final class HTTPMCPServer: @unchecked Sendable {
         state.source.cancel()
         for descriptor in connections { Darwin.shutdown(descriptor, SHUT_RDWR) }
         _ = state.cancelled.wait(timeout: .now() + 2)
-        sessionLock.withLock { legacySessions.removeAll() }
+        sessionLock.withLock { sessions.removeAll() }
     }
 
     public var localEndpoint: HTTPMCPEndpoint? {
@@ -377,42 +409,46 @@ public final class HTTPMCPServer: @unchecked Sendable {
         }
         let method = request["method"] as? String
         let isLegacy = protocolVersion != MCPProtocol.modernVersion
+        let suppliedSessionIDs = head.headers.values(named: "mcp-session-id")
         var sessionID: String?
         let response: [String: Any]?
-        if isLegacy, method == "initialize" {
-            guard head.headers.values(named: "mcp-session-id").isEmpty else {
-                Self.sendResponse(descriptor, status: 400,
-                                  body: Self.errorBody(code: -32020, message: "Mcp-Session-Id is not valid during initialize"))
-                return
-            }
-            let sessionHandler = handlerFactory()
-            response = sessionHandler(request)
-            if request["id"] != nil, response?["error"] == nil {
-                guard let established = storeSession(handler: sessionHandler) else {
-                    Self.sendResponse(descriptor, status: 503,
-                                      body: Self.errorBody(code: -32603, message: "Session capacity reached"))
+        if isLegacy {
+            if method == "initialize" {
+                guard suppliedSessionIDs.isEmpty else {
+                    Self.sendResponse(descriptor, status: 400,
+                                      body: Self.errorBody(code: -32020, message: "Mcp-Session-Id is not valid during initialize"))
                     return
                 }
-                sessionID = established
+                let sessionHandler = handlerFactory()
+                response = sessionHandler(request)
+                if request["id"] != nil, response?["error"] == nil {
+                    guard let established = storeSession(handler: sessionHandler) else {
+                        Self.sendResponse(descriptor, status: 503,
+                                          body: Self.errorBody(code: -32603, message: "Session capacity reached"))
+                        return
+                    }
+                    sessionID = established
+                }
+            } else {
+                guard suppliedSessionIDs.count == 1, !suppliedSessionIDs[0].isEmpty else {
+                    Self.sendResponse(descriptor, status: 400,
+                                      body: Self.errorBody(code: -32020, message: "Mcp-Session-Id is required"))
+                    return
+                }
+                let suppliedSessionID = suppliedSessionIDs[0]
+                sessionID = suppliedSessionID
+                guard let sessionHandler = acquireSession(suppliedSessionID) else {
+                    Self.sendResponse(descriptor, status: 404,
+                                      body: Self.errorBody(code: -32021, message: "MCP session not found"))
+                    return
+                }
+                response = sessionHandler(request)
+                releaseSession(suppliedSessionID)
             }
-        } else if isLegacy {
-            let suppliedSessionIDs = head.headers.values(named: "mcp-session-id")
-            guard suppliedSessionIDs.count == 1, !suppliedSessionIDs[0].isEmpty else {
-                Self.sendResponse(descriptor, status: 400,
-                                  body: Self.errorBody(code: -32020, message: "Mcp-Session-Id is required"))
-                return
-            }
-            let suppliedSessionID = suppliedSessionIDs[0]
-            sessionID = suppliedSessionID
-            guard let sessionHandler = acquireSession(suppliedSessionID) else {
-                Self.sendResponse(descriptor, status: 404,
-                                  body: Self.errorBody(code: -32021, message: "MCP session not found"))
-                return
-            }
-            response = sessionHandler(request)
-            releaseSession(suppliedSessionID)
         } else {
-            response = handlerFactory()(request)
+            let invocation = runModernRequest(handler: handlerFactory(), request: request, descriptor: descriptor)
+            response = invocation.response
+            if invocation.disconnected { return }
         }
         let responseVersion = ((response?["result"] as? [String: Any])?["protocolVersion"] as? String) ?? protocolVersion
         var protocolHeaders = ["MCP-Protocol-Version": responseVersion]
@@ -432,19 +468,48 @@ public final class HTTPMCPServer: @unchecked Sendable {
         Self.sendResponse(descriptor, status: Self.httpStatus(for: response), body: responseData, headers: protocolHeaders)
     }
 
+    private func runModernRequest(handler: @escaping Handler, request: [String: Any], descriptor: Int32)
+        -> (response: [String: Any]?, disconnected: Bool) {
+        let invocation = ModernInvocation(handler: handler, request: request)
+        DispatchQueue.global(qos: .userInitiated).async { invocation.run() }
+        invocation.started.wait()
+        while invocation.finished.wait(timeout: .now() + .milliseconds(20)) != .success {
+            if Self.clientDisconnected(descriptor) {
+                invocation.cancel()
+                if invocation.finished.wait(timeout: .now() + .milliseconds(10)) != .success {
+                    invocation.cancel()
+                    invocation.finished.wait()
+                }
+                return (invocation.response, true)
+            }
+        }
+        return (invocation.response, false)
+    }
+
+    private static func clientDisconnected(_ descriptor: Int32) -> Bool {
+        var item = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+        let result = Darwin.poll(&item, 1, 0)
+        guard result > 0 else { return false }
+        if item.revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 { return true }
+        guard item.revents & Int16(POLLIN) != 0 else { return false }
+        var byte: UInt8 = 0
+        let count = Darwin.recv(descriptor, &byte, 1, MSG_PEEK | MSG_DONTWAIT)
+        return count == 0
+    }
+
     private func storeSession(handler: @escaping Handler) -> String? {
         sessionLock.withLock {
             let now = DispatchTime.now().uptimeNanoseconds
             removeExpiredSessions(now: now)
-            if legacySessions.count >= configuration.maximumSessions {
-                guard let oldest = legacySessions
+            if sessions.count >= configuration.maximumSessions {
+                guard let oldest = sessions
                     .filter({ $0.value.activeRequests == 0 })
                     .min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key else { return nil }
-                legacySessions.removeValue(forKey: oldest)
+                sessions.removeValue(forKey: oldest)
             }
             var identifier: String
-            repeat { identifier = Self.randomSessionID() } while legacySessions[identifier] != nil
-            legacySessions[identifier] = LegacySession(handler: handler, lastAccess: now, activeRequests: 0)
+            repeat { identifier = Self.randomSessionID() } while sessions[identifier] != nil
+            sessions[identifier] = Session(handler: handler, lastAccess: now, activeRequests: 0)
             return identifier
         }
     }
@@ -453,26 +518,26 @@ public final class HTTPMCPServer: @unchecked Sendable {
         sessionLock.withLock {
             let now = DispatchTime.now().uptimeNanoseconds
             removeExpiredSessions(now: now)
-            guard var session = legacySessions[identifier] else { return nil }
+            guard var session = sessions[identifier] else { return nil }
             session.lastAccess = now
             session.activeRequests += 1
-            legacySessions[identifier] = session
+            sessions[identifier] = session
             return session.handler
         }
     }
 
     private func releaseSession(_ identifier: String) {
         sessionLock.withLock {
-            guard var session = legacySessions[identifier] else { return }
+            guard var session = sessions[identifier] else { return }
             session.activeRequests = max(0, session.activeRequests - 1)
             session.lastAccess = DispatchTime.now().uptimeNanoseconds
-            legacySessions[identifier] = session
+            sessions[identifier] = session
         }
     }
 
     private func removeExpiredSessions(now: UInt64) {
         let ttl = UInt64(configuration.sessionTTL * 1_000_000_000)
-        legacySessions = legacySessions.filter { _, session in
+        sessions = sessions.filter { _, session in
             session.activeRequests > 0 || now < session.lastAccess || now - session.lastAccess < ttl
         }
     }

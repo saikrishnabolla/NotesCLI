@@ -222,22 +222,29 @@ final class HTTPTransportTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(try XCTUnwrap(responseB.value).hasPrefix("HTTP/1.1 200"), responseB.value ?? "")
     }
 
-    func testModernHTTPCancellationReachesTheRunningRequest() throws {
+    func testModernHTTPDisconnectCancelsTheRunningRequest() throws {
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
+        let cancellationReceived = DispatchSemaphore(value: 0)
+        let requestCancelled = DispatchSemaphore(value: 0)
+        let requestFinished = DispatchSemaphore(value: 0)
         let mcp = MCPServer(reader: InMemoryNotes.sample(), allowNative: true, nativeHandler: { _, _ in
             entered.signal()
             _ = release.wait(timeout: .now() + 5)
             return try MCPNativeResult(value: ["items": [String]()])
         }, exposureProfile: .remote)
-        let modernConnection = mcp.makeConnection()
         let server = try makeServer(maximumConcurrentConnections: 4, handlerFactory: {
-            let legacyConnection = mcp.makeConnection()
+            let connection = mcp.makeConnection()
             return { request in
-                let metadata = (request["params"] as? [String: Any])?["_meta"] as? [String: Any]
-                let connection = metadata?[MCPProtocol.protocolVersionKey] as? String == MCPProtocol.modernVersion
-                    ? modernConnection : legacyConnection
-                return mcp.handle(request, connection: connection)
+                if request["method"] as? String == "notifications/cancelled" {
+                    cancellationReceived.signal()
+                }
+                let response = mcp.handle(request, connection: connection)
+                if request["id"] != nil {
+                    if response == nil { requestCancelled.signal() }
+                    requestFinished.signal()
+                }
+                return response
             }
         }) { _ in nil }
         let endpoint = try server.start()
@@ -248,24 +255,78 @@ final class HTTPTransportTests: XCTestCase, @unchecked Sendable {
         let callObject: [String: Any] = ["jsonrpc": "2.0", "id": 77, "method": "tools/call",
                                         "params": ["name": "checklist_list", "arguments": ["ref": "welcome"], "_meta": meta]]
         let callBody = String(decoding: try JSONSerialization.data(withJSONObject: callObject), as: UTF8.self)
-        let response = HTTPResponseBox()
-        let completed = expectation(description: "cancelled request completes")
+        let descriptor = try openConnection(port: endpoint.port,
+            request: authorizedRequest(body: callBody, method: "tools/call", name: "checklist_list"))
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        Darwin.close(descriptor)
+        XCTAssertEqual(cancellationReceived.wait(timeout: .now() + 2), .success)
+        release.signal()
+        XCTAssertEqual(requestCancelled.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(requestFinished.wait(timeout: .now() + 2), .success)
+    }
+
+    func testModernStatelessRequestsIsolateMatchingRequestIDs() throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let mcp = MCPServer(reader: InMemoryNotes.sample(), allowNative: true, nativeHandler: { _, _ in
+            entered.signal()
+            _ = release.wait(timeout: .now() + 5)
+            return try MCPNativeResult(value: ["items": [String]()])
+        }, exposureProfile: .remote)
+        let server = try makeServer(maximumConcurrentConnections: 4, handlerFactory: {
+            let connection = mcp.makeConnection()
+            return { mcp.handle($0, connection: connection) }
+        }) { _ in nil }
+        let endpoint = try server.start()
+        defer {
+            release.signal()
+            release.signal()
+            server.stop()
+        }
+
+        let meta: [String: Any] = [MCPProtocol.protocolVersionKey: MCPProtocol.modernVersion,
+                                   MCPProtocol.clientCapabilitiesKey: [String: Any]()]
+        let callObject: [String: Any] = ["jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                                         "params": ["name": "checklist_list", "arguments": ["ref": "welcome"],
+                                                    "_meta": meta]]
+        let callBody = String(decoding: try JSONSerialization.data(withJSONObject: callObject), as: UTF8.self)
+        let responseA = HTTPResponseBox()
+        let responseB = HTTPResponseBox()
+        let completed = expectation(description: "both modern session requests complete")
+        completed.expectedFulfillmentCount = 2
         DispatchQueue.global().async {
-            response.value = try? self.exchange(port: endpoint.port,
+            responseA.value = try? self.exchange(port: endpoint.port,
+                request: self.authorizedRequest(body: callBody, method: "tools/call", name: "checklist_list"))
+            completed.fulfill()
+        }
+        DispatchQueue.global().async {
+            responseB.value = try? self.exchange(port: endpoint.port,
                 request: self.authorizedRequest(body: callBody, method: "tools/call", name: "checklist_list"))
             completed.fulfill()
         }
         XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
-
-        let cancelObject: [String: Any] = ["jsonrpc": "2.0", "method": "notifications/cancelled",
-                                          "params": ["requestId": 77, "reason": "test", "_meta": meta]]
-        let cancelBody = String(decoding: try JSONSerialization.data(withJSONObject: cancelObject), as: UTF8.self)
-        let accepted = try exchange(port: endpoint.port,
-                                    request: authorizedRequest(body: cancelBody, method: "notifications/cancelled"))
-        XCTAssertTrue(accepted.hasPrefix("HTTP/1.1 202"), accepted)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        release.signal()
         release.signal()
         wait(for: [completed], timeout: 5)
-        XCTAssertTrue(try XCTUnwrap(response.value).hasPrefix("HTTP/1.1 202"), response.value ?? "")
+
+        XCTAssertTrue(try XCTUnwrap(responseA.value).hasPrefix("HTTP/1.1 200"), responseA.value ?? "")
+        XCTAssertTrue(try XCTUnwrap(responseB.value).hasPrefix("HTTP/1.1 200"), responseB.value ?? "")
+    }
+
+    func testModernTransportIgnoresSessionHeadersAndDoesNotMintThem() throws {
+        let server = try makeServer { request in
+            ["jsonrpc": "2.0", "id": request["id"] ?? NSNull(), "result": [:]]
+        }
+        let endpoint = try server.start()
+        defer { server.stop() }
+
+        let body = modernBody(id: 1, method: "server/discover")
+        let response = try exchange(port: endpoint.port,
+                                    request: authorizedRequest(body: body, method: "server/discover",
+                                                               sessionID: "ignored-client-session"))
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 200"), response)
+        XCTAssertNil(header("Mcp-Session-Id", in: response), response)
     }
 
     func testUnauthorizedRequestIsRejectedBeforeDeclaredBodyIsRead() throws {
@@ -542,9 +603,11 @@ final class HTTPTransportTests: XCTestCase, @unchecked Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func authorizedRequest(body: String, method: String, name: String? = nil, token: String = "test-token", accept: String = "application/json, text/event-stream") -> String {
+    private func authorizedRequest(body: String, method: String, name: String? = nil, token: String = "test-token",
+                                   accept: String = "application/json, text/event-stream", sessionID: String? = nil) -> String {
         var headers = "POST /notescli HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nAccept: \(accept)\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: \(method)\r\n"
         if let name { headers += "Mcp-Name: \(name)\r\n" }
+        if let sessionID { headers += "Mcp-Session-Id: \(sessionID)\r\n" }
         return headers + "Content-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
     }
 
@@ -566,35 +629,13 @@ final class HTTPTransportTests: XCTestCase, @unchecked Sendable {
         return nil
     }
 
-    private func exchange(port: UInt16, request: String, shutdownWrite: Bool = true) throws -> String {
-        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+    private func exchange(port: UInt16, request: String, shutdownWrite: Bool = false) throws -> String {
+        let descriptor = try openConnection(port: port, request: request)
         defer { Darwin.close(descriptor) }
 
         var timeout = timeval(tv_sec: 3, tv_usec: 0)
         _ = withUnsafePointer(to: &timeout) {
             setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
-        }
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = port.bigEndian
-        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
-        let connected = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard connected == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-
-        let bytes = Array(request.utf8)
-        try bytes.withUnsafeBytes { raw in
-            var sent = 0
-            while sent < raw.count {
-                let count = Darwin.send(descriptor, raw.baseAddress!.advanced(by: sent), raw.count - sent, 0)
-                guard count > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                sent += count
-            }
         }
         if shutdownWrite { Darwin.shutdown(descriptor, SHUT_WR) }
 
@@ -613,6 +654,37 @@ final class HTTPTransportTests: XCTestCase, @unchecked Sendable {
             }
         }
         return String(decoding: response, as: UTF8.self)
+    }
+
+    private func openConnection(port: UInt16, request: String) throws -> Int32 {
+        let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        do {
+            var address = sockaddr_in()
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = port.bigEndian
+            inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+            let connected = withUnsafePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            guard connected == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let bytes = Array(request.utf8)
+            try bytes.withUnsafeBytes { raw in
+                var sent = 0
+                while sent < raw.count {
+                    let count = Darwin.send(descriptor, raw.baseAddress!.advanced(by: sent), raw.count - sent, 0)
+                    guard count > 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                    sent += count
+                }
+            }
+            return descriptor
+        } catch {
+            Darwin.close(descriptor)
+            throw error
+        }
     }
 }
 

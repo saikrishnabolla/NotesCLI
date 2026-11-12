@@ -22,6 +22,45 @@ final class CLITests: XCTestCase {
         return home
     }
 
+    func testCapabilityHostStdioMCPUsesRemoteSafeToolExposure() throws {
+        let initialize = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"#
+        let list = #"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#
+        let hiddenCall = #"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"save_attachment","arguments":{"ref":"welcome","attachment_id":"x","output":"/tmp/x"}}}"#
+        let strippedField = #"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"create_note","arguments":{"title":"No","body":"No","attachments":["/etc/passwd"]}}}"#
+        let result = try run(["--backend", "fake", "mcp", "--allow-native"],
+                             input: [initialize, list, hiddenCall, strippedField].joined(separator: "\n") + "\n",
+                             environment: ["NOTESCLI_HOST_ACTIVE": "1"])
+        XCTAssertEqual(result.0, 0, result.2)
+        let lines = result.1.split(separator: "\n")
+        XCTAssertEqual(lines.count, 4, result.1)
+        let responses = try lines.reduce(into: [Int: [String: Any]]()) { values, line in
+            let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            let id = try XCTUnwrap(response["id"] as? Int)
+            values[id] = response
+        }
+        let response = try XCTUnwrap(responses[2])
+        let tools = try XCTUnwrap((response["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let names = Set(tools.compactMap { $0["name"] as? String })
+        let pathTools: Set<String> = [
+            "save_attachment", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes",
+            "recording_add", "recording_create", "attach_file", "diagram_add", "drawing_add", "drawing_create",
+        ]
+        XCTAssertTrue(pathTools.isDisjoint(with: names))
+        for tool in tools {
+            let properties = ((tool["inputSchema"] as? [String: Any])?["properties"] as? [String: Any]) ?? [:]
+            XCTAssertTrue(Set(["path", "file", "output", "directory", "transcript_path"])
+                .isDisjoint(with: properties.keys), String(describing: tool["name"]))
+        }
+        let create = try XCTUnwrap(tools.first { $0["name"] as? String == "create_note" })
+        let createProperties = try XCTUnwrap((create["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
+        XCTAssertNil(createProperties["attachments"])
+        let hiddenResponse = try XCTUnwrap(responses[3])
+        XCTAssertEqual((hiddenResponse["error"] as? [String: Any])?["code"] as? Int, -32602)
+        let strippedResponse = try XCTUnwrap(responses[4])
+        XCTAssertEqual((strippedResponse["error"] as? [String: Any])?["message"] as? String,
+                       "Unknown argument: attachments")
+    }
+
     func testDoctorAgentReadinessHasStableAccessContract() throws {
         let result = try run(["--backend", "fake", "doctor", "--for-agent", "--json"])
         XCTAssertEqual(result.0, 0, result.2)

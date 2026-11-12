@@ -11,6 +11,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "notescli", targets: ["notescli"]),
+        .executable(name: "NotesCLI Capability Host", targets: ["NotesCapabilityHost"]),
         .library(name: "NotesCore", targets: ["NotesCore"]),
         .library(name: "NotesSync", targets: ["NotesSync"]),
         .library(name: "NotesSafety", targets: ["NotesSafety"]),
@@ -38,6 +39,10 @@ let package = Package(
         .target(name: "NotesDiagrams", dependencies: ["NotesCore"], linkerSettings: [
             .linkedFramework("AppKit"), .linkedFramework("CoreGraphics"), .linkedFramework("WebKit")
         ]),
+        .target(name: "NotesHost"),
+        .executableTarget(name: "NotesCapabilityHost", dependencies: ["NotesHost"], linkerSettings: [
+            .linkedFramework("AppKit"), .linkedFramework("Security")
+        ]),
         // MCP server over stdio, same operations as the CLI.
         // Write journal, snapshots/undo, and the write-folder allowlist.
         .target(name: "NotesSafety", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
@@ -51,7 +56,7 @@ let package = Package(
             .linkedFramework("PDFKit"),
         ]),
         .executableTarget(name: "notescli", dependencies: [
-            "NotesCore", "NotesStore", "NotesIndex", "NotesAutomation", "NotesNative", "NotesMCP", "NotesSync", "NotesSafety", "NotesDiagrams",
+            "NotesCore", "NotesStore", "NotesIndex", "NotesAutomation", "NotesNative", "NotesMCP", "NotesSync", "NotesSafety", "NotesDiagrams", "NotesHost",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ], exclude: ["Info.plist"], linkerSettings: [.unsafeFlags([
             "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
@@ -66,5 +71,6 @@ let package = Package(
         .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore", "NotesSafety"]),
         .testTarget(name: "NotesSyncTests", dependencies: ["NotesSync", "NotesCore"]),
         .testTarget(name: "NotesDiagramsTests", dependencies: ["NotesDiagrams", "NotesCore"]),
+        .testTarget(name: "NotesHostTests", dependencies: ["NotesHost"]),
     ]
 )

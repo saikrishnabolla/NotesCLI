@@ -17,6 +17,9 @@ public enum SpeechHelper {
     static var executable: URL? {
         let environment = ProcessInfo.processInfo.environment
         if environment[inProcessKey] == "1" { return nil }
+        // A command launched by the signed Capability Host must keep the host as its responsible
+        // process so one permission grant covers speech as well as Notes access.
+        if environment["NOTESCLI_HOST_ACTIVE"] == "1" { return nil }
         if let path = environment["NOTESCLI_SPEECH_HELPER"], !path.isEmpty { return URL(fileURLWithPath: path) }
         guard let url = Bundle.main.executableURL, url.lastPathComponent == "notescli" else { return nil }
         return url

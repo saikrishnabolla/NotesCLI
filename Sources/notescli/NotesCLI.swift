@@ -5,12 +5,13 @@ import NotesMCP
 import NotesAutomation
 import NotesNative
 import NotesSafety
+import NotesHost
 import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
     static let version = notesCLIVersion
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self, HostCommand.self])
     @OptionGroup var options: GlobalOptions
     @Flag(name: .customLong("no-recent"), help: "Hide recently edited titles on the home screen. Also set by NOTESCLI_HOME_RECENT=0.")
     var noRecent = false
@@ -33,7 +34,13 @@ struct NotesCLI: ParsableCommand {
     }
 
     static func main() {
-        do { var command = try parseAsRoot(); try command.run() }
+        do {
+            if shouldUseCapabilityHost() {
+                Darwin.exit(try CapabilityHostClient.run(arguments: Array(CommandLine.arguments.dropFirst())))
+            }
+            var command = try parseAsRoot()
+            try command.run()
+        }
         catch {
             if let e = error as? NotesError { fail(e) }
             let code = exitCode(for: error).rawValue
@@ -47,6 +54,23 @@ struct NotesCLI: ParsableCommand {
             FileHandle.standardError.write(Data((diagnostic + "\n").utf8))
             Darwin.exit(code == 64 ? 2 : 1)
         }
+    }
+
+    private static func shouldUseCapabilityHost() -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["NOTESCLI_HOST_ACTIVE"] == "1" { return false }
+        let route = CapabilityHostRoute(rawValue: environment["NOTESCLI_CAPABILITY_HOST"] ?? "auto") ?? .auto
+        if route == .direct { return false }
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let localCommands = Set(["host", "onboard", "setup", "permissions", "doctor", "completion", "speech-helper"])
+        if arguments.contains(where: localCommands.contains) || arguments.contains("--help") || arguments.contains("-h") || arguments.contains("--version") {
+            return false
+        }
+        if let index = arguments.firstIndex(of: "mcp"), arguments.indices.contains(index + 1),
+           ["install", "uninstall", "status", "config", "remove"].contains(arguments[index + 1]) {
+            return false
+        }
+        return route == .force || CapabilityHostClient.isAvailable()
     }
     static func fail(_ e: NotesError, status: Int32? = nil) -> Never {
         if CommandLine.arguments.contains("--json"), let data = try? NotePresentation.json(e) { FileHandle.standardError.write(data + Data("\n".utf8)) }

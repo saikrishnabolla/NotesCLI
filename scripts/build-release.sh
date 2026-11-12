@@ -5,11 +5,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${NOTESCLI_VERSION:-1.0.0}"
 IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bolla (GXKRUPGJVF)}"
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
+HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"
 ENTITLEMENTS="$ROOT/packaging/macos/notescli.entitlements"
 OUTPUT_DIR="${NOTESCLI_RELEASE_DIR:-$ROOT/dist}"
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "build-release.sh requires macOS." >&2; exit 1; }
-[[ -f "$INFO_PLIST" && -f "$ENTITLEMENTS" ]] || { echo "Release metadata is missing." >&2; exit 1; }
+[[ -f "$INFO_PLIST" && -f "$HOST_INFO_PLIST" && -f "$ENTITLEMENTS" ]] || { echo "Release metadata is missing." >&2; exit 1; }
 
 mkdir -p "$OUTPUT_DIR"
 STAGING="$(mktemp -d "$ROOT/.build/notescli-release.XXXXXX")"
@@ -17,23 +18,38 @@ trap 'rm -rf -- "$STAGING"' EXIT
 RELEASE_INFO_PLIST="$STAGING/Info.plist"
 cp "$INFO_PLIST" "$RELEASE_INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$RELEASE_INFO_PLIST"
+HOST_APP="$STAGING/NotesCLI Capability Host.app"
+mkdir -p "$HOST_APP/Contents/MacOS" "$HOST_APP/Contents/Resources"
+cp "$HOST_INFO_PLIST" "$HOST_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$HOST_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$HOST_APP/Contents/Info.plist"
 
 echo "Building notescli $VERSION for arm64 and x86_64"
 NOTESCLI_INFO_PLIST="$RELEASE_INFO_PLIST" swift build --package-path "$ROOT" -c release --arch arm64 --arch x86_64
 
 BUILT="$ROOT/.build/apple/Products/Release/notescli"
+BUILT_HOST="$ROOT/.build/apple/Products/Release/NotesCLI Capability Host"
 if [[ ! -x "$BUILT" ]]; then
     BUILT="$ROOT/.build/release/notescli"
+    BUILT_HOST="$ROOT/.build/release/NotesCLI Capability Host"
 fi
 [[ -x "$BUILT" ]] || { echo "Could not find the release executable." >&2; exit 1; }
+[[ -x "$BUILT_HOST" ]] || { echo "Could not find the capability-host executable." >&2; exit 1; }
 
 cp "$BUILT" "$STAGING/notescli"
+cp "$BUILT_HOST" "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
 if [[ "$IDENTITY" == "-" ]]; then
     echo "Signing ad hoc because NOTESCLI_SIGNING_IDENTITY=-"
     codesign --force --sign - "$STAGING/notescli"
 else
     echo "Signing with $IDENTITY"
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$STAGING/notescli"
+fi
+cp "$STAGING/notescli" "$HOST_APP/Contents/Resources/notescli"
+if [[ "$IDENTITY" == "-" ]]; then
+    codesign --force --deep --sign - "$HOST_APP"
+else
+    codesign --force --deep --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP"
 fi
 
 ARCHITECTURES="$(lipo -archs "$STAGING/notescli")"
@@ -43,6 +59,7 @@ ARCHITECTURES="$(lipo -archs "$STAGING/notescli")"
 }
 echo "Architectures: $ARCHITECTURES"
 codesign --verify --strict --verbose=4 "$STAGING/notescli"
+codesign --verify --deep --strict --verbose=4 "$HOST_APP"
 codesign -d --verbose=4 --entitlements - "$STAGING/notescli" 2>&1
 
 lipo "$STAGING/notescli" -thin x86_64 -output "$STAGING/notescli-x86_64"
@@ -75,8 +92,8 @@ ZIP="$OUTPUT_DIR/notescli-$VERSION-macos-universal.zip"
 TARBALL="$OUTPUT_DIR/notescli-$VERSION-macos-universal.tar.gz"
 CHECKSUMS="$OUTPUT_DIR/notescli-$VERSION-macos-universal.sha256"
 rm -f -- "$ZIP" "$TARBALL" "$CHECKSUMS"
-(cd "$STAGING" && zip -q -X "$ZIP" notescli)
-COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$STAGING" notescli
+(cd "$STAGING" && zip -q -X -r "$ZIP" notescli "NotesCLI Capability Host.app")
+COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$STAGING" notescli "NotesCLI Capability Host.app"
 (cd "$OUTPUT_DIR" && shasum -a 256 "$(basename "$ZIP")" "$(basename "$TARBALL")") > "$CHECKSUMS"
 
 "$ROOT/scripts/update-formula.sh" --version "$VERSION" --archive "$TARBALL"

@@ -10,6 +10,7 @@ class Notescli < Formula
 
   def install
     bin.install "notescli"
+    libexec.install "NotesCLI Capability Host.app"
   end
 
   test do

@@ -16,7 +16,7 @@ notescli setup
 From a release archive:
 
 ```bash
-tar -xzf notescli-1.0.0-macos-universal.tar.gz
+tar -xzf notescli-1.0.1-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
 notescli setup
 ```

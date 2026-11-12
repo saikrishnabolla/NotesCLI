@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.1
+
+### Fixed
+
+- On macOS 26, a missing divider selector no longer disables every native feature. Only dividers are unavailable, and `capabilities` says so.
+- The release zip contains only the `notescli` binary.
+
 ## 1.0.0
 
 ### Added

@@ -55,12 +55,12 @@ enum TailscaleMCP {
 
     static func install(executable: String, allowNative: Bool) throws -> MCPHTTPConfiguration {
         let tailscale = try tailscaleStatus()
-        var config = (try? loadConfiguration()) ?? MCPHTTPConfiguration(
-            token: try newToken(),
-            tailscaleHostname: tailscale.hostname,
-            tailscaleIPs: tailscale.ips,
-            allowNative: allowNative
-        )
+        var config: MCPHTTPConfiguration
+        if let existing = try? loadConfiguration() { config = existing }
+        else {
+            config = MCPHTTPConfiguration(token: try newToken(), tailscaleHostname: tailscale.hostname,
+                                          tailscaleIPs: tailscale.ips, allowNative: allowNative)
+        }
         config.tailscaleHostname = tailscale.hostname
         config.tailscaleIPs = tailscale.ips
         config.allowNative = allowNative

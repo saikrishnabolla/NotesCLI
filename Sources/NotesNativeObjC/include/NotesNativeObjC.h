@@ -41,6 +41,12 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSString *)addFile:(NSURL *)file toNote:(NSManagedObject *)note title:(NSString *)title
                            type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
     NS_SWIFT_NAME(addFile(_:to:title:type:));
++ (nullable NSArray<NSString *> *)transformAudioAttachment:(NSManagedObject *)attachment duration:(double)duration
+                                                     error:(NSError **)error
+    NS_SWIFT_NAME(transformAudioAttachment(_:duration:));
++ (nullable NSNumber *)appendTranscriptSegments:(NSArray<NSDictionary<NSString *, id> *> *)segments
+                              toAudioAttachment:(NSManagedObject *)attachment error:(NSError **)error
+    NS_SWIFT_NAME(appendTranscriptSegments(_:toAudioAttachment:));
 + (nullable NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note
                           type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
     NS_SWIFT_NAME(addURL(_:to:type:));

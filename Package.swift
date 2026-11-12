@@ -26,7 +26,9 @@ let package = Package(
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
         // macOS: rich writes through NotesShared, loaded only at runtime.
         .target(name: "NotesNativeObjC", linkerSettings: [.linkedFramework("CoreData"), .linkedFramework("AppKit")]),
-        .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"]),
+        .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"], linkerSettings: [
+            .linkedFramework("AVFoundation"), .linkedFramework("Speech")
+        ]),
         // MCP server over stdio, same operations as the CLI.
         // Write journal, snapshots/undo, and the write-folder allowlist.
         .target(name: "NotesSafety", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),

@@ -53,6 +53,11 @@ otool -X -s __TEXT __info_plist "$STAGING/notescli-x86_64" | cut -f2- | tr -d ' 
     exit 1
 }
 echo "Embedded Info.plist: NSAppleEventsUsageDescription present"
+[[ "$(plutil -extract NSSpeechRecognitionUsageDescription raw "$STAGING/embedded-Info.plist")" == "NotesCLI uses on-device speech recognition to transcribe audio recordings you add to Apple Notes." ]] || {
+    echo "The embedded Info.plist is missing NSSpeechRecognitionUsageDescription." >&2
+    exit 1
+}
+echo "Embedded Info.plist: NSSpeechRecognitionUsageDescription present"
 
 set +e
 SPCTL_OUTPUT="$(spctl -a -t install -vv "$STAGING/notescli" 2>&1)"

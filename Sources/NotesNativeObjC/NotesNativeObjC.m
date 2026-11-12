@@ -404,6 +404,73 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
     if (type) *type = kind;
     return identifier;
 }
++ (NSArray<NSString *> *)transformAudioAttachment:(NSManagedObject *)attachment duration:(double)duration error:(NSError **)error {
+    if (!NCRequireObject(attachment, @[@"attachmentModel", @"setDuration:", @"updateChangeCountWithReason:", @"subAttachments"], @"creating audio recording", error)) return nil;
+    __block id model = nil;
+    if (!NCCatch(@"opening audio attachment", error, ^{ model = [(id<NCSynced>)attachment attachmentModel]; })) return nil;
+    if (!NCRequireObject(model, @[@"setRecordedInNotes:", @"transformNewlyAddedMediaAttachment", @"writeMergeableData"], @"creating audio recording", error)) return nil;
+    __block NSArray<NSString *> *identifiers = nil;
+    if (!NCCatch(@"creating audio recording", error, ^{
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(model, NSSelectorFromString(@"setRecordedInNotes:"), YES);
+        ((void (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"transformNewlyAddedMediaAttachment"));
+        [attachment setValue:@(duration) forKey:@"duration"];
+        NSArray *children = [[[attachment valueForKey:@"subAttachments"] allObjects] sortedArrayUsingComparator:^NSComparisonResult(id left, id right) {
+            return [[left valueForKey:@"identifier"] compare:[right valueForKey:@"identifier"]];
+        }];
+        NSMutableArray<NSString *> *values = [NSMutableArray arrayWithCapacity:children.count];
+        for (id child in children) {
+            if (!NCRequireObject(child, @[@"identifier", @"setDuration:"], @"setting audio fragment duration", error)) return;
+            [child setValue:@(duration) forKey:@"duration"];
+            NSString *identifier = [child valueForKey:@"identifier"];
+            if (identifier.length) [values addObject:identifier];
+        }
+        ((void (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"writeMergeableData"));
+        [(id<NCSynced>)attachment updateChangeCountWithReason:@"Added audio recording"];
+        identifiers = values;
+    })) return nil;
+    if (!identifiers) { if (error && !*error) *error = NCError(@"Notes created no audio fragment"); return nil; }
+    return identifiers;
+}
++ (NSNumber *)appendTranscriptSegments:(NSArray<NSDictionary<NSString *,id> *> *)segments toAudioAttachment:(NSManagedObject *)attachment error:(NSError **)error {
+    if (!NCRequireObject(attachment, @[@"attachmentModel", @"updateChangeCountWithReason:"], @"writing audio transcript", error)) return nil;
+    __block id model = nil;
+    if (!NCCatch(@"opening audio transcript", error, ^{ model = [(id<NCSynced>)attachment attachmentModel]; })) return nil;
+    if (!NCRequireObject(model, @[@"audioDocument", @"writeMergeableData"], @"writing audio transcript", error)) return nil;
+    Class segmentClass = NSClassFromString(@"NotesShared.ICTTTranscriptSegment");
+    if (!segmentClass || !NCRequireInstanceClass(segmentClass, @[@"initWithDocument:identity:", @"setText:", @"setTimestamp:", @"setDuration:", @"setSpeaker:"], @"writing audio transcript", error)) return nil;
+    __block NSNumber *count = nil;
+    if (!NCCatch(@"writing audio transcript", error, ^{
+        id audioDocument = ((id (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"audioDocument"));
+        if (!NCRequireObject(audioDocument, @[@"document", @"orderedFragmentUUIDs"], @"opening audio document", error)) return;
+        id document = [audioDocument valueForKey:@"document"];
+        if (!NCRequireObject(document, @[@"objects"], @"opening audio document objects", error)) return;
+        NSArray *fragmentUUIDs = [audioDocument valueForKey:@"orderedFragmentUUIDs"];
+        id fragmentUUID = fragmentUUIDs.firstObject;
+        id fragment = fragmentUUID ? [[document valueForKey:@"objects"] objectForKey:fragmentUUID] : nil;
+        if (!fragment || !NCRequireObject(fragment, @[@"transcript", @"setTranscriptVersion:"], @"opening audio fragment transcript", error)) return;
+        id transcript = [fragment valueForKey:@"transcript"];
+        if (!NCRequireObject(transcript, @[@"addObject:", @"count"], @"writing audio transcript segments", error)) return;
+        if ([[transcript valueForKey:@"count"] unsignedIntegerValue] != 0) {
+            if (error) *error = NCError(@"The recording already has a transcript");
+            return;
+        }
+        for (NSDictionary<NSString *, id> *row in segments) {
+            id segment = ((id (*)(id, SEL, id, id))objc_msgSend)([segmentClass alloc], NSSelectorFromString(@"initWithDocument:identity:"), document, NSUUID.UUID);
+            if (!segment) { if (error) *error = NCError(@"Notes could not create a transcript segment"); return; }
+            [segment setValue:row[@"text"] ?: @"" forKey:@"text"];
+            [segment setValue:row[@"start"] ?: @0 forKey:@"timestamp"];
+            [segment setValue:row[@"duration"] ?: @0 forKey:@"duration"];
+            [segment setValue:row[@"speaker"] forKey:@"speaker"];
+            ((void (*)(id, SEL, id))objc_msgSend)(transcript, NSSelectorFromString(@"addObject:"), segment);
+        }
+        [fragment setValue:@1 forKey:@"transcriptVersion"];
+        ((void (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"writeMergeableData"));
+        [(id<NCSynced>)attachment updateChangeCountWithReason:@"Added audio transcript"];
+        count = @([[transcript valueForKey:@"count"] unsignedIntegerValue]);
+    })) return nil;
+    if (!count && error && !*error) *error = NCError(@"Notes could not write the audio transcript");
+    return count;
+}
 + (NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {
     if (!NCRequireObject(note, @[@"addURLAttachmentWithURL:"], @"adding URL preview", error)) return nil;
     __block NSString *identifier = nil, *kind = nil;

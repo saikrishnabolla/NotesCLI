@@ -122,6 +122,23 @@ public struct NativeCreateResult: Codable, Sendable {
     public var write: NativeWriteResult
 }
 
+public struct NativeRecordingResult: Codable, Sendable {
+    public var attachmentID: String
+    public var childAttachmentIDs: [String]
+    public var duration: Double
+    public var transcriptSegments: Int
+    public var write: NativeWriteResult
+
+    public init(attachmentID: String, childAttachmentIDs: [String], duration: Double,
+                transcriptSegments: Int, write: NativeWriteResult) {
+        self.attachmentID = attachmentID
+        self.childAttachmentIDs = childAttachmentIDs
+        self.duration = duration
+        self.transcriptSegments = transcriptSegments
+        self.write = write
+    }
+}
+
 public struct NativeTable: Codable, Sendable, Equatable {
     public var attachmentID: String
     public var rows: [[String]]
@@ -179,6 +196,11 @@ public protocol NotesNativeWriting {
     func insertFile(_ ref: String, file: URL, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
     func insertFrozenFile(_ ref: String, frozen: FrozenAttachmentInput, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
     func createNote(title: String, markdown: String, folder: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult
+    func insertRecording(_ ref: String, frozen: FrozenAttachmentInput, title: String?, duration: Double,
+                         transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult
+    func createRecordingNote(folder: String?, title: String, frozen: FrozenAttachmentInput, duration: Double,
+                             transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult
+    func writeRecordingTranscripts(_ ref: String, transcripts: [String: [TranscriptWord]], allowShared: Bool) throws -> NativeWriteResult
     func insertURL(_ ref: String, url: URL, card: Bool, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func deleteAttachment(_ ref: String, attachmentID: String, allowShared: Bool) throws -> NativeWriteResult
     func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult

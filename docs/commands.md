@@ -112,13 +112,17 @@ notescli format paragraph|inline ...
 notescli attach <ref> <path> [--position <position>] [--view <view>]
 notescli attach <ref> --pasteboard [--position <position>] [--view <view>]
 notescli attachment delete <ref> <attachment-id>
+notescli recording add <ref> --file <audio> [--transcribe] [--title <title>] [--locale <locale>]
+notescli recording create --folder <folder> --title <title> --file <audio> [--transcribe] [--locale <locale>]
+notescli recording transcribe <ref> [--attachment <id>] [--locale <locale>]
+notescli recording transcript <ref> [--format text|srt|vtt|json]
 notescli table create|set|add-row|add-column|remove-row|remove-column ...
 notescli duplicate <ref> [--title <title>]
 notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. Transcription stays on device and is stored in Notes' native transcript data. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
 All write commands accept `--dry-run`, `--idempotency-key`, `--write-folders`, `--if-modified`, `--expect-revision`, `--allow-shared`, `--wait-sync`, and `--sync-timeout`. Shared-note writes require native mode and Notes write permission. A sync timeout leaves the write verified and returns `syncPending: true`. Body rewrites also accept `--allow-attachment-loss`.
 
@@ -165,7 +169,7 @@ notescli doctor
 notescli completion [zsh|bash|fish]
 ```
 
-`setup` connects supported MCP clients and opens permission settings. `permissions` opens Full Disk Access and requests Notes Automation access.
+`setup` connects supported MCP clients and opens permission settings. `permissions` opens Full Disk Access and requests Notes Automation and Speech Recognition access.
 
 ## MCP
 

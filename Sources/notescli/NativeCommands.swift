@@ -35,6 +35,11 @@ struct NativeActionResult {
         details = ["attachment_id": value.attachmentID, "type_uti": value.typeUTI, "position": String(value.position),
                    "source_sha256": value.sourceSHA256 ?? "", "stored_sha256": value.storedSHA256 ?? ""]
     }
+    init(_ value: NativeRecordingResult) {
+        result = value.write.writeResult; operationID = value.write.operationID; verification = value.write.verification
+        details = ["attachment_id": value.attachmentID, "fragment_ids": value.childAttachmentIDs.joined(separator: ","),
+                   "duration": String(value.duration), "transcript_segments": String(value.transcriptSegments)]
+    }
     init(_ value: WriteResult) { result = value; operationID = nil; verification = nil; details = nil }
 }
 

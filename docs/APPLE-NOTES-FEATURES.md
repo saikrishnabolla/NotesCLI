@@ -9,8 +9,8 @@ Read status: 84 Done, 6 Partial, and 4 Not possible. Write status: 62 Done, 8 Pa
 | Title style | Done | Done | Native paragraph style 0. Scripting imports `<h1>` as 24px bold body text; use `--engine native` for a native Title. |
 | Heading style | Done | Done | Native paragraph style 1. Scripting imports `<h2>` as 18px bold body text; use `--engine native` for a native Heading. |
 | Subheading style | Done | Done | Native paragraph style 2. Scripting imports `<h3>` as bold body text; use `--engine native` for a native Subheading. |
-| Body style | Done | Done | Native paragraph style 4. |
-| Monospaced style | Done | Done | Native paragraph style 100. |
+| Body style | Done | Done | Native paragraph style 3. |
+| Monospaced style | Done | Done | Native paragraph style 4. |
 | Block quote | Done | Done | Paragraph style and quote level are preserved. |
 | Paragraph indentation | Done | Done | Native indent level is preserved. |
 | Left, center, right, and justified alignment | Done | Done | `ICTTParagraphStyle.alignment`. |

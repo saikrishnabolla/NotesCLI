@@ -16,6 +16,10 @@ public enum NoteRenderer {
         var style: ParagraphStyle
         var raw: String
     }
+    private struct InlinePiece {
+        var text: String
+        var run: AttributeRun
+    }
     private static func render(_ document: NoteDocument, attachments: [Attachment], format: Format) -> String {
         let source = document.text as NSString
         var ranges: [(NSRange, AttributeRun)] = [], offset = 0
@@ -32,19 +36,29 @@ public enum NoteRenderer {
             if lineIndex == rawLines.count - 1 && raw.isEmpty && lineIndex > 0 { break }
             let length = raw.utf16.count, end = start + length
             while runIndex < ranges.count && NSMaxRange(ranges[runIndex].0) <= start { runIndex += 1 }
-            var style: ParagraphStyle?, result = "", cursor = start, i = runIndex
+            var style: ParagraphStyle?, result = "", cursor = start, i = runIndex, pieces: [InlinePiece] = []
+            func flushPieces() {
+                guard !pieces.isEmpty else { return }
+                result += mergedInline(pieces, document, attachmentMap, format, code: style?.kind == .monospaced)
+                pieces.removeAll(keepingCapacity: true)
+            }
             while i < ranges.count && ranges[i].0.location <= end {
                 let (range, run) = ranges[i]
                 if style == nil, NSMaxRange(range) > start { style = run.paragraph }
                 let lower = max(start, range.location), upper = min(end, NSMaxRange(range))
                 if lower < upper {
-                    if cursor < lower { result += escaped(source.substring(with: NSRange(location: cursor, length: lower - cursor)), format) }
+                    if cursor < lower {
+                        flushPieces()
+                        result += escaped(source.substring(with: NSRange(location: cursor, length: lower - cursor)), format)
+                    }
                     let segment = source.substring(with: NSRange(location: lower, length: upper - lower))
-                    result += inline(segment, run, document, attachmentMap, format, code: style?.kind == .monospaced)
+                    if let last = pieces.last, !canMergeInline(last.run, run) { flushPieces() }
+                    pieces.append(InlinePiece(text: segment, run: run))
                     cursor = upper
                 }
                 i += 1
             }
+            flushPieces()
             if cursor < end { result += escaped(source.substring(with: NSRange(location: cursor, length: end - cursor)), format) }
             lines.append(Line(text: result, style: style ?? ParagraphStyle(kind: .body), raw: raw))
             start = end + 1
@@ -116,6 +130,51 @@ public enum NoteRenderer {
             return firstComponent.contains(":") ? "" : value
         }
         return ["http", "https", "mailto", "tel", "applenotes", "notescli-attachment", "file"].contains(scheme) ? value : ""
+    }
+    private static func canMergeInline(_ left: AttributeRun, _ right: AttributeRun) -> Bool {
+        left.attachment == nil && right.attachment == nil && left.font == right.font && left.link == right.link &&
+        left.color == right.color && left.paragraph == right.paragraph
+    }
+    private static func mergedInline(_ pieces: [InlinePiece], _ document: NoteDocument, _ attachments: [String: Attachment],
+                                     _ format: Format, code: Bool) -> String {
+        guard pieces.count > 1, format != .plain, !code, let run = pieces.first?.run else {
+            return pieces.map { inline($0.text, $0.run, document, attachments, format, code: code) }.joined()
+        }
+        var leading = "", trailing = "", values = pieces
+        if format == .markdown {
+            leading = String(values[0].text.prefix(while: \.isWhitespace))
+            values[0].text.removeFirst(leading.count)
+            trailing = String(values[values.count - 1].text.reversed().prefix(while: \.isWhitespace).reversed())
+            values[values.count - 1].text.removeLast(trailing.count)
+        }
+        var result = values.map { piece -> String in
+            var value = escaped(piece.text, format)
+            if let highlight = piece.run.highlight {
+                if format == .markdown {
+                    value = "<mark data-apple-notes-highlight=\"\(highlight.rawValue)\">\(value)</mark>"
+                } else {
+                    let colors: [HighlightColor: String] = [.purple: "#BA55D333", .pink: "#D5000044", .orange: "#FF6F0022", .mint: "#289C8ECC", .blue: "#2196F3"]
+                    value = "<mark data-apple-notes-highlight=\"\(highlight.rawValue)\" style=\"background-color:\(colors[highlight]!)\">\(value)</mark>"
+                }
+            }
+            return value
+        }.joined()
+        let font = run.font
+        if format == .markdown {
+            if font.bold { result = "**\(result)**" }
+            if font.italic { result = "*\(result)*" }
+            if font.strikethrough { result = "~~\(result)~~" }
+            if font.underline { result = "<u>\(result)</u>" }
+            if font.superscript != 0 { result = "<\(font.superscript > 0 ? "sup" : "sub")>\(result)</\(font.superscript > 0 ? "sup" : "sub")>" }
+            if let link = run.link { result = "[\(result)](\(destination(safeURL(link))))" }
+        } else {
+            for (enabled, tag) in [(font.bold, "strong"), (font.italic, "em"), (font.strikethrough, "del"), (font.underline, "u"), (font.superscript > 0, "sup"), (font.superscript < 0, "sub")] where enabled {
+                result = "<\(tag)>\(result)</\(tag)>"
+            }
+            if let color = run.color, color.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil { result = "<span style=\"color:\(color)\">\(result)</span>" }
+            if let link = run.link { result = "<a href=\"\(escaped(safeURL(link), .html))\">\(result)</a>" }
+        }
+        return leading + result + trailing
     }
     private static func inline(_ text: String, _ run: AttributeRun, _ document: NoteDocument, _ attachments: [String: Attachment], _ format: Format, code: Bool) -> String {
         var leading = "", trailing = "", content = text

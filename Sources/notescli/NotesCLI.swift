@@ -3,6 +3,8 @@ import Foundation
 import NotesCore
 import NotesMCP
 import NotesAutomation
+import NotesNative
+import NotesSafety
 import Darwin
 
 @main
@@ -144,17 +146,30 @@ struct Append: ParsableCommand {
     func validate() throws { try validateBodySources(body: body, stdin: stdin) }
     func run() throws {
         let backend = try options.writable(), note = try backend.reader.note(ref)
-        if note.summary.attachmentCount > 0 {
+        let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
+        if selected == .scripting {
+            try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: write.allowDowngrade)
+        }
+        if selected == .scripting, note.summary.attachmentCount > 0 {
             throw NotesError("attachments_would_be_lost", "Appending through HTML could remove existing attachments; the note was not changed.")
         }
         let markdown = try inputBody(body: body, stdin: stdin)
         let currentHTML = try SafetyExecutor.plannedHTML(note, backend: backend, write: write)
         let plan = DryRunPlan(operation: "appendToNote", target: note.summary.id.uuid, arguments: ["body": markdown],
-                              resultingHTML: currentHTML + MarkdownToNotesHTML.convert(markdown).html)
+                              resultingHTML: currentHTML + MarkdownToNotesHTML.convert(markdown).html, engine: selected.rawValue)
+        var native: NativeWriteResult?
         if let result = try SafetyExecutor.run(options: write, operation: "appendToNote", arguments: ["ref": note.summary.id.uuid, "body": markdown],
             note: note, allowedPaths: [note.summary.folderPath], plan: plan,
-            action: { try backend.writer().appendToNote(note.summary.id.uuid, markdown: markdown) }) {
-            try Output.write(result, json: options.json)
+            action: {
+                switch selected {
+                case .scripting: return try backend.writer().appendToNote(note.summary.id.uuid, markdown: markdown)
+                case .native:
+                    let value = try NativeNotesWriter().appendMarkdown(note.summary.id.uuid, markdown: markdown, allowShared: write.allowShared)
+                    native = value; return value.writeResult
+                }
+            }) {
+            try outputEngineWrite(EngineWriteResponse(engine: selected.rawValue, result: result, operationID: native?.operationID,
+                                                      verification: native?.verification), options: options)
         }
     }
 }

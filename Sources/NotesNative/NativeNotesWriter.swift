@@ -1549,8 +1549,66 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
-            try MarkdownNativeWriter(owner: self).write(ref: ref, markdown: markdown, dryRun: dryRun, backup: backup, allowShared: allowShared, context: context)
+        let before = try SQLiteNotesStore(refresh: true).note(ref)
+        return try performWrite { context in
+            try MarkdownNativeWriter(owner: self).write(ref: ref, markdown: markdown, dryRun: dryRun, backup: backup,
+                                                        allowShared: allowShared, before: before, context: context)
+        }
+    }
+
+    public func appendMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, markdown: markdown, mode: .append, allowShared: allowShared)
+    }
+
+    public func prependMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, markdown: markdown, mode: .prepend, allowShared: allowShared)
+    }
+
+    public func insertMarkdown(_ ref: String, underHeading heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, markdown: markdown, mode: .insert(heading), allowShared: allowShared)
+    }
+
+    public func replaceSection(_ ref: String, heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, markdown: markdown, mode: .section(heading), allowShared: allowShared)
+    }
+
+    public func replaceText(_ ref: String, find: String, replacement: String, allowShared: Bool) throws -> NativeWriteResult {
+        guard !find.isEmpty else { throw NotesError("invalid_find", "Find text cannot be empty.") }
+        let before = try SQLiteNotesStore(refresh: true).note(ref)
+        return try performWrite { context in
+            let (note, readback) = try mutateBody(ref, context: context, allowShared: allowShared) { _, editor, original in
+                let source = original.string as NSString
+                var ranges: [NSRange] = [], start = 0
+                while start <= source.length {
+                    let found = source.range(of: find, range: NSRange(location: start, length: source.length - start))
+                    if found.location == NSNotFound { break }
+                    ranges.append(found); start = NSMaxRange(found)
+                }
+                guard !ranges.isEmpty else { throw NotesError("text_not_found", "The requested text was not found.") }
+                try editor.begin(["delete", "insert"])
+                for range in ranges.reversed() {
+                    var attributes: [NSAttributedString.Key: Any] = [:]
+                    if original.length > 0 { attributes = original.attributes(at: min(range.location, original.length - 1), effectiveRange: nil) }
+                    try editor.delete(range)
+                    try editor.insert(NSAttributedString(string: replacement, attributes: attributes), at: UInt(range.location))
+                }
+            }
+            let noteID = id(note), expected = (before.document?.text as NSString?)?.replacingOccurrences(of: find, with: replacement)
+            return result(noteID, native: ["utf16Length": "\(readback.length)", "replacements": "all"], nativeVerified: readback.string == expected,
+                          sqlite: { after in
+                guard after.document?.text == expected, NativeOnlyFeatures.detect(in: after) == NativeOnlyFeatures.detect(in: before) else { return nil }
+                return ["features": NativeOnlyFeatures.detect(in: after).joined(separator: ","), "utf16Length": "\(readback.length)"]
+            })
+        }
+    }
+
+    fileprivate enum MarkdownPatchMode { case append, prepend, insert(String), section(String) }
+
+    private func patchMarkdown(_ ref: String, markdown: String, mode: MarkdownPatchMode, allowShared: Bool) throws -> NativeWriteResult {
+        let before = try SQLiteNotesStore(refresh: true).note(ref)
+        return try performWrite { context in
+            try MarkdownNativeWriter(owner: self).patch(ref: ref, markdown: markdown, mode: mode, allowShared: allowShared,
+                                                        expectedFeatures: NativeOnlyFeatures.detect(in: before), context: context)
         }
     }
 
@@ -1870,15 +1928,117 @@ private final class MarkdownNativeWriter {
         return (built, lines.count)
     }
 
-    func write(ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool, context: NSManagedObjectContext) throws -> NativeWriteResult {
+    fileprivate func patch(ref: String, markdown: String, mode: NativeNotesWriter.MarkdownPatchMode, allowShared: Bool,
+                           expectedFeatures: [String], context: NSManagedObjectContext) throws -> NativeWriteResult {
+        let note = try owner.note(ref, in: context)
+        try owner.guardWritable(note, allowShared: allowShared)
+        try owner.refreshIfStale(note)
+        let editor = try NCBodyEditor(note: note)
+        try editor.prepare(["delete", "insert"])
+        let original = editor.original
+        let existing = owner.attachmentMarkers(original)
+        let existingByID = Dictionary(grouping: existing, by: { $0.2 }).mapValues { ($0[0].1, $0[0].3) }
+        let built = try attributed(markdown: markdown, note: note, context: context, editor: editor, existing: existingByID).0
+        let source = original.string as NSString
+        let paragraphs = owner.paragraphRanges(source)
+        func style(_ range: NSRange) -> Int? {
+            guard original.length > 0 else { return nil }
+            let index = min(range.location, original.length - 1)
+            guard let value = original.attribute(.init("TTStyle"), at: index, effectiveRange: nil) as AnyObject? else { return nil }
+            return owner.value(value, "style") as? Int
+        }
+        func headingLevel(_ range: NSRange) -> Int? {
+            if let value = style(range), [0, 1, 2].contains(value) { return value }
+            guard original.length > 0 else { return nil }
+            let index = min(range.location, original.length - 1)
+            let hints = original.attribute(.init("TTHints"), at: index, effectiveRange: nil) as? Int ?? 0
+            guard hints & 1 != 0,
+                  let font = original.attribute(.init("ICTTFont"), at: index, effectiveRange: nil) as AnyObject? else { return nil }
+            let size = (owner.value(font, "pointSize") as? NSNumber)?.doubleValue ?? owner.value(font, "pointSize") as? Double ?? 0
+            if size >= 22 { return 0 }
+            if size >= 17 { return 1 }
+            return 2
+        }
+        func heading(_ text: String) throws -> (Int, NSRange) {
+            let matches = paragraphs.enumerated().filter { _, range in
+                headingLevel(range) != nil && source.substring(with: range) == text
+            }
+            guard matches.count == 1, let match = matches.first else {
+                throw NotesError(matches.isEmpty ? "heading_not_found" : "ambiguous_heading", "Heading \(text) did not resolve uniquely.")
+            }
+            return (match.offset, match.element)
+        }
+        func afterLine(_ range: NSRange) -> Int { NSMaxRange(range) < source.length ? NSMaxRange(range) + 1 : NSMaxRange(range) }
+        var deletion = NSRange(location: 0, length: 0)
+        var insertion = built
+        switch mode {
+        case .append:
+            deletion.location = source.length
+            if source.length > 0, !source.hasSuffix("\n"), built.length > 0 {
+                let value = NSMutableAttributedString(string: "\n")
+                value.append(built); insertion = value
+            }
+        case .prepend:
+            if let title = paragraphs.first {
+                deletion.location = afterLine(title)
+                if deletion.location == source.length, !source.hasSuffix("\n"), built.length > 0 {
+                    let value = NSMutableAttributedString(string: "\n")
+                    value.append(built); insertion = value
+                } else if deletion.location < source.length, built.length > 0 {
+                    insertion.append(NSAttributedString(string: "\n"))
+                }
+            } else {
+                deletion.location = 0
+                if source.length > 0, built.length > 0 { insertion.append(NSAttributedString(string: "\n")) }
+            }
+        case .insert(let text):
+            let (_, range) = try heading(text)
+            deletion.location = afterLine(range)
+            if deletion.location == source.length, !source.hasSuffix("\n"), built.length > 0 {
+                let value = NSMutableAttributedString(string: "\n")
+                value.append(built); insertion = value
+            } else if deletion.location < source.length, built.length > 0 {
+                insertion.append(NSAttributedString(string: "\n"))
+            }
+        case .section(let text):
+            let (index, range) = try heading(text)
+            let start = afterLine(range)
+            let level = headingLevel(range) ?? 2
+            let next = paragraphs.dropFirst(index + 1).first { candidate in
+                guard let candidateLevel = headingLevel(candidate) else { return false }
+                return candidateLevel <= level
+            }?.location ?? source.length
+            deletion = NSRange(location: start, length: next - start)
+            if next < source.length, built.length > 0 { insertion.append(NSAttributedString(string: "\n")) }
+        }
+        let expectedText = source.replacingCharacters(in: deletion, with: insertion.string)
+        try editor.begin(["delete", "insert"])
+        if deletion.length > 0 { try editor.delete(deletion) }
+        if insertion.length > 0 { try editor.insert(insertion, at: UInt(deletion.location)) }
+        try editor.finish()
+        try owner.save(context, notes: [note])
+        let noteID = owner.id(note), nativeBody = try owner.body(try owner.note(noteID, in: context))
+        let expectedMarkers = owner.attachmentMarkers(original).map { ($0.2, $0.3) } + owner.attachmentMarkers(built).map { ($0.2, $0.3) }
+        let actualMarkers = owner.attachmentMarkers(nativeBody).map { ($0.2, $0.3) }
+        return owner.result(noteID, native: ["utf16Length": "\(nativeBody.length)", "preservedFeatures": expectedFeatures.joined(separator: ",")],
+                            nativeVerified: nativeBody.string == expectedText && NativeVerificationRules.sameMarkerMultiset(expectedMarkers, actualMarkers), sqlite: { after in
+            let features = NativeOnlyFeatures.detect(in: after)
+            guard after.document?.text == expectedText, Set(expectedFeatures).isSubset(of: Set(features)) else { return nil }
+            return ["features": features.joined(separator: ","), "utf16Length": "\(nativeBody.length)"]
+        })
+    }
+
+    func write(ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool, before: Note,
+               context: NSManagedObjectContext) throws -> NativeWriteResult {
         let lines = try parse(markdown), note = try owner.note(ref, in: context)
         let preservedIDs = attachmentReferences(markdown)
+        let expectedFeatures = NativeOnlyFeatures.detect(in: before)
         try owner.guardWritable(note, allowShared: allowShared); try owner.refreshIfStale(note)
         if backup { try makeBackup(ref: owner.id(note)) }
         if dryRun {
             return owner.result(owner.id(note), native: ["dryRun": "true", "paragraphs": "\(lines.count)"], message: "No write made.")
         }
-        var expectedMarkers: [(String, String)] = []
+        var expectedMarkers: [(String, String)] = [], expectedText = ""
         do {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["delete", "insert"])
             let existing = owner.attachmentMarkers(editor.original)
@@ -1892,20 +2052,111 @@ private final class MarkdownNativeWriter {
                 throw NotesError("attachment_would_be_lost", "Markdown omitted inline marker \(marker.2); nothing was saved.")
             }
             let built = try attributed(markdown: markdown, note: note, context: context, editor: editor, existing: existingByID).0
+            let mappings = unchangedMappings(from: editor.original.string, to: built.string)
+            let unpreserved = unpreservedFeatures(in: before, coveredBy: mappings.map(\.old))
+            guard unpreserved.isEmpty else {
+                throw NotesError(
+                    "native_required",
+                    "The full-body rewrite changes text carrying native-only features that Markdown cannot preserve: \(unpreserved.joined(separator: ", ")).",
+                    hint: "Use a native append, prepend, range, section, or formatting command so those attributes stay attached to the original text."
+                )
+            }
+            try preserveNativeAttributes(from: editor.original, in: built, mappings: mappings)
+            expectedText = built.string
             expectedMarkers = owner.attachmentMarkers(built).map { ($0.2, $0.3) }
             try editor.begin(["delete", "insert"]); try editor.delete(NSRange(location: 0, length: editor.original.length)); try editor.insert(built, at: 0); try editor.finish()
             try owner.save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? owner.nativeError(error) }
         let nativeBody = try owner.body(try owner.note(owner.id(note), in: context))
         let nativeMarkers = owner.attachmentMarkers(nativeBody).map { ($0.2, $0.3) }
-        let nativeVerified = NativeVerificationRules.sameMarkerMultiset(expectedMarkers, nativeMarkers)
+        let nativeVerified = nativeBody.string == expectedText && NativeVerificationRules.sameMarkerMultiset(expectedMarkers, nativeMarkers)
         return owner.result(owner.id(note), native: ["utf16Length": "\(nativeBody.length)", "paragraphs": "\(lines.count)", "preservedAttachments": "\(preservedIDs.count)"],
                             nativeVerified: nativeVerified, sqlite: { n in
             guard n.document?.text == nativeBody.string else { return nil }
             let readbackMarkers = n.document?.runs.compactMap { run in run.attachment.map { ($0.id, $0.typeUTI) } } ?? []
-            guard NativeVerificationRules.sameMarkerMultiset(expectedMarkers, readbackMarkers) else { return nil }
-            return ["utf16Length": "\(nativeBody.length)", "hasChecklist": "\(n.summary.hasChecklist)", "preservedAttachments": "\(preservedIDs.count)"]
+            let features = NativeOnlyFeatures.detect(in: n)
+            guard NativeVerificationRules.sameMarkerMultiset(expectedMarkers, readbackMarkers),
+                  Set(expectedFeatures).isSubset(of: Set(features)) else { return nil }
+            return ["features": features.joined(separator: ","), "utf16Length": "\(nativeBody.length)",
+                    "hasChecklist": "\(n.summary.hasChecklist)", "preservedAttachments": "\(preservedIDs.count)"]
         })
+    }
+
+    private typealias UnchangedMapping = (old: NSRange, new: NSRange)
+
+    private func unchangedMappings(from old: String, to new: String) -> [UnchangedMapping] {
+        let old = old as NSString, new = new as NSString
+        var prefix = 0
+        while prefix < old.length, prefix < new.length, old.character(at: prefix) == new.character(at: prefix) { prefix += 1 }
+        var suffix = 0
+        while suffix < old.length - prefix, suffix < new.length - prefix,
+              old.character(at: old.length - suffix - 1) == new.character(at: new.length - suffix - 1) { suffix += 1 }
+        var result: [UnchangedMapping] = []
+        if prefix > 0 { result.append((NSRange(location: 0, length: prefix), NSRange(location: 0, length: prefix))) }
+        if suffix > 0 {
+            result.append((NSRange(location: old.length - suffix, length: suffix),
+                           NSRange(location: new.length - suffix, length: suffix)))
+        }
+        return result
+    }
+
+    private func unpreservedFeatures(in note: Note, coveredBy ranges: [NSRange]) -> [String] {
+        guard let document = note.document else { return [] }
+        func covered(_ range: NSRange) -> Bool {
+            ranges.contains { $0.location <= range.location && NSMaxRange($0) >= NSMaxRange(range) }
+        }
+        var result: Set<String> = [], offset = 0
+        for run in document.runs {
+            let range = NSRange(location: offset, length: run.length); offset += run.length
+            guard run.length > 0, !covered(range) else { continue }
+            if run.paragraph?.alignment != nil { result.insert("alignment") }
+            if run.paragraph?.writingDirection != nil { result.insert("writing direction") }
+            if run.paragraph?.collapsed == true { result.insert("collapsible headings") }
+            if run.paragraph?.startNumber != nil { result.insert("numbered list starts") }
+            if (run.paragraph?.blockQuoteLevel ?? 0) > 1 { result.insert("block quote levels") }
+            if run.font.name != nil { result.insert("font family") }
+            if run.font.pointSize != nil { result.insert("font size") }
+            if run.color != nil { result.insert("text color") }
+        }
+        return result.sorted()
+    }
+
+    private func preserveNativeAttributes(from original: NSAttributedString, in replacement: NSMutableAttributedString,
+                                          mappings: [UnchangedMapping]) throws {
+        for mapping in mappings {
+            var oldIndex = mapping.old.location
+            let oldEnd = NSMaxRange(mapping.old)
+            while oldIndex < oldEnd {
+                var oldEffective = NSRange()
+                let oldAttributes = original.attributes(at: oldIndex, effectiveRange: &oldEffective)
+                let newIndex = mapping.new.location + oldIndex - mapping.old.location
+                var newEffective = NSRange()
+                let newAttributes = replacement.attributes(at: newIndex, effectiveRange: &newEffective)
+                let length = min(NSMaxRange(oldEffective), oldEnd) - oldIndex
+                let destination = NSRange(location: newIndex, length: min(length, NSMaxRange(newEffective) - newIndex))
+
+                if let oldStyle = oldAttributes[.init("TTStyle")] as AnyObject?,
+                   let newStyle = newAttributes[.init("TTStyle")] as AnyObject? {
+                    let style = owner.value(newStyle, "style") as? Int ?? 3
+                    let indent = owner.value(newStyle, "indent") as? Int ?? 0
+                    let quote = owner.value(newStyle, "blockQuoteLevel") as? Int ?? 0
+                    let todo = owner.value(newStyle, "todo") as AnyObject?
+                    let checked = todo.flatMap { owner.value($0, "done") as? Bool }.map { $0 ? 1 : 0 } ?? -1
+                    let merged = try NCNotesRuntime.paragraphStyle(style, indent: indent, quote: quote,
+                                                                   checked: checked, basedOn: oldStyle)
+                    replacement.addAttribute(.init("TTStyle"), value: merged, range: destination)
+                }
+                if let oldFont = oldAttributes[.init("ICTTFont")] as AnyObject? {
+                    let hints = newAttributes[.init("TTHints")] as? Int ?? 0
+                    let merged = try NCNotesRuntime.font(name: nil, size: nil, hints: hints, basedOn: oldFont)
+                    replacement.addAttribute(.init("ICTTFont"), value: merged, range: destination)
+                }
+                if let color = oldAttributes[.init("TTColor")] {
+                    replacement.addAttribute(.init("TTColor"), value: color, range: destination)
+                }
+                oldIndex += destination.length
+            }
+        }
     }
 
     fileprivate func makeBackup(ref: String) throws {
@@ -1954,7 +2205,6 @@ private final class MarkdownNativeWriter {
             }
             result.append(Line(text: text, style: style, indent: indent, done: done, table: nil)); index += 1
         }
-        if raw.last == "", !result.isEmpty { result.removeLast() }
         return result
     }
 
@@ -1966,11 +2216,33 @@ private final class MarkdownNativeWriter {
 
     fileprivate func inline(_ text: String, style: Any, note: NSManagedObject, context: NSManagedObjectContext,
                         existing: [String: (AnyObject, String)]) throws -> NSAttributedString {
+        try inline(text, style: style, note: note, context: context, existing: existing, attributes: [:])
+    }
+
+    private func inline(_ text: String, style: Any, note: NSManagedObject, context: NSManagedObjectContext,
+                        existing: [String: (AnyObject, String)],
+                        attributes: [NSAttributedString.Key: Any]) throws -> NSAttributedString {
         let output = NSMutableAttributedString(), source = text as NSString
-        let pattern = #"!?\[[^\]]*\]\(<?notescli-attachment:([A-Za-z0-9_-]+)>?\)|\[([^\]]+)\]\(([^)]+)\)|\*\*([^*]+)\*\*|~~([^~]+)~~|<u>(.*?)</u>|\*([^*]+)\*"#
+        let pattern = #"!?\[[^\]]*\]\(<?notescli-attachment:([A-Za-z0-9_-]+)>?\)|\[([^\]]+)\]\(([^)]+)\)|\*\*(.+?)\*\*|~~(.+?)~~|<mark data-apple-notes-highlight=\"(purple|pink|orange|mint|blue)\">(.*?)</mark>|<u>(.*?)</u>|<sup>(.*?)</sup>|<sub>(.*?)</sub>|\*([^*]+)\*"#
         let regex = try NSRegularExpression(pattern: pattern), matches = regex.matches(in: text, range: NSRange(location: 0, length: source.length))
         var cursor = 0
-        func append(_ value: String, _ extra: [NSAttributedString.Key: Any] = [:]) { var attrs: [NSAttributedString.Key: Any] = [.init("TTStyle"): style]; attrs.merge(extra) { _, new in new }; output.append(NSAttributedString(string: value, attributes: attrs)) }
+        func merged(_ extra: [NSAttributedString.Key: Any]) -> [NSAttributedString.Key: Any] {
+            var result = attributes, extra = extra
+            if let old = result[.init("TTHints")] as? Int, let new = extra.removeValue(forKey: .init("TTHints")) as? Int {
+                result[.init("TTHints")] = old | new
+            }
+            result.merge(extra) { _, new in new }
+            return result
+        }
+        func append(_ value: String, _ extra: [NSAttributedString.Key: Any] = [:]) {
+            var attrs: [NSAttributedString.Key: Any] = [.init("TTStyle"): style]
+            attrs.merge(merged(extra)) { _, new in new }
+            output.append(NSAttributedString(string: value, attributes: attrs))
+        }
+        func appendNested(_ range: NSRange, _ extra: [NSAttributedString.Key: Any]) throws {
+            output.append(try inline(source.substring(with: range), style: style, note: note, context: context,
+                                     existing: existing, attributes: merged(extra)))
+        }
         for match in matches {
             if match.range.location > cursor { append(source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))) }
             if match.range(at: 1).location != NSNotFound {
@@ -1980,11 +2252,17 @@ private final class MarkdownNativeWriter {
                 if url.hasPrefix("applenotes://showNote?identifier=") || url.hasPrefix("note:") {
                     let targetRef = url.hasPrefix("note:") ? String(url.dropFirst(5)) : String(url.split(separator: "=").last ?? "")
                     let target = try owner.note(targetRef, in: context), id = try NCNotesRuntime.makeNoteLink(to: target, from: note, text: label), marker = try NCNotesRuntime.attachmentMarker(id: id, type: "com.apple.notes.inlinetextattachment.link"); append("\u{fffc}", [.init("NSAttachment"): marker])
-                } else { append(label, [.init("NSLink"): URL(string: url) ?? url]) }
-            } else if match.range(at: 4).location != NSNotFound { append(source.substring(with: match.range(at: 4)), [.init("TTHints"): 1]) }
-            else if match.range(at: 5).location != NSNotFound { append(source.substring(with: match.range(at: 5)), [.init("TTStrikethrough"): 1]) }
-            else if match.range(at: 6).location != NSNotFound { append(source.substring(with: match.range(at: 6)), [.init("TTUnderline"): 1]) }
-            else if match.range(at: 7).location != NSNotFound { append(source.substring(with: match.range(at: 7)), [.init("TTHints"): 2]) }
+                } else { try appendNested(match.range(at: 2), [.init("NSLink"): URL(string: url) ?? url]) }
+            } else if match.range(at: 4).location != NSNotFound { try appendNested(match.range(at: 4), [.init("TTHints"): 1]) }
+            else if match.range(at: 5).location != NSNotFound { try appendNested(match.range(at: 5), [.init("TTStrikethrough"): 1]) }
+            else if match.range(at: 6).location != NSNotFound {
+                let color = HighlightColor(rawValue: source.substring(with: match.range(at: 6)))!
+                try appendNested(match.range(at: 7), [.init("TTEmphasis"): color.notesValue])
+            }
+            else if match.range(at: 8).location != NSNotFound { try appendNested(match.range(at: 8), [.init("TTUnderline"): 1]) }
+            else if match.range(at: 9).location != NSNotFound { try appendNested(match.range(at: 9), [.init("NSSuperScript"): 1]) }
+            else if match.range(at: 10).location != NSNotFound { try appendNested(match.range(at: 10), [.init("NSSuperScript"): -1]) }
+            else if match.range(at: 11).location != NSNotFound { try appendNested(match.range(at: 11), [.init("TTHints"): 2]) }
             cursor = NSMaxRange(match.range)
         }
         if cursor < source.length { append(source.substring(from: cursor)) }

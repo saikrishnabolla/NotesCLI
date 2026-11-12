@@ -21,6 +21,14 @@ private final class FakeChangeTracked: NSObject {
 }
 
 final class NativeTests: XCTestCase {
+    func testLoadingNativeRuntimeDisablesCoreDataDebugStderr() {
+        unsetenv("com.apple.CoreData.SQLDebug")
+        unsetenv("com.apple.CoreData.Logging.stderr")
+        _ = NativeNotesWriter().doctor()
+        XCTAssertEqual(getenv("com.apple.CoreData.SQLDebug").map { String(cString: $0) }, "0")
+        XCTAssertEqual(getenv("com.apple.CoreData.Logging.stderr").map { String(cString: $0) }, "0")
+    }
+
     private func inMemoryContext() throws -> NSManagedObjectContext {
         let model = NSManagedObjectModel()
         let entity = NSEntityDescription()
@@ -423,7 +431,7 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(resized.writeResult.outcome, .verified)
         pass("tables", "create/edit/add/remove rows=2 columns=2 sqlite=true")
 
-        let markdown = "# \(title)-main\n## Heading\n- [x] done\n- item\n[web](https://example.com)\n![table](notescli-attachment:\(tableID))\n| x | y |\n| --- | --- |\n| 1 | 2 |\n"
+        let markdown = "# \(title)-main\n## Heading\n**<mark data-apple-notes-highlight=\"mint\">native</mark> formatting**\n- [x] done\n- item\n[web](https://example.com)\n![table](notescli-attachment:\(tableID))\n| x | y |\n| --- | --- |\n| 1 | 2 |\n"
         let backupRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/NotesCLI/backups", isDirectory: true)
         let backupID = try SQLiteNotesStore(refresh: true).note(ref).summary.id.uuid
         let beforeBackups = Set((try? FileManager.default.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil)) ?? [])
@@ -435,6 +443,8 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(written.writeResult.outcome, .verified)
         let markdownReadback = try SQLiteNotesStore(refresh: true).note(ref)
         XCTAssertTrue(markdownReadback.summary.hasChecklist)
+        XCTAssertTrue(markdownReadback.document?.runs.contains { $0.highlight == .mint && $0.font.bold } == true)
+        XCTAssertTrue(NoteRenderer.markdown(try XCTUnwrap(markdownReadback.document)).contains("**<mark data-apple-notes-highlight=\"mint\">native</mark> formatting**"))
         XCTAssertEqual(markdownReadback.document?.tables?.count, 2)
         pass("write-markdown", "dry-run/checklist/headings/lists/links/tables backupFiles=2 sqlite=true")
 

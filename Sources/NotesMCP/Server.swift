@@ -72,6 +72,7 @@ public final class MCPServer {
         let cursorPage = ["cursor": string, "limit": integer]
         let writeCommon = ["dry_run": bool, "idempotency_key": string, "if_modified": string,
                            "expect_revision": string, "write_folders": string, "allow_attachment_loss": bool,
+                           "allow_downgrade": bool, "engine": ["type": "string", "enum": ["scripting", "native"]],
                            "allow_shared": bool, "wait_sync": bool, "sync_timeout": ["type": "number", "minimum": 0]]
         func t(_ name: String, _ description: String, _ required: [String] = [], _ properties: [String: [String: Any]] = [:],
                write: Bool = false, native: Bool = false, destructive: Bool = false) -> Tool {
@@ -484,7 +485,15 @@ public final class MCPServer {
         func i(_ key: String, _ fallback: Int = 0) -> Int { (a[key] as? NSNumber)?.intValue ?? fallback }
         let offset = i("offset"), limit = max(1, i("limit", 100))
         // MARK: w3-write begin
-        if allowNative && ((tool.name == "create_note" && a["attachments"] != nil) || ["update_note", "write_markdown"].contains(tool.name)) {
+        let nativeBodyTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text"])
+        if ["file_push", "sync_notes"].contains(tool.name), s("engine") == "native" {
+            throw NotesError("unsupported_engine", "The native engine is not available for MCP file or folder sync. Use write_markdown for an explicit native body replacement.")
+        }
+        if nativeBodyTools.contains(tool.name), s("engine") == "native" {
+            guard allowNative else { throw NotesError("native_unavailable", "Native MCP writes are disabled.") }
+            return try callNative(tool, a)
+        }
+        if allowNative && tool.name == "create_note" && a["attachments"] != nil {
             return try callNative(tool, a)
         }
         // MARK: w3-write end
@@ -610,7 +619,8 @@ public final class MCPServer {
             let note = try reader.note(noteID), paths = [note.summary.folderPath]
             return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting", snapshotNotes: [note]) {
                 do {
-                    let report = try SingleFileSync(reader: reader, writer: writer).push(from: path)
+                    let guarded = ScriptingRewriteGuard(writer: writer, reader: reader, allowDowngrade: b("allow_downgrade"))
+                    let report = try SingleFileSync(reader: reader, writer: guarded).push(from: path)
                     return (WriteResult(outcome: .verified, noteID: note.summary.id, message: report.message), try NotePresentation.object(report), nil)
                 } catch NotesSyncError.writeUnknown(let message) {
                     return (WriteResult(outcome: .unknown, noteID: note.summary.id, message: message), nil, nil)
@@ -622,7 +632,8 @@ public final class MCPServer {
             let folder = s("folder")!, paths = try folderPaths(folder)
             let notes = try reader.notes(NoteQuery(folder: folder)).compactMap { try? reader.note($0.id.uuid) }
             return try safeWrite(tool: tool, arguments: a, note: nil, paths: paths, engine: "scripting", snapshotNotes: notes) {
-                let report = try MarkdownSync(reader: reader, writer: writer).run(SyncOptions(directory: URL(fileURLWithPath: s("directory")!), folder: folder, propagateDeletes: b("propagate_deletes")))
+                let guarded = ScriptingRewriteGuard(writer: writer, reader: reader, allowDowngrade: b("allow_downgrade"))
+                let report = try MarkdownSync(reader: reader, writer: guarded).run(SyncOptions(directory: URL(fileURLWithPath: s("directory")!), folder: folder, propagateDeletes: b("propagate_deletes")))
                 return (WriteResult(outcome: .verified, message: "Sync pass completed."), try NotePresentation.object(report), nil)
             }
         // MARK: w3-read begin
@@ -682,6 +693,10 @@ public final class MCPServer {
         }
         let noteTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note"])
         let note = try noteTools.contains(tool.name) ? s("ref").flatMap { try reader.note($0) } : nil
+        let bodyRewriteTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text"])
+        if bodyRewriteTools.contains(tool.name), let note {
+            try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: b("allow_downgrade"))
+        }
         let paths = try writePaths(tool: tool, arguments: a, note: note)
         return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting") {
             guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }

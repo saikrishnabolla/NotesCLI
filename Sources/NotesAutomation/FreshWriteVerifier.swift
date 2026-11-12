@@ -120,7 +120,14 @@ public struct FreshWriteVerifier: Sendable {
 
     private func expectedBodyMismatch(_ request: WriteVerificationRequest, note: Note) -> String? {
         guard let expected = request.expectedBody else { return "write did not capture the exact expected body" }
-        return bodyMismatch(note, expected: expected, includesTitle: request.expectedBodyIncludesTitle)
+        if let mismatch = bodyMismatch(note, expected: expected, includesTitle: request.expectedBodyIncludesTitle) { return mismatch }
+        if let before = request.nativeFeaturesBefore {
+            let after = NativeOnlyFeatures.detect(in: note)
+            if before != after {
+                return "native-only features changed: before \(before.isEmpty ? "none" : before.joined(separator: ", ")); after \(after.isEmpty ? "none" : after.joined(separator: ", "))"
+            }
+        }
+        return nil
     }
 
     private func bodyMismatch(_ note: Note, expected: String, includesTitle: Bool = false) -> String? {

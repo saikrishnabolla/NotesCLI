@@ -133,6 +133,9 @@ enum UnifiedNative {
                           scripting: ((String) throws -> WriteResult)? = nil) throws {
         let backend = try options.writable(), note = try backend.reader.note(ref)
         let selected = try engine(options, scriptingAvailable: scripting != nil, fake: backend.isFake)
+        if selected == .scripting, scripting != nil {
+            try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: write.allowDowngrade)
+        }
         var plan = DryRunPlan(operation: operation, target: note.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(note), engine: selected.rawValue)
         if operation == "writeMarkdown", let body = arguments["body"] {

@@ -10,6 +10,7 @@ struct SyncCommand: ParsableCommand {
     @Option var folder: String?
     @Option(name: .customLong("dir"), help: "Directory used by 'sync status'.") var statusDirectory: String?
     @Flag var propagateDeletes = false
+    @Flag var allowDowngrade = false
     @Flag var dryRun = false
 
     func run() throws {
@@ -20,7 +21,12 @@ struct SyncCommand: ParsableCommand {
             throw NotesError("invalid_sync_folder", "Provide --folder for the first sync.")
         }
         let backend = try (dryRun || isStatus) ? options.backends() : options.writable()
-        let writer = try (dryRun || isStatus) ? nil : backend.writer()
+        let writer: (any NotesWriting)?
+        if dryRun || isStatus { writer = nil }
+        else {
+            writer = try bodyRewriteWriter(options: options, allowDowngrade: allowDowngrade,
+                                           allowShared: false, backend: backend)
+        }
         let report = try MarkdownSync(reader: backend.reader, writer: writer).run(
             SyncOptions(directory: url, folder: selectedFolder, propagateDeletes: propagateDeletes, dryRun: dryRun || isStatus))
         try printSync(report, json: options.json)
@@ -34,6 +40,7 @@ struct SyncDaemonCommand: ParsableCommand {
     @Option var folder: String?
     @Option var interval: Double = 30
     @Flag var propagateDeletes = false
+    @Flag var allowDowngrade = false
     @Flag var dryRun = false
 
     func validate() throws { if interval <= 0 { throw ValidationError("--interval must be greater than zero.") } }
@@ -46,7 +53,12 @@ struct SyncDaemonCommand: ParsableCommand {
         while true {
             do {
                 let backend = try dryRun ? options.backends() : options.writable()
-                let writer = try dryRun ? nil : backend.writer()
+                let writer: (any NotesWriting)?
+                if dryRun { writer = nil }
+                else {
+                    writer = try bodyRewriteWriter(options: options, allowDowngrade: allowDowngrade,
+                                                   allowShared: false, backend: backend)
+                }
                 let report = try MarkdownSync(reader: backend.reader, writer: writer).run(
                     SyncOptions(directory: url, folder: selectedFolder, propagateDeletes: propagateDeletes, dryRun: dryRun))
                 try printSync(report, json: options.json)

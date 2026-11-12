@@ -81,4 +81,19 @@ final class VerificationTests: XCTestCase {
             result: WriteResult(outcome: .unverified, noteID: id))
         XCTAssertEqual(FreshWriteVerifier(attempts: 1, interval: 0, freshReader: { reader }).verify(replace).outcome, .verified)
     }
+
+    func testBodyRewriteCannotVerifyAfterNativeFeaturesDisappear() throws {
+        let sample = InMemoryNotes.sample()
+        var note = try sample.note("welcome")
+        note.document = NoteDocument(text: "Welcome\nbody", runs: [])
+        let reader = InMemoryNotes(accounts: try sample.accounts(), folders: try sample.folders(account: nil), notes: [note])
+        let request = WriteVerificationRequest(operation: .appendToNote, ref: note.summary.id.uuid,
+            bodyBefore: "Welcome\n", expectedBody: "Welcome\nbody", expectedBodyIncludesTitle: true,
+            nativeFeaturesBefore: ["checklists", "highlights"],
+            result: WriteResult(outcome: .unverified, noteID: note.summary.id))
+
+        let result = FreshWriteVerifier(attempts: 1, interval: 0, freshReader: { reader }).verify(request)
+        XCTAssertEqual(result.outcome, .unverified)
+        XCTAssertEqual(result.mismatch, "native-only features changed: before checklists, highlights; after none")
+    }
 }

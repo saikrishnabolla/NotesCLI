@@ -144,6 +144,30 @@ final class SafetyTests: XCTestCase {
         XCTAssertNoThrow(try SnapshotRestorePolicy.requireScriptingRestoreAllowed(note, allowDowngrade: true))
     }
 
+    func testScriptingRewriteGuardCoversEveryBodyRewrite() throws {
+        let sample = InMemoryNotes.sample()
+        var note = try sample.note("welcome")
+        note.document = NoteDocument(text: "task", runs: [
+            AttributeRun(length: 4, paragraph: ParagraphStyle(kind: .checklist, checked: false), highlight: .mint),
+        ])
+        let reader = InMemoryNotes(accounts: try sample.accounts(), folders: try sample.folders(account: nil), notes: [note])
+        let writer = ScriptingRewriteGuard(writer: reader, reader: reader, allowDowngrade: false)
+        let writes: [() throws -> WriteResult] = [
+            { try writer.appendToNote("welcome", markdown: "x") },
+            { try writer.prependToNote("welcome", markdown: "x", allowAttachmentLoss: false) },
+            { try writer.replaceBody("welcome", markdown: "x") },
+            { try writer.replaceBody("welcome", markdown: "x", allowAttachmentLoss: false) },
+            { try writer.insertUnderHeading("welcome", heading: "H", markdown: "x", allowAttachmentLoss: false) },
+            { try writer.replaceSection("welcome", heading: "H", markdown: "x", allowAttachmentLoss: false) },
+            { try writer.replaceText("welcome", find: "task", replacement: "x", allowAttachmentLoss: false) },
+        ]
+        for write in writes {
+            XCTAssertThrowsError(try write()) { XCTAssertEqual(($0 as? NotesError)?.code, "native_required") }
+        }
+        let allowed = ScriptingRewriteGuard(writer: reader, reader: reader, allowDowngrade: true)
+        XCTAssertEqual(try allowed.appendToNote("welcome", markdown: "x").outcome, .verified)
+    }
+
     func testParityDocsStateTheNativeRestoreGuardAndJournalPreimages() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let features = try String(contentsOf: root.appendingPathComponent("docs/APPLE-NOTES-FEATURES.md"), encoding: .utf8)

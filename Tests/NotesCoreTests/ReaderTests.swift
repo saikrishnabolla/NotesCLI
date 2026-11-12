@@ -215,6 +215,14 @@ final class ReaderRendererTests: XCTestCase {
         XCTAssertEqual(document.markdown(), "<mark data-apple-notes-highlight=\"mint\">mint</mark>")
         XCTAssertEqual(document.html(), "<p><mark data-apple-notes-highlight=\"mint\" style=\"background-color:#289C8ECC\">mint</mark></p>")
     }
+    func testBoldRunsMergeAcrossHighlightBoundary() {
+        let title = NoteDocument(text: "notescli-test-final", runs: [
+            .init(length: 4, font: .init(bold: true), highlight: .mint),
+            .init(length: 15, font: .init(bold: true)),
+        ])
+        XCTAssertEqual(title.markdown(), "**<mark data-apple-notes-highlight=\"mint\">note</mark>scli-test-final**")
+        XCTAssertEqual(title.html(), "<p><strong><mark data-apple-notes-highlight=\"mint\" style=\"background-color:#289C8ECC\">note</mark>scli-test-final</strong></p>")
+    }
     func testLiteralMarkdownAndUnsafeLinkNormalization() {
         let body = NoteDocument(text:"# Literal heading\n- Literal list\n1. Literal number\n#tag",runs:[])
         XCTAssertEqual(body.markdown(),"\\# Literal heading\n\\- Literal list\n1\\. Literal number\n#tag")

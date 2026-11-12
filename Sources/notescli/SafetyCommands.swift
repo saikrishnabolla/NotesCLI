@@ -13,7 +13,7 @@ struct WriteOptions: ParsableArguments {
     @Option(help: "Write only if the note's modified date equals this ISO 8601 value.") var ifModified: String?
     @Option(help: "Write only if the note revision equals this SHA-256 token.") var expectRevision: String?
     @Flag(help: "Permit an HTML body rewrite that can remove attachments.") var allowAttachmentLoss = false
-    @Flag(help: "Permit undo or revert to convert native-only note features.") var allowDowngrade = false
+    @Flag(help: "Permit a scripting body rewrite to convert native-only note features.") var allowDowngrade = false
     @Flag(help: "Permit a native write after Notes confirms shared-note write access.") var allowShared = false
     @Flag(help: "Wait for the new local note version to reach iCloud.") var waitSync = false
     @Option(help: "Seconds to wait with --wait-sync.") var syncTimeout: Double = 30
@@ -456,9 +456,14 @@ struct RevertCommand: ParsableCommand {
 private func bodyEdit(options: GlobalOptions, write: WriteOptions, ref: String, operation: String,
                       arguments: [String: String], resultingHTML: (Note, String) throws -> String,
                       action: (any NotesWriting) throws -> WriteResult) throws {
-    let backend = try options.writable(), note = try backend.reader.note(ref), writer = try backend.writer()
-    try SafetyExecutor.requireAttachmentSafety(note, allowLoss: write.allowAttachmentLoss)
-    let sourceHTML = write.dryRun && !backend.isFake ? try writer.htmlBody(note.summary.id.uuid) : SafetyExecutor.html(note)
+    let backend = try options.writable(), note = try backend.reader.note(ref)
+    let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
+    if selected == .scripting {
+        try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: write.allowDowngrade)
+        try SafetyExecutor.requireAttachmentSafety(note, allowLoss: write.allowAttachmentLoss)
+    }
+    let writer = try backend.writer()
+    let sourceHTML = write.dryRun && !backend.isFake && selected == .scripting ? try writer.htmlBody(note.summary.id.uuid) : SafetyExecutor.html(note)
     let plannedHTML: String
     do { plannedHTML = try resultingHTML(note, sourceHTML) }
     catch {
@@ -466,10 +471,24 @@ private func bodyEdit(options: GlobalOptions, write: WriteOptions, ref: String, 
         plannedHTML = SafetyExecutor.html(note)
     }
     let plan = DryRunPlan(operation: operation, target: note.summary.id.uuid, arguments: arguments,
-                          resultingHTML: plannedHTML)
+                          resultingHTML: plannedHTML, engine: selected.rawValue)
+    var native: NativeWriteResult?
     if let result = try SafetyExecutor.run(options: write, operation: operation, arguments: arguments.merging(["ref": note.summary.id.uuid]) { $1 },
-        note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan, action: { try action(writer) }) {
-        try Output.write(result, json: options.json)
+        note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan, action: {
+            if selected == .scripting { return try action(writer) }
+            let value: NativeWriteResult
+            switch operation {
+            case "prependToNote": value = try NativeNotesWriter().prependMarkdown(note.summary.id.uuid, markdown: arguments["body"]!, allowShared: write.allowShared)
+            case "insertUnderHeading": value = try NativeNotesWriter().insertMarkdown(note.summary.id.uuid, underHeading: arguments["heading"]!, markdown: arguments["body"]!, allowShared: write.allowShared)
+            case "replaceSection": value = try NativeNotesWriter().replaceSection(note.summary.id.uuid, heading: arguments["heading"]!, markdown: arguments["body"]!, allowShared: write.allowShared)
+            case "replaceText": value = try NativeNotesWriter().replaceText(note.summary.id.uuid, find: arguments["find"]!, replacement: arguments["replacement"]!, allowShared: write.allowShared)
+            default: throw NotesError("unsupported_operation", "The native engine does not support \(operation).")
+            }
+            native = value
+            return value.writeResult
+        }) {
+        try outputEngineWrite(EngineWriteResponse(engine: selected.rawValue, result: result, operationID: native?.operationID,
+                                                  verification: native?.verification), options: options)
     }
 }
 

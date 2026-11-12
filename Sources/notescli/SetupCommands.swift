@@ -82,6 +82,16 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
     case "update_note", "write_markdown":
         return try result(writer.writeMarkdown(ref(), markdown: string("body")!, dryRun: false, backup: false, allowShared: allowShared))
+    case "append_to_note":
+        return try result(writer.appendMarkdown(ref(), markdown: string("body")!, allowShared: allowShared))
+    case "prepend_to_note":
+        return try result(writer.prependMarkdown(ref(), markdown: string("body")!, allowShared: allowShared))
+    case "insert_under_heading":
+        return try result(writer.insertMarkdown(ref(), underHeading: string("heading")!, markdown: string("body")!, allowShared: allowShared))
+    case "replace_section":
+        return try result(writer.replaceSection(ref(), heading: string("heading")!, markdown: string("body")!, allowShared: allowShared))
+    case "replace_text":
+        return try result(writer.replaceText(ref(), find: string("find")!, replacement: string("replacement")!, allowShared: allowShared))
     case "attach_pasteboard":
         let value = try writer.insertFrozenFile(ref(), frozen: frozenPasteboardInput(), position: integer("position"), imageView: string("view"), allowShared: allowShared)
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)

@@ -108,9 +108,25 @@ final class ProtocolTests: XCTestCase {
                                        operationID: "native-operation", value: ["ok": true])
         })
         _ = try call(server, "create_note", ["title": "With file", "body": "Body", "folder": "Notes", "attachments": ["/tmp/file"]])
-        _ = try call(server, "update_note", ["ref": "Welcome", "body": "Changed"])
+        _ = try call(server, "update_note", ["ref": "Welcome", "body": "Changed", "engine": "native"])
         XCTAssertEqual(calls.map(\.0), ["create_note", "update_note"])
         XCTAssertEqual(calls[1].1["ref"] as? String, "welcome")
+    }
+    func testScriptingBodyRewriteRequiresNativeOrExplicitDowngrade() throws {
+        let sample = InMemoryNotes.sample()
+        var note = try sample.note("welcome")
+        note.document = NoteDocument(text: "task", runs: [
+            .init(length: 4, paragraph: .init(kind: .checklist, checked: false), font: .init(bold: true), highlight: .mint),
+        ])
+        let fake = InMemoryNotes(accounts: try sample.accounts(), folders: try sample.folders(account: nil), notes: [note])
+        let server = MCPServer(reader: fake, writer: fake)
+
+        let refused = try structured(call(server, "append_to_note", ["ref": "welcome", "body": "more"]))
+        XCTAssertEqual((refused["error"] as? [String: Any])?["code"] as? String, "native_required")
+        XCTAssertTrue(((refused["error"] as? [String: Any])?["message"] as? String)?.contains("checklists, highlights") == true)
+
+        let allowed = try structured(call(server, "append_to_note", ["ref": "welcome", "body": "more", "allow_downgrade": true]))
+        XCTAssertEqual((allowed["result"] as? [String: Any])?["outcome"] as? String, "verified")
     }
     func testSharedGuardAndSyncTimeout() throws {
         let sample = InMemoryNotes.sample()
@@ -126,7 +142,7 @@ final class ProtocolTests: XCTestCase {
         let refused = try structured(call(server, "update_note", ["ref": "welcome", "body": "Changed"]))
         XCTAssertEqual((refused["error"] as? [String: Any])?["code"] as? String, "shared_write_refused")
         XCTAssertEqual(calls, 0)
-        let written = try structured(call(server, "update_note", ["ref": "welcome", "body": "Changed", "allow_shared": true,
+        let written = try structured(call(server, "update_note", ["ref": "welcome", "body": "Changed", "engine": "native", "allow_shared": true,
                                                                    "wait_sync": true, "sync_timeout": 0]))
         XCTAssertEqual(calls, 1)
         XCTAssertEqual((written["result"] as? [String: Any])?["syncPending"] as? Bool, true)

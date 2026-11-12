@@ -40,7 +40,9 @@ private struct FilePush: ParsableCommand {
         let result = try SafetyExecutor.run(options: write, operation: "filePush", arguments: ["path": url.path], note: note,
             allowedPaths: [note.summary.folderPath], destructive: true, plan: plan, emitDryRun: false, action: {
                 do {
-                    let value = try SingleFileSync(reader: backend.reader, writer: try backend.writer()).push(from: url)
+                    let writer = try bodyRewriteWriter(options: options, allowDowngrade: write.allowDowngrade,
+                                                       allowShared: write.allowShared, backend: backend)
+                    let value = try SingleFileSync(reader: backend.reader, writer: writer).push(from: url)
                     report = value
                     return WriteResult(outcome: .verified, noteID: note.summary.id, message: value.message)
                 } catch NotesSyncError.writeUnknown(let message) {

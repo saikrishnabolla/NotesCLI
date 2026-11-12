@@ -199,4 +199,9 @@ public protocol NotesNativeWriting {
     func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult
     func deleteSmartFolder(_ ref: String, expectedCount: Int) throws -> NativeWriteResult
     func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func appendMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
+    func prependMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
+    func insertMarkdown(_ ref: String, underHeading heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
+    func replaceSection(_ ref: String, heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
+    func replaceText(_ ref: String, find: String, replacement: String, allowShared: Bool) throws -> NativeWriteResult
 }

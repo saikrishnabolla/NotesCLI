@@ -29,6 +29,7 @@ public struct WriteVerificationRequest: Sendable {
     public var bodyBefore: String?
     public var expectedBody: String?
     public var expectedBodyIncludesTitle: Bool
+    public var nativeFeaturesBefore: [String]?
     public var folder: String?
     public var name: String?
     public var parent: String?
@@ -36,11 +37,12 @@ public struct WriteVerificationRequest: Sendable {
     public var expectedFolderPath: [String]?
     public var result: WriteResult
     public init(operation: WriteOperation, ref: String? = nil, title: String? = nil, markdown: String? = nil, bodyBefore: String? = nil,
-                expectedBody: String? = nil, expectedBodyIncludesTitle: Bool = false,
+                expectedBody: String? = nil, expectedBodyIncludesTitle: Bool = false, nativeFeaturesBefore: [String]? = nil,
                 folder: String? = nil, name: String? = nil, parent: String? = nil, account: String? = nil,
                 expectedFolderPath: [String]? = nil, result: WriteResult) {
         self.operation = operation; self.ref = ref; self.title = title; self.markdown = markdown; self.folder = folder
         self.bodyBefore = bodyBefore; self.expectedBody = expectedBody; self.expectedBodyIncludesTitle = expectedBodyIncludesTitle
+        self.nativeFeaturesBefore = nativeFeaturesBefore
         self.name = name; self.parent = parent; self.account = account
         self.expectedFolderPath = expectedFolderPath; self.result = result
     }
@@ -66,6 +68,7 @@ public struct WriteVerificationResult: Sendable {
 /// forms produced duplicate image placements. Other OS versions attempt attachment once.
 public final class ScriptingNotesWriter: NotesWriting, Sendable {
     public typealias Resolver = @Sendable (String) throws -> String?
+    public typealias NoteReader = @Sendable (String) throws -> Note
     public typealias Verifier = @Sendable (WriteVerificationRequest) throws -> WriteVerificationResult
     private let runner: any ScriptRunning
     private let timeout: TimeInterval
@@ -74,12 +77,15 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
     /// so without this a UUID would be matched as a folder name and never resolve.
     private let folderResolver: Resolver?
     private let verifier: Verifier?
+    private let noteReader: NoteReader?
     private let attachLocalImages: Bool
     private let permissionCheck: @Sendable () throws -> Void
     private let lock = NSRecursiveLock()
 
-    public init(timeout: TimeInterval = 30, resolver: Resolver? = nil, folderResolver: Resolver? = nil, verifier: Verifier? = nil) {
+    public init(timeout: TimeInterval = 30, resolver: Resolver? = nil, folderResolver: Resolver? = nil,
+                verifier: Verifier? = nil, noteReader: NoteReader? = nil) {
         self.runner = OSAScriptRunner(); self.timeout = timeout; self.resolver = resolver; self.folderResolver = folderResolver; self.verifier = verifier
+        self.noteReader = noteReader
         self.permissionCheck = { try NotesAutomationPermission.check() }
         let os = ProcessInfo.processInfo.operatingSystemVersion
         // Both documented AppleScript insertion forms duplicate images on 27.2.
@@ -88,8 +94,10 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
 
     // Test injection is internal so production calls cannot accidentally skip consent checks.
     init(runner: any ScriptRunning, timeout: TimeInterval = 30, resolver: Resolver? = nil, folderResolver: Resolver? = nil,
-         verifier: Verifier? = nil, attachLocalImages: Bool = true, permissionCheck: @escaping @Sendable () throws -> Void = {}) {
+         verifier: Verifier? = nil, noteReader: NoteReader? = nil, attachLocalImages: Bool = true,
+         permissionCheck: @escaping @Sendable () throws -> Void = {}) {
         self.runner = runner; self.timeout = timeout; self.resolver = resolver; self.folderResolver = folderResolver; self.verifier = verifier
+        self.noteReader = noteReader
         self.permissionCheck = permissionCheck
         self.attachLocalImages = attachLocalImages
     }
@@ -221,6 +229,11 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
 
     private func write(_ operation: String, fields: [String: String?], markdown: String? = nil, rawHTML: String? = nil, uuid: String? = nil) throws -> WriteResult {
         lock.lock(); defer { lock.unlock() }
+        let kind = WriteOperation(rawValue: operation)
+        let bodyRewrite = kind.map { [.appendToNote, .replaceBody, .prependToNote, .insertUnderHeading, .replaceSection, .replaceText].contains($0) } == true
+        let nativeFeaturesBefore: [String]? = bodyRewrite ? (fields["ref"] ?? nil).flatMap { ref in
+            try? noteReader?(uuid ?? ref)
+        }.map { NativeOnlyFeatures.detect(in: $0) } : nil
         let converted = markdown.map(MarkdownToNotesHTML.convert)
         var fields = fields
         if let rawHTML { fields.updateValue(rawHTML, forKey: "html") }
@@ -281,7 +294,7 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
                 }
             }
         }
-        if let verifier, let kind = WriteOperation(rawValue: operation) {
+        if let verifier, let kind {
             let exactHTML = rawHTML ?? converted?.html
             let exactBody: String?
             let exactBodyIncludesTitle: Bool
@@ -304,6 +317,7 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
             let request = WriteVerificationRequest(operation: kind, ref: fields["ref"] ?? nil, title: fields["title"] ?? nil,
                 markdown: markdown, bodyBefore: reply.bodyBefore.map { MarkdownToNotesHTML.exactPlainText(html: $0) },
                 expectedBody: exactBody, expectedBodyIncludesTitle: exactBodyIncludesTitle,
+                nativeFeaturesBefore: nativeFeaturesBefore,
                 folder: fields["folder"] ?? nil, name: fields["name"] ?? nil,
                 parent: fields["parent"] ?? nil, account: fields["account"] ?? nil,
                 expectedFolderPath: reply.folderPath ?? Self.expectedFolderPath(operation: kind, fields: fields), result: result)

@@ -2,6 +2,7 @@
 #import <dlfcn.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import <stdlib.h>
 
 static NSString *const NCErrorDomain = @"NotesCLI.NotesNative";
 static NSError *NCError(NSString *message) {
@@ -129,6 +130,8 @@ static BOOL NCRequireInstanceClass(Class cls, NSArray<NSString *> *selectors, NS
 @end
 
 static BOOL NCLoad(NSError **error) {
+    setenv("com.apple.CoreData.SQLDebug", "0", 1);
+    setenv("com.apple.CoreData.Logging.stderr", "0", 1);
     static BOOL loaded = NO;
     if (loaded) return YES;
     dlerror();

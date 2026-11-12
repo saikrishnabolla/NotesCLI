@@ -5,6 +5,7 @@ import NotesAutomation
 import NotesCore
 import NotesMCP
 import NotesNative
+import NotesSafety
 
 func writeExtraCreate(options: GlobalOptions, write: WriteOptions, title: String, folder: String?, markdown: String, paths: [String]) throws {
     let backend = try options.writable()
@@ -79,8 +80,9 @@ func writeExtraEdit(options: GlobalOptions, write: WriteOptions, ref: String) th
     guard !note.summary.isLocked else { throw NotesError("note_locked", "The note is locked.") }
     let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
     if selected == .scripting {
+        try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: write.allowDowngrade)
         try SafetyExecutor.requireAttachmentSafety(note, allowLoss: write.allowAttachmentLoss)
-        Output.error("Warning: replacing the body may downgrade attachments and checklists.")
+        if write.allowDowngrade { Output.error("Warning: replacing the body may downgrade native-only features.") }
     }
     guard let document = note.document else { throw NotesError("note_locked", "The note body is unavailable.") }
     let portableAttachments = note.attachments.map { attachment -> Attachment in

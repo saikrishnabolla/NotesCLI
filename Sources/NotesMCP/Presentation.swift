@@ -2,6 +2,11 @@ import Foundation
 import NotesCore
 
 public enum NotePresentation {
+    private struct Piece {
+        var text: String
+        var run: AttributeRun
+    }
+
     public static func json<T: Encodable>(_ value: T) throws -> Data {
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(value)
@@ -9,6 +14,43 @@ public enum NotePresentation {
     public static func object<T: Encodable>(_ value: T) throws -> Any { try JSONSerialization.jsonObject(with: json(value), options: [.fragmentsAllowed]) }
     public static func escapeHTML(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
+    }
+    private static func canMergeInline(_ left: Piece, _ right: Piece) -> Bool {
+        !left.text.contains("\n") && !right.text.contains("\n") &&
+        left.run.attachment == nil && right.run.attachment == nil &&
+        left.run.paragraph == right.run.paragraph && left.run.font == right.run.font &&
+        left.run.link == right.run.link && left.run.color == right.run.color
+    }
+    private static func highlighted(_ pieces: [Piece], html: Bool) -> String {
+        var groups: [(HighlightColor?, String)] = []
+        for piece in pieces {
+            let text = html ? escapeHTML(piece.text) : piece.text
+            if let last = groups.indices.last, groups[last].0 == piece.run.highlight { groups[last].1 += text }
+            else { groups.append((piece.run.highlight, text)) }
+        }
+        let colors: [HighlightColor: String] = [.purple: "#BA55D333", .pink: "#D5000044", .orange: "#FF6F0022", .mint: "#289C8ECC", .blue: "#2196F3"]
+        return groups.map { highlight, text in
+            guard let highlight else { return text }
+            if html { return "<mark data-apple-notes-highlight=\"\(highlight.rawValue)\" style=\"background-color:\(colors[highlight]!)\">\(text)</mark>" }
+            return "<mark data-apple-notes-highlight=\"\(highlight.rawValue)\">\(text)</mark>"
+        }.joined()
+    }
+    private static func inline(_ pieces: [Piece], html: Bool) -> String {
+        guard let run = pieces.first?.run else { return "" }
+        var value = highlighted(pieces, html: html)
+        if html {
+            if run.font.bold { value = "<strong>\(value)</strong>" }
+            if run.font.italic { value = "<em>\(value)</em>" }
+            if run.font.strikethrough { value = "<del>\(value)</del>" }
+            if run.font.underline { value = "<u>\(value)</u>" }
+            if let link = run.link { value = "<a href=\"\(escapeHTML(link))\">\(value)</a>" }
+        } else {
+            if run.font.bold { value = "**\(value)**" }
+            if run.font.italic { value = "*\(value)*" }
+            if run.font.strikethrough { value = "~~\(value)~~" }
+            if let link = run.link { value = "[\(value)](\(link))" }
+        }
+        return value
     }
     public static func render(_ note: Note, format: String, attachments: Bool = true) throws -> String {
         if format == "json" {
@@ -28,7 +70,7 @@ public enum NotePresentation {
         guard let doc = note.document else { return format == "html" ? "<p>[Locked note]</p>" : "[Locked note]" }
         let attachmentMap = Dictionary(uniqueKeysWithValues: note.attachments.map { ($0.id, $0) })
         let ns = doc.text as NSString
-        var offset = 0, body = ""
+        var offset = 0, pieces: [Piece] = []
         for run in doc.runs {
             let length = min(max(0, run.length), ns.length - offset)
             var part = ns.substring(with: NSRange(location: offset, length: length)); offset += length
@@ -40,24 +82,27 @@ public enum NotePresentation {
                 let mention = "@" + (identity.isEmpty ? ref.id : identity)
                 part = part.replacingOccurrences(of: "\u{fffc}", with: mention)
             }
+            pieces.append(Piece(text: part, run: run))
+        }
+        var body = "", pieceIndex = 0
+        while pieceIndex < pieces.count {
+            var group = [pieces[pieceIndex]]
+            while pieceIndex + group.count < pieces.count,
+                  canMergeInline(group.last!, pieces[pieceIndex + group.count]) {
+                group.append(pieces[pieceIndex + group.count])
+            }
+            pieceIndex += group.count
+            let run = group[0].run
+            var part = group.map(\.text).joined()
             if format == "html" {
-                part = escapeHTML(part)
-                if run.font.bold { part = "<strong>\(part)</strong>" }
-                if run.font.italic { part = "<em>\(part)</em>" }
-                if run.font.strikethrough { part = "<del>\(part)</del>" }
-                if run.font.underline { part = "<u>\(part)</u>" }
-                if let link = run.link { part = "<a href=\"\(escapeHTML(link))\">\(part)</a>" }
+                part = inline(group, html: true)
             } else if format == "markdown" {
                 let trailingNewlines = String(part.reversed().prefix { $0 == "\n" || $0 == "\r" }.reversed())
                 part.removeLast(trailingNewlines.count)
                 var paragraphs = part.components(separatedBy: "\n").map { paragraph in
-                    var paragraph = paragraph
-                    if run.font.bold { paragraph = "**\(paragraph)**" }
-                    if run.font.italic { paragraph = "*\(paragraph)*" }
-                    if run.font.strikethrough { paragraph = "~~\(paragraph)~~" }
-                    if let link = run.link { paragraph = "[\(paragraph)](\(link))" }
-                    return paragraph
+                    inline([Piece(text: paragraph, run: run)], html: false)
                 }
+                if group.count > 1 { paragraphs = [inline(group, html: false)] }
                 if let p = run.paragraph {
                     let prefix: String
                     switch p.kind {

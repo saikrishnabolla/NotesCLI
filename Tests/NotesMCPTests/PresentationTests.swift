@@ -3,6 +3,23 @@ import NotesCore
 import NotesMCP
 
 final class PresentationTests: XCTestCase {
+    func testHighlightRendersWithoutSplittingSharedBoldFormatting() throws {
+        var note = try InMemoryNotes.sample().note("welcome")
+        note.document = NoteDocument(text: "notescli-test-smoke", runs: [
+            AttributeRun(length: 4, paragraph: ParagraphStyle(kind: .body), font: FontStyle(bold: true), highlight: .purple),
+            AttributeRun(length: 15, paragraph: ParagraphStyle(kind: .body), font: FontStyle(bold: true)),
+        ])
+
+        XCTAssertEqual(
+            try NotePresentation.render(note, format: "markdown", attachments: false),
+            "**<mark data-apple-notes-highlight=\"purple\">note</mark>scli-test-smoke**"
+        )
+        XCTAssertEqual(
+            try NotePresentation.render(note, format: "html", attachments: false),
+            "<div><strong><mark data-apple-notes-highlight=\"purple\" style=\"background-color:#BA55D333\">note</mark>scli-test-smoke</strong></div>"
+        )
+    }
+
     func testMarkdownPrefixesEveryListItemCoveredByOneRun() throws {
         var note = try InMemoryNotes.sample().note("welcome")
         note.document = NoteDocument(text: "one\ntwo\nthree\n", runs: [

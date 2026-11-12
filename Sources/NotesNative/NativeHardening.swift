@@ -51,6 +51,17 @@ enum NativeVerificationRules {
         }
         return counts(lhs) == counts(rhs)
     }
+
+    static func exactRuns(_ document: NoteDocument, range: UTF16Range, match: (AttributeRun) -> Bool) -> Bool {
+        var offset = 0, selected: [AttributeRun] = []
+        let end = range.location + range.length
+        for run in document.runs {
+            let runEnd = offset + run.length
+            if offset < end && runEnd > range.location { selected.append(run) }
+            offset = runEnd
+        }
+        return !selected.isEmpty && selected.allSatisfy(match)
+    }
 }
 
 enum NativeSharedWriteGuard {

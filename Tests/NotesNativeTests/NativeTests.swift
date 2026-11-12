@@ -138,6 +138,14 @@ final class NativeTests: XCTestCase {
 
         XCTAssertTrue(NativeVerificationRules.attachment(["new-attachment"], id: "new-attachment"))
         XCTAssertFalse(NativeVerificationRules.attachment(["new-attachment", "new-attachment"], id: "new-attachment"))
+
+        let persisted = NoteDocument(text: "notes", runs: [
+            AttributeRun(length: 4, highlight: .purple),
+            AttributeRun(length: 1),
+        ])
+        XCTAssertTrue(NativeVerificationRules.exactRuns(persisted, range: UTF16Range(location: 0, length: 4)) { $0.highlight == .purple })
+        XCTAssertFalse(NativeVerificationRules.exactRuns(persisted, range: UTF16Range(location: 0, length: 5)) { $0.highlight == .purple })
+        XCTAssertFalse(NativeVerificationRules.exactRuns(NoteDocument(text: "note", runs: []), range: UTF16Range(location: 0, length: 4)) { _ in true })
     }
 
     func testWholeBodyVerificationRequiresTheFullMarkerMultiset() {

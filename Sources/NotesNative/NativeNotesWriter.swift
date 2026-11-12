@@ -970,8 +970,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return result(id(note), native: ["formatted": "true", "location": "\(range.location)", "length": "\(range.length)"], nativeVerified: nativeMatches,
                       sqlite: { n in
             guard let document = n.document else { return nil }
-            let runs = Self.documentRuns(document, in: range)
-            guard !runs.isEmpty, runs.allSatisfy({ Self.matches($0, format: format) }) else { return nil }
+            guard NativeVerificationRules.exactRuns(document, range: range, match: { Self.matches($0, format: format) }) else { return nil }
             return ["formatted": "true", "location": "\(range.location)", "length": "\(range.length)"]
         })
         }

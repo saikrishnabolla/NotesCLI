@@ -214,6 +214,10 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         var document: NoteDocument
         do { document = try NotesDecoder.decode(data) }
         catch let error as DecodeError { throw NotesError("decode_\(error.rawValue)", "Cannot decode the note body.") }
+        if let outlineData = noteRows[pk]?.data("ZOUTLINESTATEDATA"), !outlineData.isEmpty {
+            do { document.applyCollapsedParagraphIDs(try NotesOutlineDecoder.decode(outlineData)) }
+            catch let error as DecodeError { throw NotesError("outline_\(error.rawValue)", "Cannot decode the note outline state.") }
+        }
         var rows = attachmentRows[pk] ?? []
         let known = Set(rows.compactMap { $0.string("ZIDENTIFIER")?.lowercased() })
         for ref in document.runs.compactMap(\.attachment) where !known.contains(ref.id.lowercased()) {

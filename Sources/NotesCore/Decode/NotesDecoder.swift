@@ -23,6 +23,8 @@ public enum NotesDecoder {
                 let quote = p.int(8) ?? 0
                 var style = ParagraphStyle(kind: kinds[p.int(1) ?? -1] ?? (quote > 0 ? .blockquote : .body), indent: max(0, p.int(4) ?? 0), checked: checklist.map { ($0.int(2) ?? 0) != 0 }, checklistID: checklist?.data(1).map(uuid), startNumber: p.int(7))
                 style.alignment = p.int(2); style.blockQuoteLevel = quote > 0 ? quote : nil
+                style.writingDirection = p.int(3).map { $0 - 1 }
+                style.id = p.data(9).map(uuid)
                 paragraph = style
             }
             let f = try run.message(3)
@@ -42,7 +44,8 @@ public enum NotesDecoder {
             }
             let a = try run.message(12)
             let attachment = a.map { InlineRef(id: $0.string(1) ?? "", typeUTI: $0.string(2) ?? "public.data") }
-            return AttributeRun(length: length, paragraph: paragraph, font: font, link: run.string(9), color: color, attachment: attachment)
+            return AttributeRun(length: length, paragraph: paragraph, font: font, link: run.string(9), color: color,
+                                highlight: run.int(14).flatMap(HighlightColor.init(notesValue:)), attachment: attachment)
         }
         // Some versions omit runs for the trailing unstyled text.
         return NoteDocument(text: text, runs: runs)

@@ -55,6 +55,20 @@ public enum NativeParagraphStyle: String, Codable, Sendable, CaseIterable {
     }
 }
 
+public enum NativeParagraphAlignment: String, Codable, Sendable, CaseIterable {
+    case left, right, center, justified, natural
+    public var value: Int {
+        switch self { case .left: 0; case .right: 1; case .center: 2; case .justified: 3; case .natural: 4 }
+    }
+}
+
+public enum NativeWritingDirection: String, Codable, Sendable, CaseIterable {
+    case natural, leftToRight = "left-to-right", rightToLeft = "right-to-left"
+    public var value: Int {
+        switch self { case .natural: -1; case .leftToRight: 0; case .rightToLeft: 1 }
+    }
+}
+
 public struct InlineFormat: Codable, Sendable {
     public var bold: Bool?
     public var italic: Bool?
@@ -64,10 +78,19 @@ public struct InlineFormat: Codable, Sendable {
     public var clearLink = false
     public var color: String?
     public var clearColor = false
+    public var superscript: Int?
+    public var fontName: String?
+    public var fontSize: Double?
+    public var highlight: HighlightColor?
+    public var clearHighlight = false
     public init(bold: Bool? = nil, italic: Bool? = nil, underline: Bool? = nil, strike: Bool? = nil,
-                link: String? = nil, clearLink: Bool = false, color: String? = nil, clearColor: Bool = false) {
+                link: String? = nil, clearLink: Bool = false, color: String? = nil, clearColor: Bool = false,
+                superscript: Int? = nil, fontName: String? = nil, fontSize: Double? = nil,
+                highlight: HighlightColor? = nil, clearHighlight: Bool = false) {
         self.bold = bold; self.italic = italic; self.underline = underline; self.strike = strike
         self.link = link; self.clearLink = clearLink; self.color = color; self.clearColor = clearColor
+        self.superscript = superscript; self.fontName = fontName; self.fontSize = fontSize
+        self.highlight = highlight; self.clearHighlight = clearHighlight
     }
 }
 
@@ -128,7 +151,9 @@ public protocol NotesNativeWriting {
     func deleteRange(_ ref: String, range: UTF16Range, allowShared: Bool) throws -> NativeWriteResult
     func replaceRange(_ ref: String, range: UTF16Range, text: String, allowShared: Bool) throws -> NativeWriteResult
     func searchOffsets(_ ref: String, text: String, caseInsensitive: Bool) throws -> [UTF16Range]
-    func setParagraphStyle(_ ref: String, range: UTF16Range, style: NativeParagraphStyle, indent: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func setParagraphStyle(_ ref: String, range: UTF16Range, style: NativeParagraphStyle, indent: Int?,
+                           alignment: NativeParagraphAlignment?, writingDirection: NativeWritingDirection?, collapsed: Bool?,
+                           allowShared: Bool) throws -> NativeWriteResult
     func setInlineFormat(_ ref: String, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult
     func insertFile(_ ref: String, file: URL, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
     func insertFrozenFile(_ ref: String, frozen: FrozenAttachmentInput, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult

@@ -106,10 +106,16 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
     case "text_replace": return try result(writer.replaceRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), text: string("text")!, allowShared: (boolean("allow_shared") ?? false)))
     case "format_paragraph":
         guard let style = NativeParagraphStyle(rawValue: string("style") ?? "") else { throw NotesError("invalid_style", "Unknown paragraph style.") }
-        return try result(writer.setParagraphStyle(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), style: style, indent: integer("indent"), allowShared: (boolean("allow_shared") ?? false)))
+        let alignment = string("alignment").flatMap(NativeParagraphAlignment.init(rawValue:))
+        let direction = string("writing_direction").flatMap(NativeWritingDirection.init(rawValue:))
+        return try result(writer.setParagraphStyle(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), style: style, indent: integer("indent"),
+                                                   alignment: alignment, writingDirection: direction, collapsed: boolean("collapsed"), allowShared: (boolean("allow_shared") ?? false)))
     case "format_inline":
+        let script = boolean("superscript") == true ? 1 : (boolean("subscript") == true ? -1 : (boolean("clear_script") == true ? 0 : nil))
         let format = InlineFormat(bold: boolean("bold"), italic: boolean("italic"), underline: boolean("underline"), strike: boolean("strike"),
-                                  link: string("link"), clearLink: boolean("clear_link") ?? false, color: string("color"), clearColor: boolean("clear_color") ?? false)
+                                  link: string("link"), clearLink: boolean("clear_link") ?? false, color: string("color"), clearColor: boolean("clear_color") ?? false,
+                                  superscript: script, fontName: string("font_name"), fontSize: (arguments["font_size"] as? NSNumber)?.doubleValue,
+                                  highlight: string("highlight").flatMap(HighlightColor.init(rawValue:)), clearHighlight: boolean("clear_highlight") ?? false)
         return try result(writer.setInlineFormat(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format, allowShared: (boolean("allow_shared") ?? false)))
     case "attach_file":
         let value = try writer.insertFile(ref(), file: URL(fileURLWithPath: string("path")!), position: integer("position"), imageView: string("view"), allowShared: (boolean("allow_shared") ?? false))

@@ -149,6 +149,19 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(NativeParagraphStyle.checklist.number, 103)
     }
 
+    func testExtendedFormattingModelsUseNotesValues() {
+        XCTAssertEqual(NativeParagraphAlignment.center.value, 2)
+        XCTAssertEqual(NativeWritingDirection.leftToRight.value, 0)
+        XCTAssertEqual(NativeWritingDirection.rightToLeft.value, 1)
+
+        let format = InlineFormat(superscript: -1, fontName: "AvenirNext-Regular", fontSize: 17.5, highlight: .mint)
+        XCTAssertEqual(format.superscript, -1)
+        XCTAssertEqual(format.fontName, "AvenirNext-Regular")
+        XCTAssertEqual(format.fontSize, 17.5)
+        XCTAssertEqual(format.highlight, .mint)
+        XCTAssertEqual(format.highlight?.notesValue, 4)
+    }
+
     func testUTF16RangeCountsSurrogatePairs() {
         XCTAssertEqual(("a😀b" as NSString).length, 4)
         XCTAssertEqual(UTF16Range(location: 1, length: 2), UTF16Range(location: 1, length: 2))

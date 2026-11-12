@@ -158,8 +158,10 @@ public final class MCPServer {
                 t("text_insert", "Insert text at a UTF-16 position.", ["ref", "text", "position"], ["ref": string, "text": string, "position": integer], write: true, native: true),
                 t("text_delete", "Delete a UTF-16 range.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer], write: true, native: true, destructive: true),
                 t("text_replace", "Replace a UTF-16 range.", ["ref", "start", "length", "text"], ["ref": string, "start": integer, "length": integer, "text": string], write: true, native: true, destructive: true),
-                t("format_paragraph", "Apply a native paragraph style.", ["ref", "start", "length", "style"], ["ref": string, "start": integer, "length": integer, "style": string, "indent": integer], write: true, native: true),
-                t("format_inline", "Apply native inline formatting.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "clear_link": bool, "clear_color": bool], write: true, native: true),
+                // MARK: w4-format begin
+                t("format_paragraph", "Apply native paragraph formatting.", ["ref", "start", "length", "style"], ["ref": string, "start": integer, "length": integer, "style": string, "indent": integer, "alignment": string, "writing_direction": string, "collapsed": bool], write: true, native: true),
+                t("format_inline", "Apply native inline formatting.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "clear_link": bool, "clear_color": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number"], "highlight": string, "clear_highlight": bool], write: true, native: true),
+                // MARK: w4-format end
                 t("attach_file", "Insert a file or positioned image.", ["ref", "path"], ["ref": string, "path": string, "position": integer, "view": string], write: true, native: true),
                 t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),
                 t("table_create", "Create a native table.", ["ref", "rows"], ["ref": string, "rows": rows, "position": integer], write: true, native: true),

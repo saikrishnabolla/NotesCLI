@@ -154,6 +154,8 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *NCInstanceSelectors(void
                      @"setShouldAddMediaAsynchronously:", @"updateChangeCountWithReason:"],
         @"ICInlineAttachment": @[@"markForDeletion"],
         @"ICTTParagraphStyle": @[@"setStyle:", @"setIndent:", @"setBlockQuoteLevel:", @"todo"],
+        @"ICTTFont": @[@"initWithName:size:hints:", @"fontName", @"pointSize", @"fontHints"],
+        @"ICOutlineState": @[@"initWithCollapsedUUIDs:", @"data", @"collapsedUUIDStrings"],
         @"ICTTTodo": @[@"initWithIdentifier:done:", @"todoWithDone:"],
         @"ICAttachment": @[@"markForDeletion", @"attachmentModel", @"updateChangeCountWithReason:", @"setPreferredViewSize:"],
         @"ICFolder": @[@"updateChangeCountWithReason:"],
@@ -289,6 +291,40 @@ static void NCInstallTableStyleMethod(void) {
         result = made;
     })) return nil;
     return result;
+}
+
++ (id)fontWithName:(NSString *)name size:(NSNumber *)size hints:(NSInteger)hints basedOn:(id)existing error:(NSError **)error {
+    if (!NCLoad(error)) return nil;
+    Class cls = NSClassFromString(@"ICTTFont");
+    if (!NCRequireInstanceClass(cls, @[@"initWithName:size:hints:"], @"creating font", error)) return nil;
+    if (existing && !NCRequireObject(existing, @[@"fontName", @"pointSize"], @"reading font", error)) return nil;
+    __block id result = nil;
+    if (!NCCatch(@"creating font", error, ^{
+        NSString *resolvedName = name ?: (existing ? [existing valueForKey:@"fontName"] : nil);
+        double resolvedSize = size ? size.doubleValue : (existing ? [[existing valueForKey:@"pointSize"] doubleValue] : NSFont.systemFontSize);
+        if (!resolvedName.length) resolvedName = [NSFont systemFontOfSize:resolvedSize].fontName;
+        SEL selector = NSSelectorFromString(@"initWithName:size:hints:");
+        result = ((id (*)(id, SEL, id, double, unsigned int))objc_msgSend)([cls alloc], selector, resolvedName, resolvedSize, (unsigned int)MAX(0, hints));
+    })) return nil;
+    return result;
+}
+
++ (NSData *)outlineStateDataWithCollapsedUUIDStrings:(NSArray<NSString *> *)identifiers error:(NSError **)error {
+    if (!NCLoad(error)) return nil;
+    Class cls = NSClassFromString(@"ICOutlineState");
+    if (!NCRequireInstanceClass(cls, @[@"initWithCollapsedUUIDs:", @"data"], @"creating outline state", error)) return nil;
+    NSMutableSet<NSUUID *> *uuids = [NSMutableSet set];
+    for (NSString *identifier in identifiers) {
+        NSUUID *uuid = [[NSUUID alloc] initWithUUIDString:identifier];
+        if (!uuid) { if (error) *error = NCError([NSString stringWithFormat:@"invalid paragraph UUID: %@", identifier]); return nil; }
+        [uuids addObject:uuid];
+    }
+    __block NSData *data = nil;
+    if (!NCCatch(@"creating outline state", error, ^{
+        id state = ((id (*)(id, SEL, id))objc_msgSend)([cls alloc], NSSelectorFromString(@"initWithCollapsedUUIDs:"), uuids);
+        data = ((id (*)(id, SEL))objc_msgSend)(state, NSSelectorFromString(@"data"));
+    })) return nil;
+    return data;
 }
 
 + (id)attachmentMarkerWithID:(NSString *)identifier type:(NSString *)type error:(NSError **)error {

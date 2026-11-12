@@ -73,6 +73,23 @@ final class ReaderDecodeTests: XCTestCase {
         let hints = try NotesDecoder.decode(PB.wrap(PB.note("x", [PB.int(1, 1) + PB.int(5, 3)])))
         XCTAssertTrue(hints.runs[0].font.bold && hints.runs[0].font.italic)
     }
+    func testHighlightParagraphIdentityAndWritingDirection() throws {
+        let paragraphID = Data([0x11,0x11,0x11,0x11,0x22,0x22,0x33,0x33,0x44,0x44,0x55,0x55,0x55,0x55,0x55,0x55])
+        let paragraph = PB.int(1, 1) + PB.int(3, 2) + PB.bytes(9, paragraphID)
+        let run = PB.int(1, 4) + PB.bytes(2, paragraph) + PB.int(14, 4)
+        let document = try NotesDecoder.decode(PB.wrap(PB.note("mint", [run])))
+
+        XCTAssertEqual(document.runs[0].highlight, .mint)
+        XCTAssertEqual(document.runs[0].paragraph?.writingDirection, 1)
+        XCTAssertEqual(document.runs[0].paragraph?.id, "11111111-2222-3333-4444-555555555555")
+    }
+    func testOutlineStateDecodingUsesLiteralArchiveValues() throws {
+        let bytes = Data(hex: "09ce70675b9952c84112513a4f5b2241414141414141412d424242422d434343432d444444442d454545454545454545454545222c2231313131313131312d323232322d333333332d343434342d353535353535353535353535225d")
+        XCTAssertEqual(try NotesOutlineDecoder.decode(bytes), [
+            "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+            "11111111-2222-3333-4444-555555555555"
+        ])
+    }
     func testWireUnknownFieldsAndMalformedInput() throws {
         let message = try ProtobufMessage(PB.int(99, 42) + PB.text(100, "unknown") + PB.float(101, 1))
         XCTAssertEqual(message.int(99), 42)
@@ -150,6 +167,11 @@ final class ReaderRendererTests: XCTestCase {
         let unsafe = NoteDocument(text:"<script>&",runs:[.init(length:9,link:"javascript:alert(1)")])
         XCTAssertEqual(unsafe.html(),"<p><a href=\"\">&lt;script&gt;&amp;</a></p>")
     }
+    func testHighlightRenderingPreservesPaletteColor() {
+        let document = NoteDocument(text: "mint", runs: [.init(length: 4, highlight: .mint)])
+        XCTAssertEqual(document.markdown(), "<mark data-apple-notes-highlight=\"mint\">mint</mark>")
+        XCTAssertEqual(document.html(), "<p><mark data-apple-notes-highlight=\"mint\" style=\"background-color:#289C8ECC\">mint</mark></p>")
+    }
     func testLiteralMarkdownAndUnsafeLinkNormalization() {
         let body = NoteDocument(text:"# Literal heading\n- Literal list\n1. Literal number\n#tag",runs:[])
         XCTAssertEqual(body.markdown(),"\\# Literal heading\n\\- Literal list\n1\\. Literal number\n#tag")
@@ -173,5 +195,14 @@ final class ReaderRendererTests: XCTestCase {
         XCTAssertEqual(doc.markdown(attachments:attachments),"![image.png](/private/image.png)\n[attachment: public.data](notescli-attachment:file)\n#work\n@Pat\n[Other note](applenotes://showNote?identifier=ABC)\n| Name | Value |\n| --- | --- |\n| A\\|B | C<br>D |\n")
         XCTAssertEqual(doc.plainText(attachments:attachments),"image.png\nattachment: public.data\n#work\n@Pat\nOther note\nName\tValue\nA|B\tC\nD\n")
         XCTAssertTrue(doc.html().contains("<table><tr><td>Name</td><td>Value</td></tr><tr><td>A|B</td><td>C<br>D</td></tr></table>"))
+    }
+}
+
+private extension Data {
+    init(hex: String) {
+        self.init(stride(from: 0, to: hex.count, by: 2).map { offset in
+            let start = hex.index(hex.startIndex, offsetBy: offset)
+            return UInt8(hex[start..<hex.index(start, offsetBy: 2)], radix: 16)!
+        })
     }
 }

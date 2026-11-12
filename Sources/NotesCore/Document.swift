@@ -5,8 +5,33 @@ import Foundation
 public struct NoteDocument: Codable, Sendable, Equatable {
     public var text: String
     public var tables: [String: [[String]]]?
+    public var collapsedParagraphIDs: [String]?
     public var runs: [AttributeRun]
-    public init(text: String, runs: [AttributeRun]) { self.text = text; self.runs = runs }
+    public init(text: String, runs: [AttributeRun], collapsedParagraphIDs: [String]? = nil) {
+        self.text = text; self.runs = runs; self.collapsedParagraphIDs = collapsedParagraphIDs
+    }
+
+    public mutating func applyCollapsedParagraphIDs(_ ids: [String]) {
+        collapsedParagraphIDs = ids
+        let collapsed = Set(ids.map { $0.uppercased() })
+        for index in runs.indices {
+            guard let paragraph = runs[index].paragraph,
+                  paragraph.kind == .heading || paragraph.kind == .subheading,
+                  let id = paragraph.id else { continue }
+            runs[index].paragraph?.collapsed = collapsed.contains(id.uppercased())
+        }
+    }
+}
+
+public enum HighlightColor: String, Codable, Sendable, Equatable, CaseIterable {
+    case purple, pink, orange, mint, blue
+
+    public init?(notesValue: Int) {
+        guard (1...5).contains(notesValue) else { return nil }
+        self = Self.allCases[notesValue - 1]
+    }
+
+    public var notesValue: Int { Self.allCases.firstIndex(of: self)! + 1 }
 }
 
 public struct AttributeRun: Codable, Sendable, Equatable {
@@ -15,11 +40,12 @@ public struct AttributeRun: Codable, Sendable, Equatable {
     public var font: FontStyle
     public var link: String?
     public var color: String?          // "#RRGGBB"
+    public var highlight: HighlightColor?
     public var attachment: InlineRef?
     public init(length: Int, paragraph: ParagraphStyle? = nil, font: FontStyle = FontStyle(),
-                link: String? = nil, color: String? = nil, attachment: InlineRef? = nil) {
+                link: String? = nil, color: String? = nil, highlight: HighlightColor? = nil, attachment: InlineRef? = nil) {
         self.length = length; self.paragraph = paragraph; self.font = font
-        self.link = link; self.color = color; self.attachment = attachment
+        self.link = link; self.color = color; self.highlight = highlight; self.attachment = attachment
     }
 }
 
@@ -29,11 +55,14 @@ public struct ParagraphStyle: Codable, Sendable, Equatable {
     }
     public var kind: Kind
     public var alignment: Int?
+    public var writingDirection: Int?  // 0 left-to-right, 1 right-to-left
     public var blockQuoteLevel: Int?
     public var indent: Int
     public var checked: Bool?         // checklist items only
     public var checklistID: String?   // stable item id from Notes
     public var startNumber: Int?      // numbered lists
+    public var id: String?             // paragraph UUID
+    public var collapsed: Bool?        // headings and subheadings
     public init(kind: Kind, indent: Int = 0, checked: Bool? = nil, checklistID: String? = nil, startNumber: Int? = nil) {
         self.kind = kind; self.indent = indent; self.checked = checked; self.checklistID = checklistID; self.startNumber = startNumber
     }

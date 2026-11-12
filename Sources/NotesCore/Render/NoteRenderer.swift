@@ -139,10 +139,15 @@ public enum NoteRenderer {
             if font.strikethrough { result = "~~\(result)~~" }
             if font.underline { result = "<u>\(result)</u>" }
             if font.superscript != 0 { let tag = font.superscript > 0 ? "sup" : "sub"; result = "<\(tag)>\(result)</\(tag)>" }
+            if let highlight = run.highlight { result = "<mark data-apple-notes-highlight=\"\(highlight.rawValue)\">\(result)</mark>" }
             if let link = run.link { result = "[\(result)](\(destination(safeURL(link))))" }
         } else {
             for (enabled, tag) in [(font.bold, "strong"), (font.italic, "em"), (font.strikethrough, "del"), (font.underline, "u"), (font.superscript > 0, "sup"), (font.superscript < 0, "sub")] where enabled { result = "<\(tag)>\(result)</\(tag)>" }
             if let color = run.color, color.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil { result = "<span style=\"color:\(color)\">\(result)</span>" }
+            if let highlight = run.highlight {
+                let colors: [HighlightColor: String] = [.purple: "#BA55D333", .pink: "#D5000044", .orange: "#FF6F0022", .mint: "#289C8ECC", .blue: "#2196F3"]
+                result = "<mark data-apple-notes-highlight=\"\(highlight.rawValue)\" style=\"background-color:\(colors[highlight]!)\">\(result)</mark>"
+            }
             if let link = run.link { result = "<a href=\"\(escaped(safeURL(link), .html))\">\(result)</a>" }
         }
         return leading + result + trailing

@@ -789,17 +789,45 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return rows }
     }
 
-    public func setParagraphStyle(_ ref: String, range: UTF16Range, style: NativeParagraphStyle, indent: Int?, allowShared: Bool) throws -> NativeWriteResult {
+    public func setParagraphStyle(_ ref: String, range: UTF16Range, style: NativeParagraphStyle, indent: Int?,
+                                  alignment: NativeParagraphAlignment? = nil, writingDirection: NativeWritingDirection? = nil,
+                                  collapsed: Bool? = nil, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
-        let (note, after) = try mutateBody(ref, context: context, allowShared: allowShared) { _, editor, original in
+        let (note, after) = try mutateBody(ref, context: context, allowShared: allowShared) { note, editor, original in
             let target = try self.valid(range, length: original.length, allowEmpty: false)
             var runs: [(NSRange, [NSAttributedString.Key: Any])] = []
             original.enumerateAttributes(in: target) { attrs, run, _ in runs.append((run, attrs)) }
             var writes: [(NSRange, [NSAttributedString.Key: Any])] = []
+            var paragraphIDs: [String] = []
             for (run, attrs) in runs {
                 var copy = attrs; let old = attrs[.init("TTStyle")] as AnyObject?
-                copy[.init("TTStyle")] = try NCNotesRuntime.paragraphStyle(style.number, indent: indent ?? (self.value(old, "indent") as? Int ?? 0), quote: style == .blockquote ? 1 : (self.value(old, "blockQuoteLevel") as? Int ?? 0), checked: style == .checklist ? 0 : -1, basedOn: old)
+                if let old { try self.require(["indent", "blockQuoteLevel"], of: old) }
+                let made = try NCNotesRuntime.paragraphStyle(style.number, indent: indent ?? (self.value(old, "indent") as? Int ?? 0), quote: style == .blockquote ? 1 : (self.value(old, "blockQuoteLevel") as? Int ?? 0), checked: style == .checklist ? 0 : -1, basedOn: old)
+                if let alignment {
+                    try self.require(["setAlignment:"], of: made as AnyObject)
+                    try NCNotesRuntime.setValue(alignment.value, forKey: "alignment", of: made as AnyObject)
+                }
+                if let writingDirection {
+                    try self.require(["setWritingDirection:"], of: made as AnyObject)
+                    try NCNotesRuntime.setValue(writingDirection.value, forKey: "writingDirection", of: made as AnyObject)
+                }
+                if collapsed != nil {
+                    try self.require(["uuid", "supportsSectionLinks"], of: made as AnyObject)
+                    if self.value(made as AnyObject, "supportsSectionLinks") as? Bool == true,
+                       let uuid = self.value(made as AnyObject, "uuid") as? UUID { paragraphIDs.append(uuid.uuidString) }
+                }
+                copy[.init("TTStyle")] = made
                 writes.append((run, copy))
+            }
+            if let collapsed {
+                guard !paragraphIDs.isEmpty else { throw NotesError("not_collapsible", "The selected range has no collapsible heading or subheading.") }
+                try self.require(["outlineState", "setOutlineStateData:", "outlineStateData"], of: note)
+                let state = self.value(note, "outlineState") as AnyObject?
+                if let state { try self.require(["collapsedUUIDStrings"], of: state) }
+                var ids = Set((state.flatMap { self.value($0, "collapsedUUIDStrings") as? [String] }) ?? [])
+                for id in paragraphIDs { if collapsed { ids.insert(id) } else { ids.remove(id) } }
+                let data = try NCNotesRuntime.outlineStateData(collapsedUUIDStrings: ids.sorted())
+                try NCNotesRuntime.setValue(data, forKey: "outlineStateData", of: note)
             }
             try editor.begin(["attributes"]); for row in writes { try editor.setAttributes(row.1, range: row.0) }
         }
@@ -809,13 +837,28 @@ public final class NativeNotesWriter: NotesNativeWriting {
             guard let raw = raw as AnyObject? else { nativeMatches = false; return }
             let styleMatches = style == .blockquote ? (value(raw, "style") as? Int == 3 && (value(raw, "blockQuoteLevel") as? Int ?? 0) > 0) : value(raw, "style") as? Int == style.number
             let indentMatches = indent.map { value(raw, "indent") as? Int == $0 } ?? true
-            nativeMatches = nativeMatches && styleMatches && indentMatches
+            let alignmentMatches = alignment.map { value(raw, "alignment") as? Int == $0.value } ?? true
+            let directionMatches = writingDirection.map { value(raw, "writingDirection") as? Int == $0.value } ?? true
+            nativeMatches = nativeMatches && styleMatches && indentMatches && alignmentMatches && directionMatches
+        }
+        if let collapsed {
+            try require(["outlineStateData"], of: note)
+            guard let data = value(note, "outlineStateData") as? Data else { nativeMatches = false; return result(id(note), native: [:], nativeVerified: false) }
+            let ids = Set(try NotesOutlineDecoder.decode(data))
+            let selectedIDs = after.attribute(.init("TTStyle"), at: target.location, effectiveRange: nil).flatMap { value($0 as AnyObject, "uuid") as? UUID }.map { [$0.uuidString] } ?? []
+            nativeMatches = nativeMatches && !selectedIDs.isEmpty && selectedIDs.allSatisfy { ids.contains($0) == collapsed }
         }
         return result(id(note), native: ["style": style.rawValue, "location": "\(range.location)", "length": "\(range.length)"], nativeVerified: nativeMatches,
                       sqlite: { n in
             guard let document = n.document else { return nil }
             let runs = Self.documentRuns(document, in: range)
-            guard !runs.isEmpty, runs.allSatisfy({ $0.paragraph?.kind.rawValue == style.rawValue && (indent == nil || $0.paragraph?.indent == indent) }) else { return nil }
+            guard !runs.isEmpty, runs.allSatisfy({ run in
+                run.paragraph?.kind.rawValue == style.rawValue &&
+                (indent == nil || run.paragraph?.indent == indent) &&
+                (alignment == nil || run.paragraph?.alignment == alignment?.value) &&
+                (writingDirection == nil || run.paragraph?.writingDirection == writingDirection?.value) &&
+                (collapsed == nil || run.paragraph?.collapsed == collapsed)
+            }) else { return nil }
             return ["style": style.rawValue, "location": "\(range.location)", "length": "\(range.length)"]
         })
         }
@@ -823,22 +866,36 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func setInlineFormat(_ ref: String, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
+        if let superscript = format.superscript, !(-1...1).contains(superscript) { throw NotesError("invalid_superscript", "Superscript must be -1, 0, or 1.") }
+        if let size = format.fontSize, !size.isFinite || size <= 0 { throw NotesError("invalid_font_size", "Font size must be a positive number.") }
+        if let name = format.fontName, name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { throw NotesError("invalid_font_name", "Font name cannot be empty.") }
         let requestedColor = try format.color.map(Self.color)
         let (note, after) = try mutateBody(ref, context: context, allowShared: allowShared) { _, editor, original in
-            let target = try self.valid(range, length: original.length, allowEmpty: false); var writes: [(NSRange, [NSAttributedString.Key: Any])] = []
-            original.enumerateAttributes(in: target) { attrs, run, _ in
+            let target = try self.valid(range, length: original.length, allowEmpty: false)
+            var runs: [(NSRange, [NSAttributedString.Key: Any])] = []
+            original.enumerateAttributes(in: target) { attrs, run, _ in runs.append((run, attrs)) }
+            var writes: [(NSRange, [NSAttributedString.Key: Any])] = []
+            for (run, attrs) in runs {
                 var copy = attrs, hints = copy[.init("TTHints")] as? Int ?? 0
                 if let bold = format.bold { hints = bold ? hints | 1 : hints & ~1 }; if let italic = format.italic { hints = italic ? hints | 2 : hints & ~2 }; copy[.init("TTHints")] = hints == 0 ? nil : hints
                 if let underline = format.underline { copy[.init("TTUnderline")] = underline ? 1 : nil }; if let strike = format.strike { copy[.init("TTStrikethrough")] = strike ? 1 : nil }
                 if format.clearLink { copy[.init("NSLink")] = nil } else if let link = format.link { copy[.init("NSLink")] = URL(string: link) ?? link }
                 if format.clearColor { copy[.init("TTColor")] = nil } else if let requestedColor { copy[.init("TTColor")] = requestedColor }
+                if let superscript = format.superscript { copy[.init("NSSuperScript")] = superscript == 0 ? nil : superscript }
+                if format.clearHighlight { copy[.init("TTEmphasis")] = nil } else if let highlight = format.highlight { copy[.init("TTEmphasis")] = highlight.notesValue }
+                let oldFont = copy[.init("ICTTFont")] as AnyObject?
+                if format.fontName != nil || format.fontSize != nil || (oldFont != nil && (format.bold != nil || format.italic != nil)) {
+                    if let oldFont { try self.require(["fontName", "pointSize", "fontHints"], of: oldFont) }
+                    copy[.init("ICTTFont")] = try NCNotesRuntime.font(name: format.fontName, size: format.fontSize.map(NSNumber.init(value:)), hints: hints, basedOn: oldFont)
+                }
                 writes.append((run, copy))
             }
             try editor.begin(["attributes"]); for row in writes { try editor.setAttributes(row.1, range: row.0) }
         }
         let target = try valid(range, length: after.length, allowEmpty: false)
-        var nativeMatches = true
-        after.enumerateAttributes(in: target) { attrs, _, _ in nativeMatches = nativeMatches && Self.matches(attrs, format: format) }
+        var attributeRows: [[NSAttributedString.Key: Any]] = []
+        after.enumerateAttributes(in: target) { attrs, _, _ in attributeRows.append(attrs) }
+        let nativeMatches = try attributeRows.allSatisfy { try Self.matches($0, format: format) }
         return result(id(note), native: ["formatted": "true", "location": "\(range.location)", "length": "\(range.length)"], nativeVerified: nativeMatches,
                       sqlite: { n in
             guard let document = n.document else { return nil }
@@ -859,7 +916,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
         return rows
     }
-    fileprivate static func matches(_ attrs: [NSAttributedString.Key: Any], format: InlineFormat) -> Bool {
+    fileprivate static func matches(_ attrs: [NSAttributedString.Key: Any], format: InlineFormat) throws -> Bool {
         let hints = attrs[.init("TTHints")] as? Int ?? 0
         if let bold = format.bold, (hints & 1 != 0) != bold { return false }
         if let italic = format.italic, (hints & 2 != 0) != italic { return false }
@@ -870,6 +927,15 @@ public final class NativeNotesWriter: NotesNativeWriting {
         if let expected = format.link, link != expected { return false }
         if format.clearColor, attrs[.init("TTColor")] != nil { return false }
         if format.color != nil, attrs[.init("TTColor")] == nil { return false }
+        if let superscript = format.superscript, (attrs[.init("NSSuperScript")] as? NSNumber)?.intValue ?? 0 != superscript { return false }
+        if format.clearHighlight, attrs[.init("TTEmphasis")] != nil { return false }
+        if let highlight = format.highlight, (attrs[.init("TTEmphasis")] as? NSNumber)?.intValue != highlight.notesValue { return false }
+        if format.fontName != nil || format.fontSize != nil {
+            guard let font = attrs[.init("ICTTFont")] as AnyObject? else { return false }
+            try NCNotesRuntime.requireSelectors(["fontName", "pointSize"], of: font)
+            if let name = format.fontName, NCNotesRuntime.value(forKey: "fontName", of: font) as? String != name { return false }
+            if let size = format.fontSize, abs((NCNotesRuntime.value(forKey: "pointSize", of: font) as? Double ?? 0) - size) > 0.001 { return false }
+        }
         return true
     }
     fileprivate static func matches(_ run: AttributeRun, format: InlineFormat) -> Bool {
@@ -881,6 +947,11 @@ public final class NativeNotesWriter: NotesNativeWriting {
         if let value = format.link, run.link != value { return false }
         if format.clearColor, run.color != nil { return false }
         if let value = format.color, run.color?.caseInsensitiveCompare(value.hasPrefix("#") ? value : "#" + value) != .orderedSame { return false }
+        if let value = format.superscript, run.font.superscript != value { return false }
+        if format.clearHighlight, run.highlight != nil { return false }
+        if let value = format.highlight, run.highlight != value { return false }
+        if let value = format.fontName, run.font.name != value { return false }
+        if let value = format.fontSize, abs(Double(run.font.pointSize ?? 0) - value) > 0.001 { return false }
         return true
     }
     fileprivate static func color(_ text: String) throws -> CGColor {

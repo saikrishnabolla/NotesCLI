@@ -5,6 +5,9 @@ import NotesNative
 import NotesSafety
 
 extension NativeParagraphStyle: ExpressibleByArgument {}
+extension NativeParagraphAlignment: ExpressibleByArgument {}
+extension NativeWritingDirection: ExpressibleByArgument {}
+extension HighlightColor: ExpressibleByArgument {}
 
 struct EngineWriteResponse: Encodable {
     var engine: String
@@ -184,9 +187,11 @@ enum UnifiedNative {
             return NativeActionResult(try writer.replaceRange(stableRef, range: range, text: text!, allowShared: w.allowShared))
         }
     }
-    static func paragraphFormat(_ o: GlobalOptions, _ w: WriteOptions, ref: String, start: Int, length: Int, style: NativeParagraphStyle, indent: Int?) throws {
+    static func paragraphFormat(_ o: GlobalOptions, _ w: WriteOptions, ref: String, start: Int, length: Int, style: NativeParagraphStyle, indent: Int?,
+                                alignment: NativeParagraphAlignment?, writingDirection: NativeWritingDirection?, collapsed: Bool?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "formatParagraph", arguments: ["start": String(start), "length": String(length), "style": style.rawValue]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().setParagraphStyle(stableRef, range: UTF16Range(location: start, length: length), style: style, indent: indent, allowShared: w.allowShared))
+            NativeActionResult(try NativeNotesWriter().setParagraphStyle(stableRef, range: UTF16Range(location: start, length: length), style: style, indent: indent,
+                                                                          alignment: alignment, writingDirection: writingDirection, collapsed: collapsed, allowShared: w.allowShared))
         }
     }
     static func inlineFormat(_ o: GlobalOptions, _ w: WriteOptions, ref: String, start: Int, length: Int, format: InlineFormat) throws {
@@ -382,7 +387,9 @@ struct FormatParagraph: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "paragraph")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var ref: String; @Option var start: Int; @Option var length: Int; @Option var style: NativeParagraphStyle; @Option var indent: Int?
-    func run() throws { try UnifiedNative.paragraphFormat(options, write, ref: ref, start: start, length: length, style: style, indent: indent) }
+    @Option var alignment: NativeParagraphAlignment?; @Option var writingDirection: NativeWritingDirection?; @Option var collapsed: Bool?
+    func run() throws { try UnifiedNative.paragraphFormat(options, write, ref: ref, start: start, length: length, style: style, indent: indent,
+                                                           alignment: alignment, writingDirection: writingDirection, collapsed: collapsed) }
 }
 struct FormatInline: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "inline")
@@ -390,8 +397,13 @@ struct FormatInline: ParsableCommand {
     @Argument var ref: String; @Option var start: Int; @Option var length: Int
     @Option var bold: Bool?; @Option var italic: Bool?; @Option var underline: Bool?; @Option var strike: Bool?
     @Option var link: String?; @Option var color: String?; @Flag var clearLink = false; @Flag var clearColor = false
+    @Flag var superscript = false; @Flag var `subscript` = false; @Flag var clearScript = false
+    @Option var fontName: String?; @Option var fontSize: Double?; @Option var highlight: HighlightColor?; @Flag var clearHighlight = false
+    func validate() throws { guard [superscript, `subscript`, clearScript].filter({ $0 }).count <= 1 else { throw ValidationError("Choose one of --superscript, --subscript, or --clear-script.") } }
     func run() throws { try UnifiedNative.inlineFormat(options, write, ref: ref, start: start, length: length,
-        format: InlineFormat(bold: bold, italic: italic, underline: underline, strike: strike, link: link, clearLink: clearLink, color: color, clearColor: clearColor)) }
+        format: InlineFormat(bold: bold, italic: italic, underline: underline, strike: strike, link: link, clearLink: clearLink, color: color, clearColor: clearColor,
+                             superscript: superscript ? 1 : (`subscript` ? -1 : (clearScript ? 0 : nil)), fontName: fontName, fontSize: fontSize,
+                             highlight: highlight, clearHighlight: clearHighlight)) }
 }
 struct AttachCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "attach")
@@ -521,12 +533,19 @@ struct NativeFormat: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-format", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var action: LegacyFormatAction; @Argument var ref: String; @Option var start: Int; @Option var length: Int; @Option var style: NativeParagraphStyle?; @Option var indent: Int?
+    @Option var alignment: NativeParagraphAlignment?; @Option var writingDirection: NativeWritingDirection?; @Option var collapsed: Bool?
     @Option var bold: Bool?; @Option var italic: Bool?; @Option var underline: Bool?; @Option var strike: Bool?; @Option var link: String?; @Option var color: String?
     @Flag var clearLink = false; @Flag var clearColor = false
+    @Flag var superscript = false; @Flag var `subscript` = false; @Flag var clearScript = false
+    @Option var fontName: String?; @Option var fontSize: Double?; @Option var highlight: HighlightColor?; @Flag var clearHighlight = false
+    func validate() throws { guard [superscript, `subscript`, clearScript].filter({ $0 }).count <= 1 else { throw ValidationError("Choose one script option.") } }
     func run() throws {
         switch action {
-        case .paragraph: try UnifiedNative.paragraphFormat(options, write, ref: ref, start: start, length: length, style: try required(style, "--style"), indent: indent)
-        case .inline: try UnifiedNative.inlineFormat(options, write, ref: ref, start: start, length: length, format: InlineFormat(bold: bold, italic: italic, underline: underline, strike: strike, link: link, clearLink: clearLink, color: color, clearColor: clearColor))
+        case .paragraph: try UnifiedNative.paragraphFormat(options, write, ref: ref, start: start, length: length, style: try required(style, "--style"), indent: indent,
+                                                            alignment: alignment, writingDirection: writingDirection, collapsed: collapsed)
+        case .inline: try UnifiedNative.inlineFormat(options, write, ref: ref, start: start, length: length, format: InlineFormat(bold: bold, italic: italic, underline: underline, strike: strike, link: link, clearLink: clearLink, color: color, clearColor: clearColor,
+                                                                                                                       superscript: superscript ? 1 : (`subscript` ? -1 : (clearScript ? 0 : nil)), fontName: fontName, fontSize: fontSize,
+                                                                                                                       highlight: highlight, clearHighlight: clearHighlight))
         }
     }
 }

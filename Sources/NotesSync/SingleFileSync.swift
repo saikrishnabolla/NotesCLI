@@ -54,7 +54,7 @@ public final class SingleFileSync {
             return report(.pull, noteID, path, changed: true, "Write the Notes copy to the Markdown file.")
         }
 
-        let localFile = MarkdownFile.parse(try String(contentsOf: path, encoding: .utf8), fallbackTitle: path.deletingPathExtension().lastPathComponent)
+        let localFile = MarkdownFile.parse(try InputFile.readText(path, kind: "Markdown file", maxBytes: InputFile.maxTextBytes), fallbackTitle: path.deletingPathExtension().lastPathComponent)
         if let id = localFile.noteID, id != noteID { throw NotesSyncError.invalidState("The file notes-id does not match the requested note.") }
         let localHash = StableHash.hex(localFile.body)
         let localChanged = localHash != state.hash, remoteChanged = remoteHash != state.hash
@@ -195,7 +195,7 @@ public final class SingleFileSync {
 
     private func localFile(at path: URL) throws -> MarkdownFile {
         guard fileManager.fileExists(atPath: path.path) else { throw NotesSyncError.invalidState("Markdown file not found: \(path.path)") }
-        return MarkdownFile.parse(try String(contentsOf: path, encoding: .utf8), fallbackTitle: path.deletingPathExtension().lastPathComponent)
+        return MarkdownFile.parse(try InputFile.readText(path, kind: "Markdown file", maxBytes: InputFile.maxTextBytes), fallbackTitle: path.deletingPathExtension().lastPathComponent)
     }
 
     private func sidecarURL(for path: URL) throws -> URL {

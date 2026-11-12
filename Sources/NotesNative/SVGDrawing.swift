@@ -1,6 +1,29 @@
 import AppKit
 import Foundation
+import NotesCore
 import PencilKit
+
+public enum SVGLimits {
+    public static let maxBytes = 5 * 1024 * 1024
+    public static let maxElements = 20_000
+    public static let maxPoints = 200_000
+    public static let maxStrokes = 20_000
+    public static let maxHatchLines = 10_000
+    public static let maxCoordinate = 1_000_000.0
+    public static let maxStrokeWidth = 1_000.0
+    public static let maxCanvasSide = 20_000.0
+
+    static let coordinateError = SVGDrawingError.invalid("SVG coordinates must be finite and within ±\(Int(maxCoordinate)).")
+    static let widthError = SVGDrawingError.invalid("Stroke width must be finite and at most \(Int(maxStrokeWidth)).")
+
+    static func checkCoordinate(_ value: Double) throws {
+        guard value.isFinite, abs(value) <= maxCoordinate else { throw coordinateError }
+    }
+
+    static func checkWidth(_ value: Double) throws {
+        guard value.isFinite, value <= maxStrokeWidth else { throw widthError }
+    }
+}
 
 public enum DrawingInk: String, CaseIterable, Codable, Sendable {
     case pen, marker, pencil, monoline
@@ -116,6 +139,15 @@ public enum SVGDrawingError: Error, LocalizedError {
 }
 
 public enum SVGDrawingConverter {
+    /// Reads an SVG input file through the shared source-path check.
+    public static func read(_ url: URL) throws -> Data {
+        try InputFile.read(url, kind: "SVG", maxBytes: SVGLimits.maxBytes)
+    }
+
+    public static func drawing(contentsOf url: URL, options: SVGDrawingOptions = .init()) throws -> PKDrawing {
+        try drawing(from: read(url), options: options)
+    }
+
     public static func parse(_ data: Data, options: SVGDrawingOptions = .init()) throws -> ParsedSVG {
         let delegate = SVGParserDelegate(options: options)
         let parser = XMLParser(data: data)
@@ -196,14 +228,17 @@ public enum SVGDrawingConverter {
 
     private static func number(_ value: Double) -> String {
         let rounded = (value * 1000).rounded() / 1000
-        return rounded == rounded.rounded() ? String(Int(rounded)) : String(rounded)
+        // Int(_:) traps outside its range, so only whole values that fit are printed as integers.
+        if rounded == rounded.rounded(), abs(rounded) < 1e15 { return String(Int(rounded)) }
+        return String(rounded)
     }
 
     private static func hex(_ color: NSColor) -> String {
-        let r = Int((color.redComponent * 255).rounded())
-        let g = Int((color.greenComponent * 255).rounded())
-        let b = Int((color.blueComponent * 255).rounded())
-        return String(format: "#%02x%02x%02x", r, g, b)
+        func channel(_ value: CGFloat) -> Int {
+            let clamped = value.isFinite ? min(1, max(0, value)) : 0
+            return Int((clamped * 255).rounded())
+        }
+        return String(format: "#%02x%02x%02x", channel(color.redComponent), channel(color.greenComponent), channel(color.blueComponent))
     }
 }
 
@@ -251,6 +286,9 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
     var rootWidth: Double?
     var rootHeight: Double?
     var failure: SVGDrawingError?
+    private var elementCount = 0
+    private var pointCount = 0
+    private var hatchLineCount = 0
 
     init(options: SVGDrawingOptions) {
         self.options = options
@@ -260,6 +298,10 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
                 qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
         guard failure == nil else { return }
         do {
+            elementCount += 1
+            guard elementCount <= SVGLimits.maxElements else {
+                throw SVGDrawingError.invalid("The SVG has more than \(SVGLimits.maxElements) elements.")
+            }
             let parent = contexts.last ?? SVGContext()
             let local = try Self.transform(attributeDict["transform"])
             let style = try Self.style(parent.style, attributes: attributeDict)
@@ -276,7 +318,7 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
             }
             let paths = try geometry(name, attributeDict)
             let fillAllowed = !["line", "polyline"].contains(name)
-            append(paths, context: context, fillAllowed: fillAllowed)
+            try append(paths, context: context, fillAllowed: fillAllowed)
         } catch let error as SVGDrawingError {
             failure = error
             parser.abortParsing()
@@ -305,6 +347,10 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
         }
         let target = options.size ?? DrawingSize(width: source.width, height: source.height)
         guard target.width > 0, target.height > 0 else { throw SVGDrawingError.invalid("Drawing size must be positive.") }
+        guard target.width <= SVGLimits.maxCanvasSide, target.height <= SVGLimits.maxCanvasSide else {
+            throw SVGDrawingError.invalid("Drawing size must be at most \(Int(SVGLimits.maxCanvasSide)) × \(Int(SVGLimits.maxCanvasSide)).")
+        }
+        if let width = options.width { try SVGLimits.checkWidth(width) }
         let sx = target.width / source.width, sy = target.height / source.height
         let scaleX: Double, scaleY: Double, offsetX: Double, offsetY: Double
         switch options.fit {
@@ -317,11 +363,15 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
             offsetY = (target.height - source.height * scale) / 2
         }
         let widthScale = sqrt(abs(scaleX * scaleY))
-        let mapped = strokes.map { stroke in
-            SVGStroke(points: stroke.points.map {
-                DrawingPoint(x: ($0.x - source.x) * scaleX + offsetX,
-                             y: ($0.y - source.y) * scaleY + offsetY)
-            }, color: stroke.color, width: stroke.width * widthScale, closed: stroke.closed)
+        let mapped = try strokes.map { stroke in
+            let points = try stroke.points.map { point -> DrawingPoint in
+                let mapped = DrawingPoint(x: (point.x - source.x) * scaleX + offsetX, y: (point.y - source.y) * scaleY + offsetY)
+                try SVGLimits.checkCoordinate(mapped.x); try SVGLimits.checkCoordinate(mapped.y)
+                return mapped
+            }
+            let width = stroke.width * widthScale
+            try SVGLimits.checkWidth(width)
+            return SVGStroke(points: points, color: stroke.color, width: width, closed: stroke.closed)
         }
         return ParsedSVG(size: target, strokes: mapped)
     }
@@ -331,7 +381,7 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
         switch name {
         case "path":
             guard let data = attributes["d"], !data.isEmpty else { return [] }
-            var parser = try SVGPathParser(data)
+            var parser = try SVGPathParser(data, pointBudget: SVGLimits.maxPoints - pointCount)
             return try parser.parse()
         case "line":
             return [SVGSubpath(points: [.init(x: value("x1"), y: value("y1")), .init(x: value("x2"), y: value("y2"))], closed: false)]
@@ -366,30 +416,52 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
         }
     }
 
-    private func append(_ paths: [SVGSubpath], context: SVGContext, fillAllowed: Bool) {
-        let transformed = paths.map { path in
-            SVGSubpath(points: path.points.map(context.transform.applying), closed: path.closed)
+    private func append(_ paths: [SVGSubpath], context: SVGContext, fillAllowed: Bool) throws {
+        guard !paths.isEmpty else { return }
+        let transformed = try paths.map { path in
+            SVGSubpath(points: try path.points.map { point in
+                let mapped = context.transform.applying(point)
+                try SVGLimits.checkCoordinate(mapped.x); try SVGLimits.checkCoordinate(mapped.y)
+                return mapped
+            }, closed: path.closed)
         }
         let width = max(0.1, context.style.strokeWidth * context.transform.widthScale)
+        try SVGLimits.checkWidth(width)
+        func add(_ stroke: SVGStroke) throws {
+            pointCount += stroke.points.count
+            guard pointCount <= SVGLimits.maxPoints else { throw SVGDrawingError.invalid("The SVG has more than \(SVGLimits.maxPoints) points.") }
+            guard strokes.count < SVGLimits.maxStrokes else { throw SVGDrawingError.invalid("The SVG has more than \(SVGLimits.maxStrokes) strokes.") }
+            strokes.append(stroke)
+        }
         if let color = context.style.stroke {
             let color = Self.opacity(color, context.style.opacity * context.style.strokeOpacity)
-            strokes += transformed.filter { $0.points.count >= 2 }.map { SVGStroke(points: $0.points, color: color, width: width, closed: $0.closed) }
+            for path in transformed where path.points.count >= 2 {
+                try add(SVGStroke(points: path.points, color: color, width: width, closed: path.closed))
+            }
         }
         guard fillAllowed, context.style.fillEnabled else { return }
         let color = Self.opacity(context.style.fill, context.style.opacity * context.style.fillOpacity)
         for path in transformed where path.points.count >= 3 {
             var outline = path.points
             if outline.first != outline.last, let first = outline.first { outline.append(first) }
-            strokes.append(SVGStroke(points: outline, color: color, width: width, closed: true))
+            try add(SVGStroke(points: outline, color: color, width: width, closed: true))
             if options.fill == .hatch {
-                strokes += Self.hatching(path.points, color: color, width: width)
+                for stroke in try Self.hatching(path.points, color: color, width: width,
+                                                budget: SVGLimits.maxHatchLines - hatchLineCount) {
+                    hatchLineCount += 1
+                    try add(stroke)
+                }
             }
         }
     }
 
-    private static func hatching(_ polygon: [DrawingPoint], color: DrawingColor, width: Double) -> [SVGStroke] {
+    private static func hatching(_ polygon: [DrawingPoint], color: DrawingColor, width: Double, budget: Int) throws -> [SVGStroke] {
         guard let minY = polygon.map(\.y).min(), let maxY = polygon.map(\.y).max() else { return [] }
         let step = max(4, width * 3)
+        // Coordinates are already bounded, so this count is finite; refuse before looping.
+        guard (maxY - minY) / step <= Double(budget) else {
+            throw SVGDrawingError.invalid("Hatch fill would draw more than \(SVGLimits.maxHatchLines) lines.")
+        }
         var rows: [SVGStroke] = []
         var y = (floor(minY / step) + 1) * step
         while y < maxY {
@@ -402,6 +474,9 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
             intersections.sort()
             var index = 0
             while index + 1 < intersections.count {
+                guard rows.count < budget else {
+                    throw SVGDrawingError.invalid("Hatch fill would draw more than \(SVGLimits.maxHatchLines) lines.")
+                }
                 rows.append(SVGStroke(points: [.init(x: intersections[index], y: y), .init(x: intersections[index + 1], y: y)], color: color, width: width, closed: false))
                 index += 2
             }
@@ -459,19 +534,21 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
             let parts = text[text.index(after: open)..<close].split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             guard parts.count == 3 || parts.count == 4 else { throw SVGDrawingError.invalid("Invalid SVG color: \(value)") }
             func component(_ part: String) -> Double? {
-                if part.hasSuffix("%") { return Double(part.dropLast()).map { $0 / 100 } }
-                return Double(part).map { $0 / 255 }
+                let value = part.hasSuffix("%") ? Double(part.dropLast()).map { $0 / 100 } : Double(part).map { $0 / 255 }
+                return value.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }
             }
             guard let red = component(parts[0]), let green = component(parts[1]), let blue = component(parts[2]) else {
                 throw SVGDrawingError.invalid("Invalid SVG color: \(value)")
             }
-            return DrawingColor(red: red, green: green, blue: blue, alpha: parts.count == 4 ? (Double(parts[3]) ?? 1) : 1)
+            let alpha = parts.count == 4 ? (Double(parts[3]) ?? 1) : 1
+            return DrawingColor(red: red, green: green, blue: blue, alpha: alpha.isFinite ? min(1, max(0, alpha)) : 1)
         }
         throw SVGDrawingError.invalid("Unsupported SVG color: \(value)")
     }
 
     private static func opacity(_ color: DrawingColor, _ value: Double) -> DrawingColor {
-        DrawingColor(red: color.red, green: color.green, blue: color.blue, alpha: max(0, min(1, color.alpha * value)))
+        let alpha = color.alpha * value
+        return DrawingColor(red: color.red, green: color.green, blue: color.blue, alpha: alpha.isFinite ? max(0, min(1, alpha)) : 1)
     }
 
     private static func length(_ text: String?) -> Double? {
@@ -551,8 +628,11 @@ private struct SVGPathParser {
     var lastQuadraticControl: DrawingPoint?
     var subpaths: [SVGSubpath] = []
     var points: [DrawingPoint] = []
+    let pointBudget: Int
+    var pointTotal = 0
 
-    init(_ source: String) throws {
+    init(_ source: String, pointBudget: Int = SVGLimits.maxPoints) throws {
+        self.pointBudget = pointBudget
         let regex = try NSRegularExpression(pattern: #"[A-Za-z]|[-+]?(?:\d*\.?\d+)(?:[eE][-+]?\d+)?"#)
         tokens = regex.matches(in: source, range: NSRange(source.startIndex..., in: source)).compactMap {
             Range($0.range, in: source).map { String(source[$0]) }
@@ -613,6 +693,9 @@ private struct SVGPathParser {
             default:
                 throw SVGDrawingError.invalid("Unsupported SVG path command: \(raw)")
             }
+            guard pointTotal + points.count <= pointBudget else {
+                throw SVGDrawingError.invalid("The SVG has more than \(SVGLimits.maxPoints) points.")
+            }
         }
         finish(closed: false)
         return subpaths
@@ -627,6 +710,7 @@ private struct SVGPathParser {
             throw SVGDrawingError.invalid("SVG path command has too few values.")
         }
         index += 1
+        try SVGLimits.checkCoordinate(value)
         return value
     }
 
@@ -696,7 +780,7 @@ private struct SVGPathParser {
     }
 
     private mutating func finish(closed: Bool) {
-        if points.count >= 2 { subpaths.append(SVGSubpath(points: points, closed: closed)) }
+        if points.count >= 2 { subpaths.append(SVGSubpath(points: points, closed: closed)); pointTotal += points.count }
         points = []
     }
 

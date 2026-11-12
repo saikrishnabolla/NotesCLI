@@ -8,24 +8,43 @@ private struct HomeResponse: Encodable {
     var version: String
     var tagline: String
     var commands: [String]
-    var recent: [NoteSummary]
+    var recent: [HomeRecentNote]
+}
+
+/// Home output lists only what the screen shows: no snippets, participants, or other note content.
+private struct HomeRecentNote: Encodable {
+    var number: Int?
+    var title: String
+    var folder: String?
+    var modified: Date?
+
+    init(_ note: NoteSummary) {
+        number = note.number; title = note.title; folder = note.folderPath.last; modified = note.modified
+    }
 }
 
 enum HomeScreen {
     static let tagline = "Power-user Apple Notes CLI for humans and agents"
     static let commands = ["recent", "search", "pinned", "tags", "folders", "stats", "doctor", "capabilities"]
 
-    static func run(options: GlobalOptions) throws {
+    /// Recent titles show by default; `--no-recent` or `NOTESCLI_HOME_RECENT=0` hides them.
+    static func showsRecent(noRecent: Bool, environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        !noRecent && environment["NOTESCLI_HOME_RECENT"] != "0"
+    }
+
+    static func run(options: GlobalOptions, noRecent: Bool) throws {
+        let showRecent = showsRecent(noRecent: noRecent)
+        func recentNotes() throws -> [NoteSummary] { showRecent ? try options.backends().reader.notes(NoteQuery(limit: 5)) : [] }
         if options.json {
-            let recent = try options.backends().reader.notes(NoteQuery(limit: 5))
-            try Output.json(HomeResponse(version: NotesCLI.version, tagline: tagline, commands: commands, recent: recent))
+            try Output.json(HomeResponse(version: NotesCLI.version, tagline: tagline, commands: commands,
+                                         recent: try recentNotes().map(HomeRecentNote.init)))
             return
         }
         guard isatty(STDOUT_FILENO) == 1 else {
             if !options.quiet { print(NotesCLI.helpMessage()) }
             return
         }
-        let recent = try options.backends().reader.notes(NoteQuery(limit: 5))
+        let recent = try recentNotes()
         let styled = TerminalStyle.enabled
         func color(_ code: String, _ text: String) -> String { styled ? "\u{001B}[\(code)m\(text)\u{001B}[0m" : text }
         print(color("38;5;220", #"""
@@ -44,6 +63,7 @@ enum HomeScreen {
         ]
         for command in commands { print("  \(color("36", command.padding(toLength: 13, withPad: " ", startingAt: 0))) \(descriptions[command]!)") }
         print("\nMore: notescli help [command]")
+        guard showRecent else { return }
         print("\n\(color("1", "Recently Edited (\(recent.count))"))")
         if recent.isEmpty { print("  No notes found.") }
         for note in recent {

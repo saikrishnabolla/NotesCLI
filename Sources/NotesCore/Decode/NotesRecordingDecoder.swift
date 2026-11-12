@@ -5,7 +5,8 @@ public enum NotesRecordingDecoder {
     private enum ObjectID { case ref(Int), string(String), number(Double), integer(Int) }
     private enum Value { case string(String), number(Double), integer(Int), map(String, [String: Value]), note(String) }
 
-    public static func decode(_ data: Data) throws -> (words: [TranscriptWord], metadata: RecordingMetadata) {
+    /// `fragments` lists each audio fragment's identity, which is its child attachment ID, in recording order.
+    public static func decode(_ data: Data) throws -> (words: [TranscriptWord], metadata: RecordingMetadata, fragments: [String]) {
         var root = try ProtobufMessage(NotesInflate.decompressIfNeeded(data))
         if (root.fields[3] ?? []).isEmpty, let wrapped = try root.message(2)?.message(3) { root = wrapped }
         let entries = try root.messages(3)
@@ -84,13 +85,14 @@ public enum NotesRecordingDecoder {
         }.sorted { ($0.start ?? .greatestFiniteMagnitude) < ($1.start ?? .greatestFiniteMagnitude) }
         let recordingEntry = try entries.first { try customIDs($0)?.type == "com.apple.notes.ICTTAudioRecording" }
         let recordingIDs = try recordingEntry.flatMap(customIDs)?.values ?? [:]
-        var orderedSegments: [TranscriptWord] = []
+        var orderedSegments: [TranscriptWord] = [], fragmentIDs: [String] = []
         if let fragmentsIndex = reference(recordingIDs["fragments"]), entries.indices.contains(fragmentsIndex),
            let list = try entries[fragmentsIndex].message(5) {
             for (fragmentNumber, item) in try list.messages(1).enumerated() {
                 guard let fragmentIndex = try item.message(2).flatMap(objectID).flatMap(reference), entries.indices.contains(fragmentIndex),
-                      let fragment = try customIDs(entries[fragmentIndex]), fragment.type == "com.apple.notes.ICTTAudioRecording.Fragment",
-                      let transcriptIndex = reference(fragment.values["transcript"]), entries.indices.contains(transcriptIndex),
+                      let fragment = try customIDs(entries[fragmentIndex]), fragment.type == "com.apple.notes.ICTTAudioRecording.Fragment" else { continue }
+                if let identity = string(try primitive(fragment.values["identity"])) { fragmentIDs.append(identity) }
+                guard let transcriptIndex = reference(fragment.values["transcript"]), entries.indices.contains(transcriptIndex),
                       let set = try entries[transcriptIndex].message(15) else { continue }
                 var bySlot: [Int: Int] = [:]
                 if let dictionary = try set.message(2) {
@@ -127,7 +129,7 @@ public enum NotesRecordingDecoder {
                                          remoteSpeakerHandle: string(recording["callRemoteSpeakerHandle"]),
                                          callType: integer(recording["callType"]),
                                          isCallRecording: integer(recording["callRecording"]).map { $0 != 0 }, startTime: start)
-        return (segments, metadata)
+        return (segments, metadata, fragmentIDs)
     }
 
     public static func joined(_ words: [TranscriptWord]) -> String {

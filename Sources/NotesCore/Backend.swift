@@ -75,22 +75,15 @@ public extension NotesReading {
     }
     func summary(_ ref: String) throws -> NoteSummary {
         let notes = try notes(NoteQuery(includeDeleted: true))
-        let ids = notes.filter {
-            $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame ||
-            $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
-            $0.id.shortID?.caseInsensitiveCompare(ref) == .orderedSame
-        }
-        let matches: [NoteSummary]
-        if let number = NoteReference.explicitNumber(ref) {
-            matches = Array(Dictionary(grouping: ids + notes.filter { $0.number == number }, by: \.id.uuid).values.compactMap(\.first))
-        } else if let number = NoteReference.bareNumber(ref) {
-            matches = Array(Dictionary(grouping: ids + notes.filter { $0.number == number || $0.title == ref }, by: \.id.uuid).values.compactMap(\.first))
-        } else {
-            matches = ids.isEmpty ? notes.filter { $0.title == ref } : ids
-        }
-        guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note matches. Use #ID or a UUID.") }
-        return matches[0]
+        return try NoteReference.resolve(ref, identifiers: { value in
+            notes.filter {
+                $0.id.uuid.caseInsensitiveCompare(value) == .orderedSame ||
+                $0.id.coreDataID?.caseInsensitiveCompare(value) == .orderedSame ||
+                $0.id.shortID?.caseInsensitiveCompare(value) == .orderedSame
+            }
+        }, number: { number in notes.filter { $0.number == number } },
+        title: { title in notes.filter { $0.title == title && !$0.isDeleted } },
+        key: \.id.uuid, describe: { NoteReference.describe(number: $0.number, uuid: $0.id.uuid, title: $0.title) })
     }
     func attachments(_ ref: String) throws -> [Attachment] { try note(ref).attachments }
     func rawNote(_ ref: String) throws -> RawProtobufMessage {

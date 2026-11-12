@@ -31,4 +31,18 @@ final class RecordingTranscriptRendererTests: XCTestCase {
         let decoded = try JSONDecoder().decode([RecordingTranscript].self, from: data)
         XCTAssertEqual(decoded, recordings)
     }
+
+    func testRendererThrowsForOutOfRangeTimingInsteadOfTrapping() throws {
+        for format in RecordingTranscriptFormat.allCases where format != .json {
+            for value in [1e300, -.infinity, .nan] {
+                let recording = RecordingTranscript(attachmentID: "recording-1", duration: nil, segments: [
+                    TranscriptWord(text: "Bad", start: value, duration: 1, speaker: nil, fragment: 0),
+                ])
+                XCTAssertThrowsError(try RecordingTranscriptRenderer.render([recording], format: format), "\(format) \(value)") { error in
+                    XCTAssertEqual((error as? NotesError)?.code, "invalid_transcript")
+                    XCTAssertEqual((error as? NotesError)?.message, "Transcript timing must be finite and within 0...604800 seconds.")
+                }
+            }
+        }
+    }
 }

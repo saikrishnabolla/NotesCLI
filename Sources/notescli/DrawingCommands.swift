@@ -27,10 +27,7 @@ struct DrawingInputOptions: ParsableArguments {
     func load() throws -> PKDrawing {
         if let width, width <= 0 { throw ValidationError("--width must be greater than zero.") }
         let url = URL(fileURLWithPath: NSString(string: svg).expandingTildeInPath)
-        let data: Data
-        do { data = try Data(contentsOf: url) }
-        catch { throw NotesError("svg_unavailable", "Could not read the SVG: \(error.localizedDescription)") }
-        return try SVGDrawingConverter.drawing(from: data, options: SVGDrawingOptions(
+        return try SVGDrawingConverter.drawing(contentsOf: url, options: SVGDrawingOptions(
             ink: ink, width: width, color: try color.map(Self.parseColor), blackAndWhite: bw,
             size: try size.map(Self.parseSize), fit: fit, fill: fill))
     }

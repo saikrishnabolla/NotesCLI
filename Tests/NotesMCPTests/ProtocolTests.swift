@@ -112,6 +112,29 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(diagrams?["writeEngine"] as? String, "native")
     }
 
+    func testMCPNoteReferencesRejectNumberTitleCollisionsAndAcceptExplicitSyntax() throws {
+        let sample = InMemoryNotes.sample()
+        let account = try XCTUnwrap(try sample.accounts().first)
+        let folder = try XCTUnwrap(try sample.folders(account: nil).first)
+        let hashTitled = Note(summary: NoteSummary(
+            id: NoteID(uuid: "hash-title", shortID: "n7"), title: "#1", snippet: "", folderID: folder.id,
+            folderPath: folder.path, accountID: account.id, created: nil, modified: nil, isPinned: false,
+            isLocked: false, isDeleted: false, hasChecklist: false, attachmentCount: 0, tags: []
+        ), document: NoteDocument(text: "hash body", runs: []), attachments: [])
+        let notes = InMemoryNotes(accounts: [account], folders: [folder], notes: [try sample.note("#1"), hashTitled])
+        let server = MCPServer(reader: notes, writer: notes)
+        let ambiguous = try call(server, "get_note", ["ref": "#1", "format": "json"])
+        XCTAssertEqual(ambiguous["isError"] as? Bool, true)
+        XCTAssertEqual((try structured(ambiguous)["error"] as? [String: Any])?["code"] as? String, "ambiguous_reference")
+        let deleteAmbiguous = try call(server, "delete_note", ["ref": "#1"])
+        XCTAssertEqual((try structured(deleteAmbiguous)["error"] as? [String: Any])?["code"] as? String, "ambiguous_reference")
+        XCTAssertEqual(try notes.notes(NoteQuery()).count, 2)
+        let titled = try structured(try call(server, "get_note", ["ref": "title:#1", "format": "json"]))
+        XCTAssertEqual((titled["summary"] as? [String: Any])?["title"] as? String, "#1")
+        let numbered = try structured(try call(server, "get_note", ["ref": "id:1", "format": "json"]))
+        XCTAssertEqual((numbered["summary"] as? [String: Any])?["title"] as? String, "Welcome")
+    }
+
     func testCapabilityCatalogMatchesFeatureDocument() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let text = try String(contentsOf: root.appendingPathComponent("docs/APPLE-NOTES-FEATURES.md"), encoding: .utf8)
@@ -124,6 +147,16 @@ final class ProtocolTests: XCTestCase {
         }
         XCTAssertEqual(documented.count, 95)
         XCTAssertEqual(CapabilityCatalog.features, documented)
+    }
+
+    func testPaperDrawingWriteIsPartialUntilPencilRoundTripsAreVerified() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let text = try String(contentsOf: root.appendingPathComponent("docs/APPLE-NOTES-FEATURES.md"), encoding: .utf8)
+        let row = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("| Modern Paper drawings |") })
+        XCTAssertTrue(row.hasPrefix("| Modern Paper drawings | Done | Partial |"), String(row))
+        XCTAssertTrue(row.contains("Pencil editing on iPhone and iPad and cross-device round trips are not yet verified."), String(row))
+        XCTAssertEqual(CapabilityCatalog.features.first { $0.feature == "Modern Paper drawings" },
+                       FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Partial"))
     }
 
     func testNativeFormattingSchemasAndValidationRejectInvalidValuesBeforeDispatch() throws {

@@ -686,7 +686,7 @@ public final class MCPServer {
                 return try content(["engine": "scripting", "dry_run": true, "report": NotePresentation.object(report)])
             }
             guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }
-            let markdown = MarkdownFile.parse(try String(contentsOf: path, encoding: .utf8), fallbackTitle: path.deletingPathExtension().lastPathComponent)
+            let markdown = MarkdownFile.parse(try InputFile.readText(path, kind: "Markdown file", maxBytes: InputFile.maxTextBytes), fallbackTitle: path.deletingPathExtension().lastPathComponent)
             guard let noteID = markdown.noteID else { throw NotesError("invalid_file", "The Markdown file must contain notes-id front matter.") }
             let note = try reader.note(noteID), paths = [note.summary.folderPath]
             return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting", snapshotNotes: [note]) {

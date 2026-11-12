@@ -87,7 +87,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Scanned documents", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Image and PDF markup", read: "Partial", write: "Not possible"),
         FeatureDefinition(feature: "Classic drawings and sketches", read: "Done", write: "Not possible"),
-        FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Audio file attachments", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Native audio recordings", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Stored audio transcripts", read: "Done", write: "Done"),

@@ -3,40 +3,80 @@ import CoreGraphics
 import Foundation
 import WebKit
 
+/// Renders untrusted SVG or HTML with JavaScript off, no base URL, a strict Content Security Policy,
+/// every non-data resource blocked, and one deadline for the whole render.
 public final class DiagramRenderer {
-    public init() {}
+    public static let defaultTimeout: TimeInterval = 30
+    /// Inline styles and data: images and fonts only. Installed system fonts need no fetch.
+    static let contentSecurityPolicy = "default-src 'none'; img-src data:; style-src 'unsafe-inline' data:; font-src data:"
+
+    private let timeout: TimeInterval
+
+    public init(timeout: TimeInterval = DiagramRenderer.defaultTimeout) {
+        self.timeout = timeout
+    }
 
     public func render(file: URL, options: DiagramRenderOptions) throws -> RenderedDiagram {
         let source = try DiagramSource(file: file)
         guard Thread.isMainThread else {
             throw DiagramError.renderFailed("Diagram rendering must run on the main thread.")
         }
+        let timeout = self.timeout
         return try MainActor.assumeIsolated {
-            try WebKitDiagramRenderer().render(source: source, baseURL: file.deletingLastPathComponent(), options: options)
+            try WebKitDiagramRenderer(timeout: timeout).render(source: source, options: options)
         }
+    }
+
+    /// Inserts the CSP meta element before any content that could load a resource.
+    static func isolatedHTML(_ html: String) -> String {
+        let meta = "<meta http-equiv=\"Content-Security-Policy\" content=\"\(contentSecurityPolicy)\">"
+        let prologue = #"^\x{FEFF}?(?:\s|<!--.*?-->)*(?:<!doctype[^>]*>)?"#
+        guard let expression = try? NSRegularExpression(pattern: prologue, options: [.caseInsensitive, .dotMatchesLineSeparators]),
+              let match = expression.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+              let range = Range(match.range, in: html) else { return meta + html }
+        return String(html[..<range.upperBound]) + meta + String(html[range.upperBound...])
     }
 }
 
 @MainActor
 private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
+    private static let blockEverythingButData = """
+    [{"trigger":{"url-filter":".*"},"action":{"type":"block"}},
+     {"trigger":{"url-filter":"^data:"},"action":{"type":"ignore-previous-rules"}},
+     {"trigger":{"url-filter":"^about:"},"action":{"type":"ignore-previous-rules"}}]
+    """
+    private let timeout: TimeInterval
+    private let deadline: Date
     private var navigationFinished = false
     private var navigationError: Error?
+    private var initialNavigationAllowed = false
 
-    func render(source: DiagramSource, baseURL: URL, options: DiagramRenderOptions) throws -> RenderedDiagram {
+    init(timeout: TimeInterval) {
+        self.timeout = timeout
+        self.deadline = Date().addingTimeInterval(timeout)
+    }
+
+    func render(source: DiagramSource, options: DiagramRenderOptions) throws -> RenderedDiagram {
+        guard let text = String(data: source.data, encoding: .utf8) else {
+            throw DiagramError.renderFailed("Diagram source must be UTF-8.")
+        }
+        let ruleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-diagram-rules-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: ruleDirectory) }
+        let rules = try compileRules(in: ruleDirectory)
+
         let configuration = WKWebViewConfiguration()
         configuration.preferences.shouldPrintBackgrounds = true
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController.add(rules)
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 8192, height: 8192), configuration: configuration)
         webView.navigationDelegate = self
         webView.underPageBackgroundColor = .clear
         webView.appearance = NSAppearance(named: options.dark ? .darkAqua : .aqua)
 
-        guard let text = String(data: source.data, encoding: .utf8) else {
-            throw DiagramError.renderFailed("Diagram source must be UTF-8.")
-        }
-        let html = source.mediaType == "image/svg+xml" ? Self.wrap(svg: text) : text
-        webView.loadHTMLString(html, baseURL: baseURL)
-        try wait(timeout: 20) { navigationFinished }
+        let html = DiagramRenderer.isolatedHTML(source.mediaType == "image/svg+xml" ? Self.wrap(svg: text) : text)
+        webView.loadHTMLString(html, baseURL: URL(string: "about:blank"))
+        try wait(seconds: 20) { navigationFinished }
         if let navigationError { throw DiagramError.renderFailed("WebKit could not load the diagram: \(navigationError.localizedDescription)") }
 
         let bounds = try contentBounds(webView: webView, options: options)
@@ -50,6 +90,30 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
         let embedded = try DiagramSourceMetadata.embed(source: source.data, filename: source.filename,
                                                        mediaType: source.mediaType, in: png)
         return RenderedDiagram(png: embedded, source: source, pixelSize: pixelSize)
+    }
+
+    private func compileRules(in directory: URL) throws -> WKContentRuleList {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        guard let store = WKContentRuleListStore(url: directory) else {
+            throw DiagramError.renderFailed("WebKit could not create the diagram content blocker.")
+        }
+        var result: Result<WKContentRuleList, Error>?
+        store.compileContentRuleList(forIdentifier: "notescli-diagram", encodedContentRuleList: Self.blockEverythingButData) { list, error in
+            if let list { result = .success(list) }
+            else { result = .failure(error ?? DiagramError.renderFailed("WebKit returned no content blocker.")) }
+        }
+        try wait(seconds: 10) { result != nil }
+        do { return try result!.get() }
+        catch { throw DiagramError.renderFailed("WebKit could not compile the diagram content blocker: \(error.localizedDescription)") }
+    }
+
+    /// Only the initial about:blank load may navigate; links, refreshes, frames, and form posts are cancelled.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
+        let initial = !initialNavigationAllowed && navigationAction.targetFrame?.isMainFrame == true &&
+            navigationAction.request.url?.absoluteString == "about:blank"
+        if initial { initialNavigationAllowed = true }
+        decisionHandler(initial ? .allow : .cancel)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -93,6 +157,7 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
             return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
           });
           const nodes = visible.length ? visible : [document.documentElement];
+          const elementCount = document.querySelectorAll('body *').length;
           const rects = nodes.map(node => node.getBoundingClientRect());
           const left = Math.min(...rects.map(rect => rect.left));
           const top = Math.min(...rects.map(rect => rect.top));
@@ -101,11 +166,14 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
           const bodyBackground = getComputedStyle(document.body).backgroundColor;
           const rootBackground = getComputedStyle(document.documentElement).backgroundColor;
           return {left, top, right, bottom, canvasWidth: document.documentElement.scrollWidth,
-                  canvasHeight: document.documentElement.scrollHeight,
+                  canvasHeight: document.documentElement.scrollHeight, elementCount,
                   background: bodyBackground === 'rgba(0, 0, 0, 0)' ? rootBackground : bodyBackground};
         })()
         """
         let value = try javaScript(webView: webView, script: script)
+        if let count = ((value as? [String: Any])?["elementCount"] as? NSNumber)?.intValue, count > DiagramLimits.maxElements {
+            throw DiagramError.renderFailed("The diagram has \(count) elements; the limit is \(DiagramLimits.maxElements).")
+        }
         guard let object = value as? [String: Any],
               let left = (object["left"] as? NSNumber)?.doubleValue,
               let top = (object["top"] as? NSNumber)?.doubleValue,
@@ -123,10 +191,11 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
 
     private func javaScript(webView: WKWebView, script: String) throws -> Any? {
         var result: Result<Any?, Error>?
-        webView.callAsyncJavaScript("return await " + script, arguments: [:], in: nil, in: .page, completionHandler: { value in
+        // The measuring script runs in an isolated client world; page scripts are disabled.
+        webView.callAsyncJavaScript("return await " + script, arguments: [:], in: nil, in: .defaultClient, completionHandler: { value in
             result = value.map { Optional($0) }
         })
-        try wait(timeout: 12) { result != nil }
+        try wait(seconds: 12) { result != nil }
         return try result!.get()
     }
 
@@ -136,16 +205,31 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
         configuration.allowTransparentBackground = true
         var result: Result<Data, Error>?
         webView.createPDF(configuration: configuration) { value in result = value }
-        try wait(timeout: 20) { result != nil }
+        try wait(seconds: 20) { result != nil }
         return try result!.get()
     }
 
-    private func wait(timeout: TimeInterval, condition: () -> Bool) throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        while !condition(), Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    /// Waits for one step, never past the whole render's deadline.
+    private func wait(seconds: TimeInterval, condition: () -> Bool) throws {
+        let stepDeadline = min(deadline, Date().addingTimeInterval(seconds))
+        while !condition(), Date() < stepDeadline {
+            RunLoop.current.run(mode: .default, before: min(stepDeadline, Date().addingTimeInterval(0.01)))
         }
-        guard condition() else { throw DiagramError.renderFailed("Diagram rendering timed out.") }
+        guard condition() else {
+            if Date() >= deadline {
+                throw DiagramError.renderFailed("Diagram rendering timed out after \(Self.seconds(timeout)) seconds.")
+            }
+            throw DiagramError.renderFailed("Diagram rendering timed out.")
+        }
+    }
+
+    private static func seconds(_ value: TimeInterval) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 6
+        formatter.usesGroupingSeparator = false
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 
     private func rasterize(pdf: Data, size: DiagramPixelSize, fill: NSColor?) throws -> Data {

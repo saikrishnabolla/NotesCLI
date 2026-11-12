@@ -129,10 +129,7 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
             size = DrawingSize(width: values[0], height: values[1])
         } else { size = nil }
         let url = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
-        let data: Data
-        do { data = try Data(contentsOf: url) }
-        catch { throw NotesError("svg_unavailable", "Could not read the SVG: \(error.localizedDescription)") }
-        return try SVGDrawingConverter.drawing(from: data, options: SVGDrawingOptions(
+        return try SVGDrawingConverter.drawing(contentsOf: url, options: SVGDrawingOptions(
             ink: ink, width: width, color: color, blackAndWhite: boolean("bw") ?? false,
             size: size, fit: fit, fill: fill
         ))
@@ -174,8 +171,7 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
             transcripts[recordings[0].id] = try AudioTranscriber.readTranscriptFile(URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)).segments
         } else {
             for recording in recordings {
-                guard let path = recording.filePath else { throw NotesError("audio_not_downloaded", "Recording \(recording.id) is not downloaded.") }
-                transcripts[recording.id] = try AudioTranscriber.transcribeBlocking(URL(fileURLWithPath: path), locale: string("locale"))
+                transcripts[recording.id] = try AudioTranscriber.transcribeRecordingBlocking(recording, locale: string("locale"))
             }
         }
         return try result(writer.writeRecordingTranscripts(note.summary.id.uuid, transcripts: transcripts, allowShared: allowShared))

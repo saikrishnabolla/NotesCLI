@@ -20,17 +20,17 @@ public enum RecordingTranscriptRenderer {
     public static func render(_ recordings: [RecordingTranscript], format: RecordingTranscriptFormat) throws -> String {
         switch format {
         case .text:
-            return recordings.flatMap(\.segments).map { "[\(clock($0.start ?? 0, separator: ".", hours: false))] \(spoken($0))" }.joined(separator: "\n") + suffix(recordings)
+            return try recordings.flatMap(\.segments).map { "[\(try clock($0.start ?? 0, separator: ".", hours: false))] \(spoken($0))" }.joined(separator: "\n") + suffix(recordings)
         case .srt:
-            return recordings.flatMap(\.segments).enumerated().map { index, segment in
+            return try recordings.flatMap(\.segments).enumerated().map { index, segment in
                 let start = segment.start ?? 0, end = start + (segment.duration ?? 0)
-                return "\(index + 1)\n\(clock(start, separator: ",", hours: true)) --> \(clock(end, separator: ",", hours: true))\n\(spoken(segment))"
+                return "\(index + 1)\n\(try clock(start, separator: ",", hours: true)) --> \(try clock(end, separator: ",", hours: true))\n\(spoken(segment))"
             }.joined(separator: "\n\n") + suffix(recordings)
         case .vtt:
-            let cues = recordings.flatMap(\.segments).map { segment in
+            let cues = try recordings.flatMap(\.segments).map { segment in
                 let start = segment.start ?? 0, end = start + (segment.duration ?? 0)
                 let line = segment.speaker.map { "<v \($0)>\(segment.text)" } ?? segment.text
-                return "\(clock(start, separator: ".", hours: true)) --> \(clock(end, separator: ".", hours: true))\n\(line)"
+                return "\(try clock(start, separator: ".", hours: true)) --> \(try clock(end, separator: ".", hours: true))\n\(line)"
             }.joined(separator: "\n\n")
             return "WEBVTT\n\n" + cues + (cues.isEmpty ? "" : "\n")
         case .json:
@@ -48,8 +48,10 @@ public enum RecordingTranscriptRenderer {
         recordings.contains { !$0.segments.isEmpty } ? "\n" : ""
     }
 
-    private static func clock(_ value: Double, separator: Character, hours: Bool) -> String {
-        let milliseconds = max(0, Int((value * 1_000).rounded()))
+    /// Throws for times the format cannot hold; Int(_:) would trap on infinite or huge values.
+    private static func clock(_ value: Double, separator: Character, hours: Bool) throws -> String {
+        guard TranscriptLimits.isValidTime(value) else { throw NotesError("invalid_transcript", TranscriptLimits.timingMessage) }
+        let milliseconds = Int((value * 1_000).rounded())
         let hour = milliseconds / 3_600_000
         let minute = milliseconds / 60_000 % 60
         let second = milliseconds / 1_000 % 60

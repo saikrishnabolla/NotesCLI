@@ -356,7 +356,7 @@ public final class MarkdownSync {
             let components = resolved.pathComponents
             guard components.starts(with: rootComponents) else { throw NotesSyncError.invalidPath(url.path) }
             let relative = components.dropFirst(rootComponents.count).joined(separator: "/")
-            let text = try String(contentsOf: resolved, encoding: .utf8)
+            let text = try InputFile.readText(resolved, kind: "Markdown file", maxBytes: InputFile.maxTextBytes)
             notes.append(LocalNote(url: resolved, relativePath: relative, markdown: .parse(text, fallbackTitle: resolved.deletingPathExtension().lastPathComponent)))
         }
         return notes.sorted { $0.relativePath < $1.relativePath }

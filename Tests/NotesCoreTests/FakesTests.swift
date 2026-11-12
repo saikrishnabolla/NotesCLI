@@ -18,9 +18,37 @@ final class FakesTests: XCTestCase {
         ), document: NoteDocument(text: "", runs: []), attachments: [])
         let ambiguous = InMemoryNotes(accounts: [account], folders: [folder], notes: [try sample.note("#1"), titledNumber])
         XCTAssertThrowsError(try ambiguous.note("1")) { error in
-            XCTAssertEqual((error as? NotesError)?.code, "ambiguous_note")
+            XCTAssertEqual((error as? NotesError)?.code, "ambiguous_reference")
         }
         XCTAssertEqual(try ambiguous.note("#1").summary.title, "Welcome")
+    }
+    func testHashTitleCollidingWithNoteNumberIsAmbiguousAndExplicitSyntaxResolves() throws {
+        let sample = InMemoryNotes.sample()
+        let account = try XCTUnwrap(try sample.accounts().first)
+        let folder = try XCTUnwrap(try sample.folders(account: nil).first)
+        let hashTitled = Note(summary: NoteSummary(
+            id: NoteID(uuid: "hash-title", shortID: "n7"), title: "#1", snippet: "", folderID: folder.id,
+            folderPath: folder.path, accountID: account.id, created: nil, modified: nil, isPinned: false,
+            isLocked: false, isDeleted: false, hasChecklist: false, attachmentCount: 0, tags: []
+        ), document: NoteDocument(text: "", runs: []), attachments: [])
+        let notes = InMemoryNotes(accounts: [account], folders: [folder], notes: [try sample.note("#1"), hashTitled])
+        XCTAssertThrowsError(try notes.note("#1")) { error in
+            let error = error as? NotesError
+            XCTAssertEqual(error?.code, "ambiguous_reference")
+            XCTAssertEqual(error?.message, ##"Reference "#1" matches more than one note: #1 welcome "Welcome" (number), #7 hash-title "#1" (title)."##)
+            XCTAssertEqual(error?.hint, "Use id:1 for the note number or title:#1 for the exact title.")
+        }
+        XCTAssertThrowsError(try notes.renameNote("#1", title: "Renamed")) { XCTAssertEqual(($0 as? NotesError)?.code, "ambiguous_reference") }
+        XCTAssertEqual(try notes.note("title:#1").summary.id.uuid, "hash-title")
+        XCTAssertEqual(try notes.note("TITLE:#1").summary.id.uuid, "hash-title")
+        XCTAssertEqual(try notes.note("id:1").summary.id.uuid, "welcome")
+        XCTAssertEqual(try notes.note("n1").summary.id.uuid, "welcome")
+        XCTAssertEqual(try notes.note("id:7").summary.id.uuid, "hash-title")
+        XCTAssertThrowsError(try notes.note("title:#2")) { XCTAssertEqual(($0 as? NotesError)?.code, "note_not_found") }
+        XCTAssertThrowsError(try notes.note("id:99")) { XCTAssertEqual(($0 as? NotesError)?.code, "note_not_found") }
+
+        let onlyTitled = InMemoryNotes(accounts: [account], folders: [folder], notes: [hashTitled])
+        XCTAssertEqual(try onlyTitled.note("#1").summary.id.uuid, "hash-title")
     }
     func testNoteLifecycleAndFilters() throws {
         let fake = InMemoryNotes.sample()

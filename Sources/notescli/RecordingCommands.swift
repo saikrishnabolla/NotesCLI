@@ -29,7 +29,8 @@ struct RecordingAdd: ParsableCommand {
         let backend = try options.writable()
         _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
         _ = try backend.reader.summary(note)
-        let source = URL(fileURLWithPath: NSString(string: file).expandingTildeInPath)
+        let source = try InputFile.validated(URL(fileURLWithPath: NSString(string: file).expandingTildeInPath),
+                                             kind: "audio file", maxBytes: AudioTranscriber.maxAudioBytes)
         let prepared = write.dryRun ? nil : try AudioTranscriber.prepareBlocking(source, title: title)
         let segments = try recordingTranscriptSegments(transcribe: transcribe, transcriptFile: transcriptFile,
                                                        audio: prepared?.url, locale: locale, dryRun: write.dryRun)
@@ -61,7 +62,8 @@ struct RecordingCreate: ParsableCommand {
     func run() throws {
         let backend = try options.writable()
         _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
-        let source = URL(fileURLWithPath: NSString(string: file).expandingTildeInPath)
+        let source = try InputFile.validated(URL(fileURLWithPath: NSString(string: file).expandingTildeInPath),
+                                             kind: "audio file", maxBytes: AudioTranscriber.maxAudioBytes)
         let targetPath = try SafetyExecutor.folderPath(folder, reader: backend.reader)
         let plan = DryRunPlan(operation: "recordingCreate", target: title,
                               arguments: ["folder": folder, "file": source.path, "transcribe": String(transcribe),
@@ -98,7 +100,8 @@ struct RecordingTranscribeFile: ParsableCommand {
     @Option(help: "Speech locale, such as en-US.") var locale: String?
 
     func run() throws {
-        let source = URL(fileURLWithPath: NSString(string: file).expandingTildeInPath)
+        let source = try InputFile.validated(URL(fileURLWithPath: NSString(string: file).expandingTildeInPath),
+                                             kind: "audio file", maxBytes: AudioTranscriber.maxAudioBytes)
         let destination = URL(fileURLWithPath: NSString(string: output).expandingTildeInPath)
         let prepared = try AudioTranscriber.prepareBlocking(source)
         let segments = try AudioTranscriber.transcribeBlocking(prepared.url, locale: locale)
@@ -136,8 +139,7 @@ struct RecordingTranscribe: ParsableCommand {
                 transcripts[recordings[0].id] = try AudioTranscriber.readTranscriptFile(url).segments
             } else {
                 for recording in recordings {
-                    guard let path = recording.filePath else { throw NotesError("audio_not_downloaded", "Recording \(recording.id) is not downloaded.") }
-                    transcripts[recording.id] = try AudioTranscriber.transcribeBlocking(URL(fileURLWithPath: path), locale: locale)
+                    transcripts[recording.id] = try AudioTranscriber.transcribeRecordingBlocking(recording, locale: locale)
                 }
             }
         }
@@ -173,11 +175,13 @@ private func validateTranscriptSource(transcribe: Bool, transcriptFile: String?)
 }
 
 private func recordingTranscriptSegments(transcribe: Bool, transcriptFile: String?, audio: URL?, locale: String?, dryRun: Bool) throws -> [TranscriptWord] {
-    guard !dryRun else { return [] }
     if let transcriptFile {
+        // Dry runs read and validate the transcript too, so a bad path fails before any write is planned.
         let url = URL(fileURLWithPath: NSString(string: transcriptFile).expandingTildeInPath)
-        return try AudioTranscriber.readTranscriptFile(url).segments
+        let segments = try AudioTranscriber.readTranscriptFile(url).segments
+        return dryRun ? [] : segments
     }
+    guard !dryRun else { return [] }
     guard transcribe, let audio else { return [] }
     return try AudioTranscriber.transcribeBlocking(audio, locale: locale)
 }

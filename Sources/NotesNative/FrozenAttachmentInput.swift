@@ -9,16 +9,17 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
     public let byteCount: Int
     private let directory: URL
 
+    public static let maxBytes = 200 * 1024 * 1024
+
     public convenience init(file source: URL) throws {
-        let source = source.standardizedFileURL.resolvingSymlinksInPath()
-        try Self.requireAttachable(source)
-        let data = try Data(contentsOf: source, options: .mappedIfSafe)
-        try self.init(data: data, suggestedName: source.lastPathComponent)
+        let resolved = try InputFile.validated(source, kind: "attachment", maxBytes: Self.maxBytes)
+        let data = try InputFile.read(resolved, kind: "attachment", maxBytes: Self.maxBytes)
+        try self.init(data: data, suggestedName: resolved.lastPathComponent)
     }
 
     public init(data: Data, suggestedName: String) throws {
         guard !data.isEmpty else { throw NotesError("empty_attachment", "The attachment has no bytes.") }
-        guard data.count <= 200 * 1024 * 1024 else { throw NotesError("attachment_too_large", "Attachments are limited to 200 MB.") }
+        guard data.count <= Self.maxBytes else { throw NotesError("attachment_too_large", "Attachments are limited to 200 MB.") }
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory.appendingPathComponent("notescli-attachment-" + UUID().uuidString, isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -53,23 +54,5 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
     private static func safeName(_ name: String) -> String {
         let value = URL(fileURLWithPath: name).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty || value == "." || value == ".." ? "attachment.bin" : value
-    }
-
-    private static func requireAttachable(_ url: URL) throws {
-        let fileManager = FileManager.default
-        var directory: ObjCBool = false
-        guard fileManager.fileExists(atPath: url.path, isDirectory: &directory), !directory.boolValue,
-              fileManager.isReadableFile(atPath: url.path) else {
-            throw NotesError("invalid_file", "The attachment must be a readable regular file.")
-        }
-        let home = fileManager.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
-        let path = url.path
-        func inside(_ root: String) -> Bool { path == root || path.hasPrefix(root.hasSuffix("/") ? root : root + "/") }
-        let hiddenHomeComponent = inside(home) && path.dropFirst(home.count).split(separator: "/").contains { $0.hasPrefix(".") }
-        let allowedHome = inside(home) && !inside(home + "/Library") && !hiddenHomeComponent
-        let temporaryRoots = [NSTemporaryDirectory(), "/tmp", "/private/tmp", "/private/var/folders"]
-        guard allowedHome || temporaryRoots.contains(where: inside) || inside("/Volumes") else {
-            throw NotesError("attachment_path_refused", "Attach files from your home folder outside Library and hidden folders, a temporary folder, or an external volume.")
-        }
     }
 }

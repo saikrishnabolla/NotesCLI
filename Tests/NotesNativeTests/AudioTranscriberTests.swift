@@ -36,6 +36,36 @@ final class AudioTranscriberTests: XCTestCase {
         }
     }
 
+    func testTranscriptFileRejectsOutOfBoundsValuesWithClearErrors() throws {
+        func segment(_ text: String = "Hello", start: Double = 0, duration: Double = 1, speaker: String? = nil, fragment: Int? = nil) -> TranscriptWord {
+            TranscriptWord(text: text, start: start, duration: duration, speaker: speaker, fragment: fragment)
+        }
+        func assertRejected(_ segments: [TranscriptWord], _ message: String, line: UInt = #line) throws {
+            let data = try JSONEncoder().encode(segments)
+            XCTAssertThrowsError(try AudioTranscriber.decodeTranscriptFile(data), line: line) { error in
+                XCTAssertEqual((error as? NotesError)?.code, "invalid_transcript_file", line: line)
+                XCTAssertEqual((error as? NotesError)?.message, message, line: line)
+            }
+        }
+        try assertRejected([segment(start: 1e300)], "Transcript timing must be finite and within 0...604800 seconds.")
+        try assertRejected([segment(start: 604_000, duration: 801)], "Transcript timing must be finite and within 0...604800 seconds.")
+        try assertRejected([segment(String(repeating: "a", count: 10_001))], "Transcript segment text must be at most 10000 characters.")
+        try assertRejected([segment(speaker: String(repeating: "s", count: 201))], "Transcript speaker names must be at most 200 characters.")
+        try assertRejected([segment(fragment: -1)], "Transcript fragment indices must be within 0...999.")
+        try assertRejected([segment(fragment: 1_000)], "Transcript fragment indices must be within 0...999.")
+        try assertRejected(Array(repeating: segment(), count: 100_001), "The transcript file has more than 100000 segments.")
+    }
+
+    func testTranscriptFileOverSizeLimitIsRefusedBeforeDecoding() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-big-transcript-" + UUID().uuidString + ".json")
+        try Data(repeating: 0x20, count: 10 * 1024 * 1024 + 1).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertThrowsError(try AudioTranscriber.readTranscriptFile(url)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "input_too_large")
+            XCTAssertEqual((error as? NotesError)?.message, "The transcript file is larger than the 10 MB limit.")
+        }
+    }
+
     func testSpeechAuthorizationRefusesBundleWithoutUsageDescription() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let contents = root.appendingPathComponent("MissingSpeech.bundle/Contents", isDirectory: true)

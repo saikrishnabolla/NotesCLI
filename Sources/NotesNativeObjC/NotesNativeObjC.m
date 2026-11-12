@@ -445,28 +445,51 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
         id document = [audioDocument valueForKey:@"document"];
         if (!NCRequireObject(document, @[@"objects"], @"opening audio document objects", error)) return;
         NSArray *fragmentUUIDs = [audioDocument valueForKey:@"orderedFragmentUUIDs"];
-        id fragmentUUID = fragmentUUIDs.firstObject;
-        id fragment = fragmentUUID ? [[document valueForKey:@"objects"] objectForKey:fragmentUUID] : nil;
-        if (!fragment || !NCRequireObject(fragment, @[@"transcript", @"setTranscriptVersion:"], @"opening audio fragment transcript", error)) return;
-        id transcript = [fragment valueForKey:@"transcript"];
-        if (!NCRequireObject(transcript, @[@"addObject:", @"count"], @"writing audio transcript segments", error)) return;
-        if ([[transcript valueForKey:@"count"] unsignedIntegerValue] != 0) {
-            if (error) *error = NCError(@"The recording already has a transcript");
-            return;
-        }
+        NSDictionary *objects = [document valueForKey:@"objects"];
+        // Each row names its fragment by index in orderedFragmentUUIDs. Check every target before writing any.
+        NSMutableDictionary<NSNumber *, NSMutableArray *> *groups = [NSMutableDictionary dictionary];
         for (NSDictionary<NSString *, id> *row in segments) {
-            id segment = ((id (*)(id, SEL, id, id))objc_msgSend)([segmentClass alloc], NSSelectorFromString(@"initWithDocument:identity:"), document, NSUUID.UUID);
-            if (!segment) { if (error) *error = NCError(@"Notes could not create a transcript segment"); return; }
-            [segment setValue:row[@"text"] ?: @"" forKey:@"text"];
-            [segment setValue:row[@"start"] ?: @0 forKey:@"timestamp"];
-            [segment setValue:row[@"duration"] ?: @0 forKey:@"duration"];
-            [segment setValue:row[@"speaker"] forKey:@"speaker"];
-            ((void (*)(id, SEL, id))objc_msgSend)(transcript, NSSelectorFromString(@"addObject:"), segment);
+            NSInteger index = [row[@"fragment"] integerValue];
+            if (index < 0 || (NSUInteger)index >= fragmentUUIDs.count) {
+                if (error) *error = NCError([NSString stringWithFormat:@"The transcript uses fragment %ld, but the recording has %lu fragments", (long)index, (unsigned long)fragmentUUIDs.count]);
+                return;
+            }
+            NSMutableArray *group = groups[@(index)];
+            if (!group) { group = [NSMutableArray array]; groups[@(index)] = group; }
+            [group addObject:row];
         }
-        [fragment setValue:@1 forKey:@"transcriptVersion"];
+        NSArray<NSNumber *> *indices = [groups.allKeys sortedArrayUsingSelector:@selector(compare:)];
+        NSMutableArray *targets = [NSMutableArray arrayWithCapacity:indices.count];
+        for (NSNumber *index in indices) {
+            id fragment = [objects objectForKey:fragmentUUIDs[index.unsignedIntegerValue]];
+            if (!fragment || !NCRequireObject(fragment, @[@"transcript", @"setTranscriptVersion:"], @"opening audio fragment transcript", error)) return;
+            id transcript = [fragment valueForKey:@"transcript"];
+            if (!NCRequireObject(transcript, @[@"addObject:", @"count"], @"writing audio transcript segments", error)) return;
+            if ([[transcript valueForKey:@"count"] unsignedIntegerValue] != 0) {
+                if (error) *error = NCError(@"The recording already has a transcript");
+                return;
+            }
+            [targets addObject:fragment];
+        }
+        NSUInteger total = 0;
+        for (NSUInteger position = 0; position < indices.count; position++) {
+            id fragment = targets[position];
+            id transcript = [fragment valueForKey:@"transcript"];
+            for (NSDictionary<NSString *, id> *row in groups[indices[position]]) {
+                id segment = ((id (*)(id, SEL, id, id))objc_msgSend)([segmentClass alloc], NSSelectorFromString(@"initWithDocument:identity:"), document, NSUUID.UUID);
+                if (!segment) { if (error) *error = NCError(@"Notes could not create a transcript segment"); return; }
+                [segment setValue:row[@"text"] ?: @"" forKey:@"text"];
+                [segment setValue:row[@"start"] ?: @0 forKey:@"timestamp"];
+                [segment setValue:row[@"duration"] ?: @0 forKey:@"duration"];
+                [segment setValue:row[@"speaker"] forKey:@"speaker"];
+                ((void (*)(id, SEL, id))objc_msgSend)(transcript, NSSelectorFromString(@"addObject:"), segment);
+            }
+            [fragment setValue:@1 forKey:@"transcriptVersion"];
+            total += [[transcript valueForKey:@"count"] unsignedIntegerValue];
+        }
         ((void (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"writeMergeableData"));
         [(id<NCSynced>)attachment updateChangeCountWithReason:@"Added audio transcript"];
-        count = @([[transcript valueForKey:@"count"] unsignedIntegerValue]);
+        count = @(total);
     })) return nil;
     if (!count && error && !*error) *error = NCError(@"Notes could not write the audio transcript");
     return count;

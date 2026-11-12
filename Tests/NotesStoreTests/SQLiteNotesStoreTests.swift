@@ -113,6 +113,29 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(scan.childAttachments?.first?.childAttachments?.map(\.typeUTI), ["public.png"])
     }
 
+    func testHashTitleCollidingWithNoteNumberIsAmbiguousAndExplicitSyntaxResolves() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("""
+        INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE1,ZSNIPPET,ZACCOUNT7,ZFOLDER,ZNOTEDATA,ZISPASSWORDPROTECTED,ZMARKEDFORDELETION,ZISPINNED,ZHASCHECKLIST,ZCREATIONDATE3,ZMODIFICATIONDATE1) VALUES
+          (40,201,'HASH-TITLE','#20','',1,10,NULL,0,0,0,0,108,208);
+        """)
+        let store = try fixture.store()
+        XCTAssertThrowsError(try store.summary("#20")) { error in
+            let error = error as? NotesError
+            XCTAssertEqual(error?.code, "ambiguous_reference")
+            XCTAssertEqual(error?.message, ##"Reference "#20" matches more than one note: #20 N1 "First" (number), #40 HASH-TITLE "#20" (title)."##)
+            XCTAssertEqual(error?.hint, "Use id:20 for the note number or title:#20 for the exact title.")
+        }
+        XCTAssertEqual(try store.summary("title:#20").id.uuid, "HASH-TITLE")
+        XCTAssertEqual(try store.summary("id:20").id.uuid, "N1")
+        XCTAssertEqual(try store.summary("n20").id.uuid, "N1")
+        XCTAssertEqual(try store.summary("#40").id.uuid, "HASH-TITLE")
+        XCTAssertThrowsError(try store.summary("Duplicate")) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "ambiguous_note")
+            XCTAssertEqual((error as? NotesError)?.message, ##"Reference "Duplicate" matches more than one note: #26 DUP1 "Duplicate" (title), #27 DUP2 "Duplicate" (title)."##)
+        }
+    }
+
     func testNotesInDeletedFolderStayDeleted() throws {
         let fixture = try SyntheticLibrary()
         try fixture.sql("""

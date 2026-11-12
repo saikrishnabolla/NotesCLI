@@ -35,7 +35,7 @@ let package = Package(
         .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"], linkerSettings: [
             .linkedFramework("AVFoundation"), .linkedFramework("Speech"), .linkedFramework("PencilKit")
         ]),
-        .target(name: "NotesDiagrams", linkerSettings: [
+        .target(name: "NotesDiagrams", dependencies: ["NotesCore"], linkerSettings: [
             .linkedFramework("AppKit"), .linkedFramework("CoreGraphics"), .linkedFramework("WebKit")
         ]),
         // MCP server over stdio, same operations as the CLI.
@@ -65,6 +65,6 @@ let package = Package(
         .testTarget(name: "NotesSafetyTests", dependencies: ["NotesSafety", "NotesCore"]),
         .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore", "NotesSafety"]),
         .testTarget(name: "NotesSyncTests", dependencies: ["NotesSync", "NotesCore"]),
-        .testTarget(name: "NotesDiagramsTests", dependencies: ["NotesDiagrams"]),
+        .testTarget(name: "NotesDiagramsTests", dependencies: ["NotesDiagrams", "NotesCore"]),
     ]
 )

@@ -14,9 +14,9 @@ This reference follows `notescli --help` from version 1.0.0.
 -h, --help           Show help information.
 ```
 
-Use `--json` for scripts and agents. A note reference can be `#123`, a UUID, Core Data ID, legacy short ID such as `n123`, bare numeric ID such as `123`, or an unambiguous title. Use `#123` in new commands. A bare number is ambiguous when another note has that exact title. Numbers come from Notes' stable `Z_PK` value and appear as `#ID` in human listings and `number` in JSON.
+Use `--json` for scripts and agents. A note reference can be `#123`, a UUID, Core Data ID, short ID such as `n123`, bare numeric ID such as `123`, or an exact title. `#123` and `123` also match a note titled exactly `#123` or `123`; when they match one note by number and another by title, the command fails with `ambiguous_reference` and lists both. Use `id:123` (or `n123`) to match only the note number or ID, and `title:#123` to match only the exact title. Numbers come from Notes' stable `Z_PK` value and appear as `#ID` in human listings and `number` in JSON.
 
-With no command, a terminal shows the NotesCLI home screen and five recently edited notes. Redirected output shows plain help. `notescli --json` returns the home data as JSON.
+With no command, a terminal shows the NotesCLI home screen and the titles of five recently edited notes. `notescli --no-recent` or `NOTESCLI_HOME_RECENT=0` hides the titles. Redirected output shows plain help. `notescli --json` returns the home data as JSON; each recent note has only its number, title, folder, and modified date.
 
 ## Read commands
 
@@ -133,7 +133,7 @@ notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript; each segment's `fragment` index picks the audio fragment it belongs to, and 0 is the default. `recording transcribe` transcribes each fragment of a recording in order. Readback checks each segment's text, timing, speaker, and fragment. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
 ## Diagrams
 
@@ -147,7 +147,7 @@ notescli diagram create --folder <folder> --title <title> --file <diagram.svg|di
 notescli diagram export <note> --output <file> [--attachment-id <id>]
 ```
 
-Image mode is the default. WebKit waits for web fonts, crops the page to its visible content, renders at 700 pixels and 2x scale by default, and inserts one PNG through the native frozen-byte path. The PNG contains the original SVG or HTML in an iTXt chunk. `diagram export` recovers it; pass `--attachment-id` when a note has more than one diagram.
+Image mode is the default. WebKit renders the file with JavaScript off and no file or network access: only inline styles and `data:` images and fonts load, so linked web fonts fall back to installed fonts. Rendering stops after 30 seconds, and files over 5 MB or 50,000 elements are refused. WebKit crops the page to its visible content, renders at 700 pixels and 2x scale by default, and inserts one PNG through the native frozen-byte path. The PNG contains the original SVG or HTML in an iTXt chunk. `diagram export` recovers it; pass `--attachment-id` when a note has more than one diagram.
 
 `--background auto` keeps an opaque source background. A transparent source gets a white fallback, or a dark fallback with `--dark`. Notes does not invert images in dark mode. `--background transparent` clears the page background but leaves any background drawn inside the SVG. `--as drawing` accepts SVG and converts its supported shapes and paths to editable Paper strokes at the requested width. Outline text before conversion because SVG text nodes are not PencilKit strokes.
 

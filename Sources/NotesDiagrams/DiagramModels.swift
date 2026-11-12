@@ -1,4 +1,5 @@
 import Foundation
+import NotesCore
 
 public enum DiagramError: Error, CustomStringConvertible, Equatable {
     case invalidWidth
@@ -18,6 +19,13 @@ public enum DiagramError: Error, CustomStringConvertible, Equatable {
         case .renderFailed(let message): return message
         }
     }
+}
+
+public enum DiagramLimits {
+    public static let maxSourceBytes = 5 * 1024 * 1024
+    public static let maxElements = 50_000
+    public static let maxOutputDimension = 32_768
+    public static let maxOutputPixels = 50_000_000
 }
 
 public enum DiagramBackground: String, CaseIterable, Sendable {
@@ -66,8 +74,17 @@ public enum DiagramGeometry {
             throw DiagramError.renderFailed("The diagram has no visible content bounds.")
         }
         let width = displayWidth * scale
-        let height = Int((Double(width) * contentHeight / contentWidth).rounded())
-        return DiagramPixelSize(width: width, height: max(1, height))
+        let exactHeight = (Double(width) * contentHeight / contentWidth).rounded()
+        // Check before converting: Int(_:) traps on infinite or huge values.
+        guard exactHeight.isFinite, exactHeight <= 1e12 else {
+            throw DiagramError.renderFailed("The diagram content bounds are too extreme to render.")
+        }
+        let height = max(1, Int(exactHeight))
+        guard width <= DiagramLimits.maxOutputDimension, height <= DiagramLimits.maxOutputDimension,
+              width * height <= DiagramLimits.maxOutputPixels else {
+            throw DiagramError.renderFailed("The rendered diagram would be \(width) × \(height) pixels; the limit is \(DiagramLimits.maxOutputDimension) pixels per side and \(DiagramLimits.maxOutputPixels) pixels in total.")
+        }
+        return DiagramPixelSize(width: width, height: height)
     }
 
     public static func cropRect(left: Double, top: Double, right: Double, bottom: Double,
@@ -105,7 +122,7 @@ public struct DiagramSource: Equatable, Sendable {
     public init(file: URL) throws {
         let ext = file.pathExtension.lowercased()
         guard ["svg", "html", "htm"].contains(ext) else { throw DiagramError.invalidFileType }
-        let data = try Data(contentsOf: file, options: .mappedIfSafe)
+        let data = try InputFile.read(file, kind: "diagram", maxBytes: DiagramLimits.maxSourceBytes)
         guard !data.isEmpty else { throw DiagramError.renderFailed("The diagram file is empty.") }
         self.data = data
         self.filename = file.lastPathComponent

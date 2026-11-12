@@ -76,17 +76,13 @@ public enum AudioTranscriber {
     }
 
     public static func readTranscriptFile(_ file: URL) throws -> AudioTranscriptFile {
-        do { return try decodeTranscriptFile(Data(contentsOf: file)) }
-        catch let error as NotesError { throw error }
-        catch { throw NotesError("invalid_transcript_file", "Could not read the transcript file: \(error.localizedDescription)") }
+        try decodeTranscriptFile(InputFile.read(file, kind: "transcript file", maxBytes: TranscriptLimits.maxFileBytes))
     }
 
+    public static let maxAudioBytes = 2 * 1024 * 1024 * 1024
+
     public static func prepare(_ source: URL, title: String? = nil) async throws -> PreparedRecording {
-        let source = source.standardizedFileURL.resolvingSymlinksInPath()
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
-            throw NotesError("invalid_file", "The audio file is not readable.")
-        }
+        let source = try InputFile.validated(source, kind: "audio file", maxBytes: maxAudioBytes)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-recording-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         do {
@@ -126,6 +122,13 @@ public enum AudioTranscriber {
             }
         }
         return try await legacyTranscription(file, locale: locale)
+    }
+
+    /// Transcribes each audio fragment of a native recording in order and tags its segments with the fragment index.
+    public static func transcribeRecordingBlocking(_ recording: Attachment, locale: String? = nil) throws -> [TranscriptWord] {
+        try RecordingFragments.audioFiles(recording).enumerated().flatMap { index, file in
+            RecordingFragments.assign(try transcribeBlocking(file, locale: locale), fragment: index)
+        }
     }
 
     public static func transcribeBlocking(_ file: URL, locale: String? = nil) throws -> [TranscriptWord] {
@@ -226,12 +229,8 @@ public enum AudioTranscriber {
         guard !transcript.segments.isEmpty else {
             throw NotesError("invalid_transcript_file", "The transcript file has no segments.")
         }
-        for segment in transcript.segments {
-            guard !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  let start = segment.start, start.isFinite, start >= 0,
-                  let duration = segment.duration, duration.isFinite, duration >= 0 else {
-                throw NotesError("invalid_transcript_file", "Transcript segments require text and non-negative finite timing values.")
-            }
+        if let problem = TranscriptLimits.problem(in: transcript.segments) {
+            throw NotesError("invalid_transcript_file", problem)
         }
     }
 }

@@ -31,7 +31,8 @@ struct Export: ParsableCommand {
         let output = URL(fileURLWithPath: NSString(string: out).expandingTildeInPath).standardizedFileURL
         let templateText = try template.map { value -> String in
             let path = NSString(string: value).expandingTildeInPath
-            return FileManager.default.fileExists(atPath: path) ? try String(contentsOfFile: path, encoding: .utf8) : value
+            guard FileManager.default.fileExists(atPath: path) else { return value }
+            return try InputFile.readText(URL(fileURLWithPath: path), kind: "template", maxBytes: InputFile.maxTextBytes)
         }
         let exportOptions = ExportOptions(output: output, folder: folder,
             format: NotesExportFormat(rawValue: format.rawValue)!, includeAttachments: attachments,

@@ -37,7 +37,7 @@ Follow diagram-design's type reference and style rules. Keep the diagram sparse,
 
 ## Add the result to Notes
 
-Ask diagram-design for one self-contained `.html` file with inline SVG, or a standalone `.svg` file. Then run:
+Ask diagram-design for one self-contained `.html` file with inline SVG, or a standalone `.svg` file. NotesCLI ignores scripts and external files, including linked web fonts; embed fonts as `data:` URLs or use installed fonts. Then run:
 
 ```bash
 notescli diagram add NOTE_ID --file research-flow.html --width 700 --scale 2 --background auto

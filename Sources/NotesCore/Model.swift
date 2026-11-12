@@ -13,23 +13,95 @@ public struct NoteID: Hashable, Codable, Sendable, CustomStringConvertible {
 }
 
 public enum NoteReference {
-    public static func explicitNumber(_ ref: String) -> Int? {
-        let digits: Substring
-        if ref.hasPrefix("#") { digits = ref.dropFirst() }
-        else if ref.count > 1, ref.first?.lowercased() == "n" { digits = ref.dropFirst() }
-        else { return nil }
-        guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
-        return Int(digits)
+    /// How a note reference string is read.
+    public enum Form: Equatable, Sendable {
+        /// `id:VALUE` or `nN`: identifiers and note numbers only, never titles.
+        case identifier(value: String, number: Int?)
+        /// `title:TEXT`: exact titles only.
+        case title(String)
+        /// `#N` or `N`: a note number, an identifier, or an exact title.
+        case numberOrTitle(Int)
+        /// Anything else: a UUID, Core Data ID, or exact title.
+        case text(String)
     }
 
-    public static func bareNumber(_ ref: String) -> Int? {
-        guard !ref.isEmpty, ref.allSatisfy(\.isNumber) else { return nil }
-        return Int(ref)
+    public static func parse(_ ref: String) -> Form {
+        if let range = ref.range(of: "title:", options: [.anchored, .caseInsensitive]) {
+            return .title(String(ref[range.upperBound...]))
+        }
+        if let range = ref.range(of: "id:", options: [.anchored, .caseInsensitive]) {
+            let value = String(ref[range.upperBound...])
+            return .identifier(value: value, number: digits(value))
+        }
+        if ref.count > 1, ref.first?.lowercased() == "n", let number = digits(ref.dropFirst()) {
+            return .identifier(value: ref, number: number)
+        }
+        if ref.hasPrefix("#"), let number = digits(ref.dropFirst()) { return .numberOrTitle(number) }
+        if let number = digits(ref) { return .numberOrTitle(number) }
+        return .text(ref)
+    }
+
+    /// Resolves `ref` to exactly one candidate. A reference that matches one note by number or ID
+    /// and a different note by title fails with `ambiguous_reference` instead of picking one.
+    public static func resolve<Candidate>(
+        _ ref: String,
+        identifiers: (String) throws -> [Candidate],
+        number: (Int) throws -> [Candidate],
+        title: (String) throws -> [Candidate],
+        key: (Candidate) -> String,
+        describe: (Candidate) -> String
+    ) throws -> Candidate {
+        var labeled: [(Candidate, String)] = []
+        var seen: Set<String> = []
+        func add(_ candidates: [Candidate], _ label: String) {
+            let ordered = candidates.sorted { describe($0).compare(describe($1), options: .numeric) == .orderedAscending }
+            for candidate in ordered where seen.insert(key(candidate)).inserted { labeled.append((candidate, label)) }
+        }
+        var conflictHint: String?
+        switch parse(ref) {
+        case .title(let text):
+            add(try title(text), "title")
+        case .identifier(let value, let numeric):
+            add(try identifiers(value), "id")
+            if let numeric { add(try number(numeric), "number") }
+        case .numberOrTitle(let value):
+            add(try identifiers(ref), "id")
+            add(try number(value), "number")
+            add(try title(ref), "title")
+            conflictHint = "Use id:\(value) for the note number or title:\(ref) for the exact title."
+        case .text(let text):
+            add(try identifiers(text), "id")
+            add(try title(text), "title")
+            conflictHint = "Use id:\(ref) for the identifier or title:\(ref) for the exact title."
+        }
+        guard !labeled.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
+        guard labeled.count > 1 else { return labeled[0].0 }
+        let listed = labeled.map { "\(describe($0.0)) (\($0.1))" }.joined(separator: ", ")
+        let message = "Reference \"\(ref)\" matches more than one note: \(listed)."
+        let mixesTitleAndID = labeled.contains { $0.1 == "title" } && labeled.contains { $0.1 != "title" }
+        if mixesTitleAndID, let conflictHint { throw NotesError("ambiguous_reference", message, hint: conflictHint) }
+        throw NotesError("ambiguous_note", message, hint: "Use id:N, a UUID, or title:TEXT.")
+    }
+
+    /// `#N` as listed by NotesCLI, then the UUID, then the quoted title.
+    public static func describe(number: Int?, uuid: String, title: String) -> String {
+        [number.map { "#\($0)" }, uuid, "\"\(title)\""].compactMap { $0 }.joined(separator: " ")
+    }
+
+    public static func explicitNumber(_ ref: String) -> Int? {
+        if ref.hasPrefix("#") { return digits(ref.dropFirst()) }
+        if ref.count > 1, ref.first?.lowercased() == "n" { return digits(ref.dropFirst()) }
+        return nil
     }
 
     public static func number(fromShortID shortID: String?) -> Int? {
         guard let shortID else { return nil }
         return explicitNumber(shortID)
+    }
+
+    private static func digits<S: StringProtocol>(_ text: S) -> Int? {
+        guard !text.isEmpty, text.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        return Int(text)
     }
 }
 

@@ -111,7 +111,9 @@ func inputBody(body: String?, stdin: Bool, file: String? = nil, allowEditor: Boo
         guard let text = String(data: data, encoding: .utf8) else { throw NotesError("invalid_encoding", "stdin must contain UTF-8.") }
         return text
     }
-    if let file { return try String(contentsOfFile: NSString(string: file).expandingTildeInPath, encoding: .utf8) }
+    if let file {
+        return try InputFile.readText(URL(fileURLWithPath: NSString(string: file).expandingTildeInPath), kind: "body file", maxBytes: InputFile.maxTextBytes)
+    }
     if allowEditor { return try editor("") }
     throw ValidationError("Provide --body or --stdin.")
 }

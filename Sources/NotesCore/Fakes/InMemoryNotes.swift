@@ -44,26 +44,17 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
         return matches[0]
     }
     private func index(_ ref: String) throws -> Int {
-        let idMatches = noteStore.indices.filter {
-            noteStore[$0].summary.id.uuid == ref ||
-            noteStore[$0].summary.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
-            noteStore[$0].summary.id.shortID?.caseInsensitiveCompare(ref) == .orderedSame
-        }
-        if let number = NoteReference.explicitNumber(ref) {
-            let matches = Set(idMatches + noteStore.indices.filter { noteStore[$0].summary.number == number })
-            guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "note_not_found" : "ambiguous_note", "Note must resolve uniquely.") }
-            return matches.first!
-        }
-        if let number = NoteReference.bareNumber(ref) {
-            let matches = Set(idMatches + noteStore.indices.filter { noteStore[$0].summary.number == number || noteStore[$0].summary.title == ref })
-            guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "note_not_found" : "ambiguous_note", "Note must resolve uniquely.") }
-            return matches.first!
-        }
-        if idMatches.count == 1 { return idMatches[0] }
-        if idMatches.count > 1 { throw NotesError("ambiguous_note", "Note must resolve uniquely.") }
-        let matches = noteStore.indices.filter { noteStore[$0].summary.title == ref }
-        guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "note_not_found" : "ambiguous_note", "Note must resolve uniquely.") }
-        return matches[0]
+        let indices = Array(noteStore.indices)
+        return try NoteReference.resolve(ref, identifiers: { value in
+            indices.filter {
+                noteStore[$0].summary.id.uuid == value ||
+                noteStore[$0].summary.id.coreDataID?.caseInsensitiveCompare(value) == .orderedSame ||
+                noteStore[$0].summary.id.shortID?.caseInsensitiveCompare(value) == .orderedSame
+            }
+        }, number: { number in indices.filter { noteStore[$0].summary.number == number } },
+        title: { title in indices.filter { noteStore[$0].summary.title == title } },
+        key: { noteStore[$0].summary.id.uuid },
+        describe: { NoteReference.describe(number: noteStore[$0].summary.number, uuid: noteStore[$0].summary.id.uuid, title: noteStore[$0].summary.title) })
     }
     public func accounts() throws -> [Account] { synchronized { accountStore } }
     public func folders(account ref: String?) throws -> [Folder] {

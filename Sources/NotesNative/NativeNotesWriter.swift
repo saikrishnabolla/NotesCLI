@@ -228,19 +228,21 @@ public final class NativeNotesWriter: NotesNativeWriting {
             }
             return nil
         }
-        var matches = try fetch("ICNote", predicate: NSPredicate(format: "identifier ==[c] %@", ref), in: context)
-        if let number = NoteReference.explicitNumber(ref) {
-            if let object = primaryKeyNote(number), !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
-        } else if let number = NoteReference.bareNumber(ref) {
-            if let object = primaryKeyNote(number), !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
-            for object in try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context)
-                where !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
-        } else if matches.isEmpty {
-            matches = try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context)
+        func number(of object: NSManagedObject) -> Int? {
+            let last = object.objectID.uriRepresentation().lastPathComponent
+            guard last.hasPrefix("p") else { return nil }
+            return Int(last.dropFirst())
         }
-        guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note matches. Use #ID or a UUID.") }
-        return matches[0]
+        return try NoteReference.resolve(ref, identifiers: { value in
+            try fetch("ICNote", predicate: NSPredicate(format: "identifier ==[c] %@", value), in: context)
+        }, number: { value in primaryKeyNote(value).map { [$0] } ?? [] },
+        title: { value in
+            try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", value), in: context)
+        }, key: { $0.objectID.uriRepresentation().absoluteString },
+        describe: { object in
+            NoteReference.describe(number: number(of: object), uuid: object.value(forKey: "identifier") as? String ?? "",
+                                   title: object.value(forKey: "title") as? String ?? "")
+        })
     }
 
     fileprivate func folder(_ ref: String, in context: NSManagedObjectContext) throws -> NSManagedObject {
@@ -1083,8 +1085,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func insertDrawing(_ ref: String, drawing: PKDrawing, position: Int?, allowShared: Bool) throws -> NativeAttachmentResult {
-        let expectedStrokeCount = drawing.strokes.count
-        guard expectedStrokeCount > 0 else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
+        let expectedStrokes = PaperStrokeRecord.records([drawing])
+        guard !expectedStrokes.isEmpty else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
         return try performAttachmentWrite { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
@@ -1109,20 +1111,14 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let fresh = try self.note(id(note), in: context)
             let placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID }.count
             let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", attachmentID), in: context, limit: 1).first
-            let decodedStrokeCount: Int
-            if let attachment {
-                decodedStrokeCount = try NCNotesRuntime.systemPaperDrawings(for: attachment).reduce(0) { count, value in
-                    guard let drawing = value as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
-                    return count + drawing.strokes.count
-                }
-            } else {
-                decodedStrokeCount = 0
-            }
+            let decodedStrokes = try attachment.map(readBackStrokes) ?? []
+            let decodedStrokeCount = decodedStrokes.count
+            let strokeMismatch = PaperStrokeRecord.mismatch(expected: expectedStrokes, actual: decodedStrokes)
             let type = kind as String? ?? "com.apple.notes.paper"
             let native = ["attachmentID": attachmentID, "typeUTI": type, "placements": String(placements),
-                          "strokeCount": String(decodedStrokeCount)]
+                          "strokeCount": String(decodedStrokeCount), "strokes": strokeMismatch ?? "match"]
             let write = result(id(note), native: native,
-                               nativeVerified: placements == 1 && decodedStrokeCount == expectedStrokeCount,
+                               nativeVerified: placements == 1 && strokeMismatch == nil,
                                sqlite: { note in
                 guard note.attachments.filter({ $0.id == attachmentID && $0.typeUTI == type }).count == 1 else { return nil }
                 return ["attachmentID": attachmentID, "typeUTI": type, "placements": "1",
@@ -1186,10 +1182,17 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return try folder(folderID, in: context)
     }
 
+    private func readBackStrokes(_ attachment: NSManagedObject) throws -> [PaperStrokeRecord] {
+        PaperStrokeRecord.records(try NCNotesRuntime.systemPaperDrawings(for: attachment).map { value in
+            guard let drawing = value as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
+            return drawing
+        })
+    }
+
     public func createDrawingNote(title: String, folder folderRef: String?, drawing: PKDrawing,
                                   allowShared: Bool) throws -> NativeCreateResult {
-        let expectedStrokeCount = drawing.strokes.count
-        guard expectedStrokeCount > 0 else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
+        let expectedStrokes = PaperStrokeRecord.records([drawing])
+        guard !expectedStrokes.isEmpty else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
         var createdAttachmentID = ""
         let write = try performWrite { context in
             let destination = try destinationFolder(folderRef, in: context)
@@ -1224,16 +1227,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let fresh = try self.note(noteID, in: context)
             let placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID }.count
             let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh), in: context, limit: 1).first
-            let decodedStrokeCount: Int
-            if let attachment {
-                decodedStrokeCount = try NCNotesRuntime.systemPaperDrawings(for: attachment).reduce(0) {
-                    guard let drawing = $1 as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
-                    return $0 + drawing.strokes.count
-                }
-            } else { decodedStrokeCount = 0 }
+            let decodedStrokes = try attachment.map(readBackStrokes) ?? []
+            let decodedStrokeCount = decodedStrokes.count
+            let strokeMismatch = PaperStrokeRecord.mismatch(expected: expectedStrokes, actual: decodedStrokes)
             return result(noteID, native: ["title": title, "attachmentID": attachmentID, "typeUTI": type,
-                                           "placements": String(placements), "strokeCount": String(decodedStrokeCount)],
-                          nativeVerified: placements == 1 && decodedStrokeCount == expectedStrokeCount,
+                                           "placements": String(placements), "strokeCount": String(decodedStrokeCount),
+                                           "strokes": strokeMismatch ?? "match"],
+                          nativeVerified: placements == 1 && strokeMismatch == nil,
                           sqlite: { note in
                 guard note.summary.title == title,
                       note.attachments.filter({ $0.id == attachmentID && $0.typeUTI == type }).count == 1 else { return nil }
@@ -2056,7 +2056,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func insertRecording(_ ref: String, frozen: FrozenAttachmentInput, title: String?, duration: Double,
                                 transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult {
-        try performRecordingWrite(duration: duration) { context in
+        // A new recording has one fragment. Check before Notes saves the audio, which a rollback cannot undo.
+        _ = try RecordingFragments.grouped(transcript, fragmentCount: 1)
+        return try performRecordingWrite(duration: duration) { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note)
@@ -2073,7 +2075,10 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     throw NotesError("attachment_not_found", "Notes created no audio attachment record.")
                 }
                 childIDs = try NCNotesRuntime.transformAudioAttachment(attachment, duration: duration)
-                if !transcript.isEmpty { _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(transcript), toAudioAttachment: attachment) }
+                if !transcript.isEmpty {
+                    _ = try RecordingFragments.grouped(transcript, fragmentCount: childIDs.count)
+                    _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(transcript), toAudioAttachment: attachment)
+                }
                 try insertMarker(editor, original: editor.original, id: attachmentID,
                                  type: kind as String? ?? "public.mpeg-4-audio", position: nil)
                 try editor.finish()
@@ -2089,7 +2094,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func createRecordingNote(folder folderRef: String?, title: String, frozen: FrozenAttachmentInput, duration: Double,
                                     transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult {
-        try performRecordingWrite(duration: duration) { context in
+        // A new recording has one fragment. Check before Notes saves the audio, which a rollback cannot undo.
+        _ = try RecordingFragments.grouped(transcript, fragmentCount: 1)
+        return try performRecordingWrite(duration: duration) { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
             var noteID = "", attachmentID = "", childIDs: [String] = [], kind: NSString?
@@ -2108,7 +2115,10 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     throw NotesError("attachment_not_found", "Notes created no audio attachment record.")
                 }
                 childIDs = try NCNotesRuntime.transformAudioAttachment(attachment, duration: duration)
-                if !transcript.isEmpty { _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(transcript), toAudioAttachment: attachment) }
+                if !transcript.isEmpty {
+                    _ = try RecordingFragments.grouped(transcript, fragmentCount: childIDs.count)
+                    _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(transcript), toAudioAttachment: attachment)
+                }
                 if built.length > 0 { built.append(NSAttributedString(string: "\n")) }
                 let marker = try NCNotesRuntime.attachmentMarker(id: attachmentID, type: kind as String? ?? "public.mpeg-4-audio")
                 built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("NSAttachment"): marker]))
@@ -2139,6 +2149,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     guard let attachment = try fetch("ICAttachment", predicate: predicate, in: context, limit: 1).first else {
                         throw NotesError("attachment_not_found", "Recording \(attachmentID) is not in this note.")
                     }
+                    _ = try RecordingFragments.grouped(segments, fragmentCount: (attachment.value(forKey: "subAttachments") as? NSSet)?.count ?? 0)
                     _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(segments), toAudioAttachment: attachment)
                 }
                 try save(context, notes: [note])
@@ -2146,18 +2157,21 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 context.rollback()
                 throw (error as? NotesError) ?? nativeError(error)
             }
-            let expected = transcripts.mapValues(\.count)
-            return result(id(note), native: ["recordings": "\(transcripts.count)", "segments": "\(expected.values.reduce(0, +))"], sqlite: { note in
-                let matches = note.attachments.filter { expected[$0.id] == $0.transcriptWords?.count }
-                guard matches.count == expected.count else { return nil }
+            let total = transcripts.values.reduce(0) { $0 + $1.count }
+            return result(id(note), native: ["recordings": "\(transcripts.count)", "segments": "\(total)"], sqlite: { note in
+                let matches = note.attachments.filter { attachment in
+                    transcripts[attachment.id].map { RecordingFragments.mismatch(expected: $0, actual: attachment.transcriptWords ?? []) == nil } ?? false
+                }
+                guard matches.count == transcripts.count else { return nil }
                 return ["recordings": "\(matches.count)", "segments": "\(matches.compactMap(\.transcriptWords).reduce(0) { $0 + $1.count })"]
-            }, mismatch: "Fresh Notes database readback did not contain the new native transcript segments.")
+            }, mismatch: "Fresh Notes database readback did not match the written transcript text, timing, speakers, or fragments.")
         }
     }
 
     private func transcriptRows(_ transcript: [TranscriptWord]) -> [[String: Any]] {
         transcript.map { segment in
-            var row: [String: Any] = ["text": segment.text, "start": segment.start ?? 0, "duration": segment.duration ?? 0]
+            var row: [String: Any] = ["text": segment.text, "start": segment.start ?? 0, "duration": segment.duration ?? 0,
+                                      "fragment": segment.fragment ?? 0]
             if let speaker = segment.speaker { row["speaker"] = speaker }
             return row
         }
@@ -2174,7 +2188,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             guard let attachment = note.attachments.first(where: { $0.id == attachmentID }),
                   Set(attachment.childAttachmentIDs ?? []) == Set(childIDs),
                   abs((attachment.duration ?? 0) - duration) < 0.05,
-                  (attachment.transcriptWords?.count ?? 0) == transcript.count,
+                  RecordingFragments.mismatch(expected: transcript, actual: attachment.transcriptWords ?? []) == nil,
                   stored == frozen.sha256 else { return nil }
             return ["attachmentID": attachment.id, "fragments": "\(attachment.childAttachmentIDs?.count ?? 0)",
                     "duration": String(attachment.duration ?? 0), "segments": "\(attachment.transcriptWords?.count ?? 0)",

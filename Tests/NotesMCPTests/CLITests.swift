@@ -39,6 +39,23 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(confirmation.0, 1)
         XCTAssertTrue(confirmation.2.contains("confirmation_required"))
     }
+    func testFileInputsFromHiddenHomeFoldersAreRefused() throws {
+        let hidden = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".notescli-test-cli-input-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: hidden) }
+        let markdown = hidden.appendingPathComponent("note.md")
+        try Data("---\nnotes-id: welcome\n---\nSecret body\n".utf8).write(to: markdown)
+        let exportOut = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-export-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: exportOut) }
+        for args in [["file", "push", markdown.path, "--dry-run"], ["file", "diff", markdown.path],
+                     ["add", "Title", "--file", markdown.path, "--dry-run"],
+                     ["export", "--out", exportOut.path, "--template", markdown.path]] {
+            let result = try run(["--backend", "fake", "--json"] + args)
+            XCTAssertNotEqual(result.0, 0, "\(args): \(result.1)")
+            XCTAssertTrue(result.2.contains("input_path_refused"), "\(args): \(result.2)")
+        }
+    }
     func testHomePinnedCapabilitiesHelpAndExamples() throws {
         let plain = try run([])
         XCTAssertEqual(plain.0, 0, plain.2)
@@ -51,6 +68,19 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(home["version"] as? String, "1.0.0")
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
+        XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },
+                       [["folder", "modified", "number", "title"], ["folder", "modified", "number", "title"]])
+        XCTAssertEqual((home["recent"] as? [[String: Any]])?.first?["title"] as? String, "Shopping")
+        XCTAssertEqual((home["recent"] as? [[String: Any]])?.first?["folder"] as? String, "Notes")
+        XCTAssertFalse(json.1.contains("Apples, coffee"), json.1)
+
+        for (args, environment) in [(["--backend", "fake", "--json", "--no-recent"], [String: String]()),
+                                    (["--backend", "fake", "--json"], ["NOTESCLI_HOME_RECENT": "0"])] {
+            let hidden = try run(args, environment: environment)
+            XCTAssertEqual(hidden.0, 0, hidden.2)
+            let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(hidden.1.utf8)) as? [String: Any])
+            XCTAssertEqual((object["recent"] as? [Any])?.count, 0, "\(args) \(environment)")
+        }
 
         let pinned = try run(["--backend", "fake", "pinned", "--limit", "1"])
         XCTAssertEqual(pinned.0, 0, pinned.2)
@@ -229,7 +259,7 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(missingAttachment.2.contains("attachment_not_found"))
     }
     func testExportsAndFileInput() throws {
-        let directory = root.appendingPathComponent(".build/cli-tests-" + UUID().uuidString)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("cli-tests-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let source = directory.appendingPathComponent("input.md"); try "File body".write(to: source, atomically: true, encoding: .utf8)

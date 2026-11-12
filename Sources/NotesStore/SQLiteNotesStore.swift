@@ -263,22 +263,15 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
 
     private func resolve(_ ref: String) throws -> NoteSummary {
         let visible = summaries.filter { !placeholderIDs.contains($0.id.uuid.lowercased()) }
-        let byID = visible.filter {
-            $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame ||
-            $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
-            $0.id.shortID?.caseInsensitiveCompare(ref) == .orderedSame
-        }
-        let matches: [NoteSummary]
-        if let number = NoteReference.explicitNumber(ref) {
-            matches = Array(Dictionary(grouping: byID + visible.filter { $0.number == number }, by: \.id.uuid).values.compactMap(\.first))
-        } else if let number = NoteReference.bareNumber(ref) {
-            matches = Array(Dictionary(grouping: byID + visible.filter { $0.number == number || ($0.title == ref && !$0.isDeleted) }, by: \.id.uuid).values.compactMap(\.first))
-        } else {
-            matches = byID.isEmpty ? visible.filter { $0.title == ref && !$0.isDeleted } : byID
-        }
-        guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note matches. Use #ID or a UUID.") }
-        return matches[0]
+        return try NoteReference.resolve(ref, identifiers: { value in
+            visible.filter {
+                $0.id.uuid.caseInsensitiveCompare(value) == .orderedSame ||
+                $0.id.coreDataID?.caseInsensitiveCompare(value) == .orderedSame ||
+                $0.id.shortID?.caseInsensitiveCompare(value) == .orderedSame
+            }
+        }, number: { number in visible.filter { $0.number == number } },
+        title: { title in visible.filter { $0.title == title && !$0.isDeleted } },
+        key: \.id.uuid, describe: { NoteReference.describe(number: $0.number, uuid: $0.id.uuid, title: $0.title) })
     }
     public func tags() throws -> [String: Int] {
         var counts: [String: Int] = [:]
@@ -315,7 +308,11 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             let childRows = rowsByPK.values.filter { $0.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") == parentPK }
             guard !childRows.isEmpty else { return parent }
             let childIDs = childRows.compactMap { $0.string("ZIDENTIFIER") }
-            let ordered = galleryOrder(noteRows[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") ?? library.objects[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA"), available: childIDs)
+            let mergeable = noteRows[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") ?? library.objects[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA")
+            // A recording lists its audio fragments in order; transcript fragment indices follow that order.
+            let recordingData = parent.typeUTI.contains("audio") ? row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") : nil
+            let fragmentOrder = (recordingData.flatMap { try? NotesRecordingDecoder.decode($0) }?.fragments ?? []).filter(childIDs.contains)
+            let ordered = fragmentOrder.isEmpty ? galleryOrder(mergeable, available: childIDs) : fragmentOrder
             let byID = Dictionary(uniqueKeysWithValues: childRows.compactMap { row -> (String, StoreRow)? in row.string("ZIDENTIFIER").map { ($0, row) } })
             let orderedRows = ordered.compactMap { byID[$0] } + childRows.filter { row in
                 guard let id = row.string("ZIDENTIFIER") else { return true }; return !ordered.contains(id)

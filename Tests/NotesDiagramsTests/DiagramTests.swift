@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import NotesCore
 @testable import NotesDiagrams
 
 @Test func outputSizeUsesRequestedWidthAndScale() throws {
@@ -91,4 +92,30 @@ import Testing
     let compatible = try DiagramDrawingSource.paperCompatibleSVG(source)
 
     #expect(String(decoding: compatible, as: UTF8.self) == #"<svg><rect fill="none" stroke="none"/></svg>"#)
+}
+
+@Test func diagramSourceFromHiddenHomeFolderIsRefused() throws {
+    let hidden = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".notescli-test-diagram-" + UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: hidden, withIntermediateDirectories: false)
+    defer { try? FileManager.default.removeItem(at: hidden) }
+    let file = hidden.appendingPathComponent("secret.svg")
+    try Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#.utf8).write(to: file)
+    let error = #expect(throws: NotesError.self) { try DiagramSource(file: file) }
+    #expect(error?.code == "input_path_refused")
+    #expect(error?.message == "The diagram must come from your home folder outside Library and hidden folders, a temporary folder, or an external volume.")
+}
+
+@Test func outputSizeRejectsTallNarrowContentInsteadOfAllocating() throws {
+    let error = #expect(throws: DiagramError.self) {
+        try DiagramGeometry.outputPixelSize(contentWidth: 1, contentHeight: 8192, displayWidth: 2400, scale: 3)
+    }
+    #expect(error == .renderFailed("The rendered diagram would be 7200 × 58982400 pixels; the limit is 32768 pixels per side and 50000000 pixels in total."))
+}
+
+@Test func outputSizeRejectsNonFiniteHeightWithoutTrapping() throws {
+    let error = #expect(throws: DiagramError.self) {
+        try DiagramGeometry.outputPixelSize(contentWidth: 1e-300, contentHeight: 8192, displayWidth: 700, scale: 2)
+    }
+    #expect(error == .renderFailed("The diagram content bounds are too extreme to render."))
 }

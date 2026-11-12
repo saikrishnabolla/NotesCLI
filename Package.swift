@@ -3,6 +3,8 @@ import PackageDescription
 import Foundation
 
 let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
+let executableInfoPlist = ProcessInfo.processInfo.environment["NOTESCLI_INFO_PLIST"]
+    ?? packageRoot + "/Sources/notescli/Info.plist"
 
 let package = Package(
     name: "NotesCLI",
@@ -49,7 +51,7 @@ let package = Package(
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
         ], exclude: ["Info.plist"], linkerSettings: [.unsafeFlags([
             "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
-            "-Xlinker", packageRoot + "/Sources/notescli/Info.plist",
+            "-Xlinker", executableInfoPlist,
         ])]),
         .testTarget(name: "NotesCoreTests", dependencies: ["NotesCore"]),
         .testTarget(name: "NotesStoreTests", dependencies: ["NotesStore", "NotesCore"]),

@@ -58,6 +58,11 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_create" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_transcribe" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_transcript" })
+        for name in ["recording_add", "recording_create", "recording_transcribe"] {
+            let schema = try XCTUnwrap(nativeTools.first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            XCTAssertEqual((properties["transcript_path"] as? [String: Any])?["type"] as? String, "string")
+        }
         for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
                      "insert_divider", "insert_math", "insert_mention", "table_convert_to_text", "checklist_auto_sort"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)

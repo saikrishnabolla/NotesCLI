@@ -52,6 +52,8 @@ table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
 recording_add  recording_create  recording_transcribe
 ```
 
+The recording write tools accept `transcript_path` for timed transcript JSON produced by `notescli recording transcribe-file`. Use it instead of `transcribe`.
+
 The server also provides `notes://folders`, the `notes://note/{uuid}` resource template, and the `find_note` and `weekly_review` prompts. Note references accept `#123`, UUIDs, Core Data IDs, legacy short IDs such as `n123`, bare numeric IDs such as `123`, and unambiguous titles. Use `#123` for new calls. A bare number is ambiguous when a note has the same numeric title.
 
 `list_notes`, `search_notes`, and `query_notes` return an opaque `next_cursor` made from the sort key and note ID. Pass it back as `cursor`. Body reads still use `offset` and `limit`. Responses stay within the 48 KB budget.

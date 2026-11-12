@@ -156,9 +156,9 @@ public final class MCPServer {
         if allowNative {
             values += [
                 // MARK: w9-audio begin
-                t("recording_add", "Add a native Apple Notes recording from an audio file.", ["ref", "path"], ["ref": string, "path": string, "title": string, "transcribe": bool, "locale": string], write: true, native: true),
-                t("recording_create", "Create a note containing a native Apple Notes recording.", ["folder", "title", "path"], ["folder": string, "title": string, "path": string, "transcribe": bool, "locale": string], write: true, native: true),
-                t("recording_transcribe", "Transcribe native recordings that lack a transcript.", ["ref"], ["ref": string, "attachment": string, "locale": string], write: true, native: true),
+                t("recording_add", "Add a native Apple Notes recording from an audio file.", ["ref", "path"], ["ref": string, "path": string, "title": string, "transcribe": bool, "locale": string, "transcript_path": string], write: true, native: true),
+                t("recording_create", "Create a note containing a native Apple Notes recording.", ["folder", "title", "path"], ["folder": string, "title": string, "path": string, "transcribe": bool, "locale": string, "transcript_path": string], write: true, native: true),
+                t("recording_transcribe", "Transcribe native recordings that lack a transcript.", ["ref"], ["ref": string, "attachment": string, "locale": string, "transcript_path": string], write: true, native: true),
                 // MARK: w9-audio end
                 // MARK: w3-write begin
                 t("attach_pasteboard", "Attach the frozen pasteboard bytes to a note.", ["ref"], ["ref": string, "position": integer, "view": string], write: true, native: true),

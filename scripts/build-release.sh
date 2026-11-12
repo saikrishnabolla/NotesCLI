@@ -19,8 +19,7 @@ cp "$INFO_PLIST" "$RELEASE_INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$RELEASE_INFO_PLIST"
 
 echo "Building notescli $VERSION for arm64 and x86_64"
-swift build --package-path "$ROOT" -c release --arch arm64 --arch x86_64 \
-  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$RELEASE_INFO_PLIST"
+NOTESCLI_INFO_PLIST="$RELEASE_INFO_PLIST" swift build --package-path "$ROOT" -c release --arch arm64 --arch x86_64
 
 BUILT="$ROOT/.build/apple/Products/Release/notescli"
 if [[ ! -x "$BUILT" ]]; then

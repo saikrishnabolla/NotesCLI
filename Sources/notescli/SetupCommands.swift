@@ -143,14 +143,20 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "journal_get_default_account": return try MCPNativeResult(value: writer.defaultAccountIdentifier())
     case "journal_get_smart_folder_query": return try MCPNativeResult(value: writer.smartFolderQuery(ref()))
     case "recording_add":
+        guard !(boolean("transcribe") == true && string("transcript_path") != nil) else {
+            throw NotesError("invalid_transcript_file", "Choose transcribe or transcript_path, not both.")
+        }
         let prepared = try AudioTranscriber.prepareBlocking(URL(fileURLWithPath: NSString(string: string("path")!).expandingTildeInPath), title: string("title"))
-        let segments = boolean("transcribe") == true ? try AudioTranscriber.transcribeBlocking(prepared.url, locale: string("locale")) : []
+        let segments = try mcpRecordingTranscript(arguments: arguments, prepared: prepared.url)
         let frozen = try FrozenAttachmentInput(file: prepared.url)
         return try result(writer.insertRecording(ref(), frozen: frozen, title: string("title"), duration: prepared.duration,
                                                  transcript: segments, allowShared: allowShared))
     case "recording_create":
+        guard !(boolean("transcribe") == true && string("transcript_path") != nil) else {
+            throw NotesError("invalid_transcript_file", "Choose transcribe or transcript_path, not both.")
+        }
         let prepared = try AudioTranscriber.prepareBlocking(URL(fileURLWithPath: NSString(string: string("path")!).expandingTildeInPath), title: string("title"))
-        let segments = boolean("transcribe") == true ? try AudioTranscriber.transcribeBlocking(prepared.url, locale: string("locale")) : []
+        let segments = try mcpRecordingTranscript(arguments: arguments, prepared: prepared.url)
         let frozen = try FrozenAttachmentInput(file: prepared.url)
         return try result(writer.createRecordingNote(folder: string("folder"), title: string("title")!, frozen: frozen,
                                                       duration: prepared.duration, transcript: segments, allowShared: allowShared))
@@ -159,10 +165,17 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         var recordings = note.attachments.filter { ($0.childAttachmentIDs?.isEmpty == false) && ($0.transcriptWords?.isEmpty != false) }
         if let selected = string("attachment") { recordings = recordings.filter { $0.id.caseInsensitiveCompare(selected) == .orderedSame } }
         guard !recordings.isEmpty else { throw NotesError("recording_not_found", "No matching recording without a transcript was found.") }
+        if string("transcript_path") != nil, recordings.count != 1 {
+            throw NotesError("invalid_transcript_file", "transcript_path requires exactly one matching recording; provide attachment.")
+        }
         var transcripts: [String: [TranscriptWord]] = [:]
-        for recording in recordings {
-            guard let path = recording.filePath else { throw NotesError("audio_not_downloaded", "Recording \(recording.id) is not downloaded.") }
-            transcripts[recording.id] = try AudioTranscriber.transcribeBlocking(URL(fileURLWithPath: path), locale: string("locale"))
+        if let path = string("transcript_path") {
+            transcripts[recordings[0].id] = try AudioTranscriber.readTranscriptFile(URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)).segments
+        } else {
+            for recording in recordings {
+                guard let path = recording.filePath else { throw NotesError("audio_not_downloaded", "Recording \(recording.id) is not downloaded.") }
+                transcripts[recording.id] = try AudioTranscriber.transcribeBlocking(URL(fileURLWithPath: path), locale: string("locale"))
+            }
         }
         return try result(writer.writeRecordingTranscripts(note.summary.id.uuid, transcripts: transcripts, allowShared: allowShared))
     case "create_note":
@@ -322,6 +335,14 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "move_folder": return try result(writer.moveFolder(ref(), parent: string("parent"), allowShared: (boolean("allow_shared") ?? false)))
     default: throw NotesError("unknown_tool", "Unknown native MCP tool.")
     }
+}
+
+private func mcpRecordingTranscript(arguments: [String: Any], prepared: URL) throws -> [TranscriptWord] {
+    if let path = arguments["transcript_path"] as? String {
+        return try AudioTranscriber.readTranscriptFile(URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)).segments
+    }
+    guard arguments["transcribe"] as? Bool == true else { return [] }
+    return try AudioTranscriber.transcribeBlocking(prepared, locale: arguments["locale"] as? String)
 }
 
 struct MCPInstall: ParsableCommand {

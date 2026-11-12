@@ -117,9 +117,10 @@ notescli format paragraph|inline ...
 notescli attach <ref> <path> [--position <position>] [--view <view>]
 notescli attach <ref> --pasteboard [--position <position>] [--view <view>]
 notescli attachment delete <ref> <attachment-id>
-notescli recording add <ref> --file <audio> [--transcribe] [--title <title>] [--locale <locale>]
-notescli recording create --folder <folder> --title <title> --file <audio> [--transcribe] [--locale <locale>]
-notescli recording transcribe <ref> [--attachment <id>] [--locale <locale>]
+notescli recording add <ref> --file <audio> [--transcribe | --transcript-file <json>] [--title <title>] [--locale <locale>]
+notescli recording create --folder <folder> --title <title> --file <audio> [--transcribe | --transcript-file <json>] [--locale <locale>]
+notescli recording transcribe-file --file <audio> --output <json> [--locale <locale>]
+notescli recording transcribe <ref> [--attachment <id>] [--locale <locale>] [--transcript-file <json>]
 notescli recording transcript <ref> [--format text|srt|vtt|json]
 notescli drawing add <ref> --svg <file> [--ink pen|marker|pencil|monoline]
                 [--width <width>] [--color <hex>] [--bw] [--size <width>x<height>]
@@ -132,7 +133,7 @@ notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. Transcription stays on device and is stored in Notes' native transcript data. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
 All write commands accept `--dry-run`, `--idempotency-key`, `--write-folders`, `--if-modified`, `--expect-revision`, `--allow-shared`, `--wait-sync`, and `--sync-timeout`. Shared-note writes require native mode and Notes write permission. A sync timeout leaves the write verified and returns `syncPending: true`. Body rewrites also accept `--allow-attachment-loss`.
 

@@ -17,6 +17,18 @@ public final class PreparedRecording: @unchecked Sendable {
     deinit { try? FileManager.default.removeItem(at: directory) }
 }
 
+public struct AudioTranscriptFile: Codable, Sendable, Hashable {
+    public let version: Int
+    public let locale: String?
+    public let segments: [TranscriptWord]
+
+    public init(locale: String? = nil, segments: [TranscriptWord]) {
+        self.version = 1
+        self.locale = locale
+        self.segments = segments
+    }
+}
+
 public enum AudioTranscriber {
     static func requireSpeechUsageDescription(in bundle: Bundle = .main) throws {
         guard let value = bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String,
@@ -36,6 +48,37 @@ public enum AudioTranscriber {
         return await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
+    }
+
+    public static func encodeTranscriptFile(_ transcript: AudioTranscriptFile) throws -> Data {
+        try validateTranscriptFile(transcript)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(transcript)
+    }
+
+    public static func decodeTranscriptFile(_ data: Data) throws -> AudioTranscriptFile {
+        do {
+            let decoder = JSONDecoder()
+            let transcript: AudioTranscriptFile
+            if let first = data.first(where: { !$0.isASCIIWhitespace }), first == Character("[").asciiValue {
+                transcript = AudioTranscriptFile(segments: try decoder.decode([TranscriptWord].self, from: data))
+            } else {
+                transcript = try decoder.decode(AudioTranscriptFile.self, from: data)
+            }
+            try validateTranscriptFile(transcript)
+            return transcript
+        } catch let error as NotesError {
+            throw error
+        } catch {
+            throw NotesError("invalid_transcript_file", "The transcript file is not valid JSON transcript data.")
+        }
+    }
+
+    public static func readTranscriptFile(_ file: URL) throws -> AudioTranscriptFile {
+        do { return try decodeTranscriptFile(Data(contentsOf: file)) }
+        catch let error as NotesError { throw error }
+        catch { throw NotesError("invalid_transcript_file", "Could not read the transcript file: \(error.localizedDescription)") }
     }
 
     public static func prepare(_ source: URL, title: String? = nil) async throws -> PreparedRecording {
@@ -175,6 +218,26 @@ public enum AudioTranscriber {
         let cleaned = value.replacingOccurrences(of: "/", with: "-").trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "Recording" : cleaned
     }
+
+    private static func validateTranscriptFile(_ transcript: AudioTranscriptFile) throws {
+        guard transcript.version == 1 else {
+            throw NotesError("invalid_transcript_file", "Unsupported transcript file version \(transcript.version).")
+        }
+        guard !transcript.segments.isEmpty else {
+            throw NotesError("invalid_transcript_file", "The transcript file has no segments.")
+        }
+        for segment in transcript.segments {
+            guard !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let start = segment.start, start.isFinite, start >= 0,
+                  let duration = segment.duration, duration.isFinite, duration >= 0 else {
+                throw NotesError("invalid_transcript_file", "Transcript segments require text and non-negative finite timing values.")
+            }
+        }
+    }
+}
+
+private extension UInt8 {
+    var isASCIIWhitespace: Bool { self == 0x20 || self == 0x09 || self == 0x0a || self == 0x0d }
 }
 
 private final class BlockingResult<Value>: @unchecked Sendable {

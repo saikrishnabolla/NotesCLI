@@ -78,6 +78,9 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     func result(_ value: NativeWriteResult) throws -> MCPNativeResult {
         try MCPNativeResult(result: value.writeResult, operationID: value.operationID, value: value)
     }
+    func result(_ value: NativeRecordingResult) throws -> MCPNativeResult {
+        try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    }
     func enumValue<T: RawRepresentable>(_ key: String, as type: T.Type, choices: String) throws -> T? where T.RawValue == String {
         guard let raw = string(key) else { return nil }
         guard let value = T(rawValue: raw) else { throw NotesError("invalid_arguments", "Invalid \(key); use \(choices).") }
@@ -140,6 +143,42 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: writer.checklistAutoSortEnabled())
     case "journal_get_default_account": return try MCPNativeResult(value: writer.defaultAccountIdentifier())
     case "journal_get_smart_folder_query": return try MCPNativeResult(value: writer.smartFolderQuery(ref()))
+    case "recording_add":
+        guard !(boolean("transcribe") == true && string("transcript_path") != nil) else {
+            throw NotesError("invalid_transcript_file", "Choose transcribe or transcript_path, not both.")
+        }
+        let prepared = try AudioTranscriber.prepareBlocking(URL(fileURLWithPath: NSString(string: string("path")!).expandingTildeInPath), title: string("title"))
+        let segments = try mcpRecordingTranscript(arguments: arguments, prepared: prepared.url)
+        let frozen = try FrozenAttachmentInput(file: prepared.url)
+        return try result(writer.insertRecording(ref(), frozen: frozen, title: string("title"), duration: prepared.duration,
+                                                 transcript: segments, allowShared: allowShared))
+    case "recording_create":
+        guard !(boolean("transcribe") == true && string("transcript_path") != nil) else {
+            throw NotesError("invalid_transcript_file", "Choose transcribe or transcript_path, not both.")
+        }
+        let prepared = try AudioTranscriber.prepareBlocking(URL(fileURLWithPath: NSString(string: string("path")!).expandingTildeInPath), title: string("title"))
+        let segments = try mcpRecordingTranscript(arguments: arguments, prepared: prepared.url)
+        let frozen = try FrozenAttachmentInput(file: prepared.url)
+        return try result(writer.createRecordingNote(folder: string("folder"), title: string("title")!, frozen: frozen,
+                                                      duration: prepared.duration, transcript: segments, allowShared: allowShared))
+    case "recording_transcribe":
+        let note = try reader.note(ref())
+        var recordings = note.attachments.filter { ($0.childAttachmentIDs?.isEmpty == false) && ($0.transcriptWords?.isEmpty != false) }
+        if let selected = string("attachment") { recordings = recordings.filter { $0.id.caseInsensitiveCompare(selected) == .orderedSame } }
+        guard !recordings.isEmpty else { throw NotesError("recording_not_found", "No matching recording without a transcript was found.") }
+        if string("transcript_path") != nil, recordings.count != 1 {
+            throw NotesError("invalid_transcript_file", "transcript_path requires exactly one matching recording; provide attachment.")
+        }
+        var transcripts: [String: [TranscriptWord]] = [:]
+        if let path = string("transcript_path") {
+            transcripts[recordings[0].id] = try AudioTranscriber.readTranscriptFile(URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)).segments
+        } else {
+            for recording in recordings {
+                guard let path = recording.filePath else { throw NotesError("audio_not_downloaded", "Recording \(recording.id) is not downloaded.") }
+                transcripts[recording.id] = try AudioTranscriber.transcribeBlocking(URL(fileURLWithPath: path), locale: string("locale"))
+            }
+        }
+        return try result(writer.writeRecordingTranscripts(note.summary.id.uuid, transcripts: transcripts, allowShared: allowShared))
     case "create_note":
         let paths = arguments["attachments"] as? [String] ?? []
         let frozen = try paths.map { try FrozenAttachmentInput(file: URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)) }
@@ -316,6 +355,14 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     }
 }
 
+private func mcpRecordingTranscript(arguments: [String: Any], prepared: URL) throws -> [TranscriptWord] {
+    if let path = arguments["transcript_path"] as? String {
+        return try AudioTranscriber.readTranscriptFile(URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)).segments
+    }
+    guard arguments["transcribe"] as? Bool == true else { return [] }
+    return try AudioTranscriber.transcribeBlocking(prepared, locale: arguments["locale"] as? String)
+}
+
 struct MCPInstall: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.", discussion: "The agent skill is in skills/notescli/SKILL.md and is included by the NotesCLI Claude and Codex plugins.")
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, or all.") var client: MCPClient = .all
@@ -362,7 +409,7 @@ struct Setup: ParsableCommand {
 }
 
 struct Permissions: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Open Full Disk Access and request Notes Automation access.")
+    static let configuration = CommandConfiguration(abstract: "Open Full Disk Access and request Notes Automation and Speech Recognition access.")
     func run() throws { try PermissionGuide.run() }
 }
 
@@ -606,6 +653,17 @@ enum MCPConfiguration {
 
 enum PermissionGuide {
     static func run() throws {
+        let speech = AudioTranscriber.authorizationStatus == .notDetermined
+            ? try AudioTranscriber.requestAuthorizationBlocking()
+            : AudioTranscriber.authorizationStatus
+        switch speech {
+        case .authorized: print("Speech Recognition: authorized.")
+        case .denied: Output.error("Speech Recognition: denied. Open System Settings > Privacy & Security > Speech Recognition.")
+        case .restricted: Output.error("Speech Recognition: restricted by system policy.")
+        case .notDetermined: Output.error("Speech Recognition: no decision was recorded.")
+        @unknown default: Output.error("Speech Recognition: unknown status.")
+        }
+
         print("Full Disk Access is required to read Apple Notes.")
         print("Add the app that launches notescli: Terminal for shell use, or the MCP host app (Claude, Codex, Cursor, or VS Code).")
         let settings = Process()
@@ -630,5 +688,6 @@ enum PermissionGuide {
             Output.error("Automation was not authorized: \(output)")
             Output.error("Open System Settings > Privacy & Security > Automation and allow Notes for the same terminal or MCP host app.")
         }
+
     }
 }

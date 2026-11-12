@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 51 tools. Read-only mode exposes 28 read tools. `notescli mcp --allow-native` exposes 102 tools in total.
+The default server exposes 52 tools. Read-only mode exposes 29 read tools. `notescli mcp --allow-native` exposes 106 tools in total.
 
 ## Tools
 
@@ -18,7 +18,7 @@ get_note  get_notes  list_tags  list_attachments  list_backlinks
 get_deeplink  list_smart_folders  list_deleted  recent_notes  today_notes
 pinned_notes  count_notes  get_stats  get_capabilities  get_raw_note
 related_notes  get_write_policy  file_diff
-index_status  get_attachment  anchor_list  anchor_resolve  table_get
+index_status  get_attachment  anchor_list  anchor_resolve  table_get  recording_transcript
 ```
 
 Scripting, export, and sync tools:
@@ -49,7 +49,10 @@ format_paragraph  format_inline  attach_file  diagram_add  delete_attachment
 drawing_add  drawing_create  drawing_export
 table_create  table_set  table_add_row  table_add_column
 table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
+recording_add  recording_create  recording_transcribe
 ```
+
+The recording write tools accept `transcript_path` for timed transcript JSON produced by `notescli recording transcribe-file`. Use it instead of `transcribe`.
 
 The server also provides `notes://folders`, the `notes://note/{uuid}` resource template, and the `find_note` and `weekly_review` prompts. Note references accept `#123`, UUIDs, Core Data IDs, legacy short IDs such as `n123`, bare numeric IDs such as `123`, and unambiguous titles. Use `#123` for new calls. A bare number is ambiguous when a note has the same numeric title.
 

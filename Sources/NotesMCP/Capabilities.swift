@@ -89,8 +89,8 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Classic drawings and sketches", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Audio file attachments", read: "Done", write: "Done"),
-        FeatureDefinition(feature: "Native audio recordings", read: "Done", write: "Not possible"),
-        FeatureDefinition(feature: "Stored audio transcripts", read: "Done", write: "Not possible"),
+        FeatureDefinition(feature: "Native audio recordings", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Stored audio transcripts", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Recording summaries and call metadata", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Math expressions, results, and graphs", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Divider lines", read: "Done", write: "Done"),
@@ -142,7 +142,8 @@ public enum CapabilityCatalog {
         "Numbered lists and starting number", "Nested lists", "Checklists", "Checklist sorting preference",
         "Native tables", "Add or remove table rows and columns", "Table cell text", "Table cell rich formatting",
         "Convert table to text", "Native note-to-note links", "URL preview cards", "Native tags", "Mentions",
-        "Photos and images", "Editorial SVG and HTML diagrams", "Videos", "PDFs", "General file attachments", "Audio file attachments",
+        "Photos and images", "Editorial SVG and HTML diagrams", "Videos", "PDFs", "General file attachments", "Modern Paper drawings",
+        "Audio file attachments", "Native audio recordings", "Stored audio transcripts",
         "Math expressions, results, and graphs", "Divider lines", "Pin and unpin", "Edit an existing shared note",
         "Smart Folders and rules", "Folder sort options", "Notes settings", "Default account"
     ]

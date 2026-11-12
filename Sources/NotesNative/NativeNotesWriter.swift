@@ -156,6 +156,35 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    fileprivate func performRecordingWrite(duration: Double,
+                                            _ body: (NSManagedObjectContext) throws -> NativeRecordingResult) throws -> NativeRecordingResult {
+        lock.lock(); defer { lock.unlock() }
+        precondition(operation == nil)
+        operation = Operation(id: operationID())
+        defer { operation = nil }
+        do {
+            return try performContext { context in
+                context.automaticallyMergesChangesFromParent = true
+                context.refreshAllObjects()
+                return try body(context)
+            }
+        } catch {
+            guard let operation, operation.committed else { throw error }
+            let write = NativeWriteResult(
+                writeResult: WriteResult(
+                    outcome: .unknown,
+                    noteID: operation.noteID.map { NoteID(uuid: $0) },
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    operationID: operation.id
+                ),
+                verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
+                operationID: operation.id
+            )
+            return NativeRecordingResult(attachmentID: operation.attachmentID ?? "", childAttachmentIDs: [],
+                                         duration: duration, transcriptSegments: 0, write: write)
+        }
+    }
+
     fileprivate func nativeError(_ error: Error) -> NotesError {
         let text = error.localizedDescription
         if text.contains("required selector missing") || text.contains("required class missing") ||
@@ -2023,6 +2052,136 @@ public final class NativeNotesWriter: NotesNativeWriting {
             }
         }
         try editor.save()
+    }
+
+    public func insertRecording(_ ref: String, frozen: FrozenAttachmentInput, title: String?, duration: Double,
+                                transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult {
+        try performRecordingWrite(duration: duration) { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            var attachmentID = "", childIDs: [String] = [], at = 0, kind: NSString?
+            do {
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                at = editor.original.length
+                attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: title ?? frozen.sourceName, type: &kind)
+                operation?.attachmentID = attachmentID
+                operation?.attachmentType = kind as String? ?? "public.mpeg-4-audio"
+                operation?.attachmentPosition = at
+                guard let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", attachmentID), in: context, limit: 1).first else {
+                    throw NotesError("attachment_not_found", "Notes created no audio attachment record.")
+                }
+                childIDs = try NCNotesRuntime.transformAudioAttachment(attachment, duration: duration)
+                if !transcript.isEmpty { _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(transcript), toAudioAttachment: attachment) }
+                try insertMarker(editor, original: editor.original, id: attachmentID,
+                                 type: kind as String? ?? "public.mpeg-4-audio", position: nil)
+                try editor.finish()
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            return try recordingResult(noteID: id(note), attachmentID: attachmentID, childIDs: childIDs,
+                                       duration: duration, transcript: transcript, frozen: frozen, position: at)
+        }
+    }
+
+    public func createRecordingNote(folder folderRef: String?, title: String, frozen: FrozenAttachmentInput, duration: Double,
+                                    transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult {
+        try performRecordingWrite(duration: duration) { context in
+            let destination = try destinationFolder(folderRef, in: context)
+            try guardWritableFolder(destination, allowShared: allowShared)
+            var noteID = "", attachmentID = "", childIDs: [String] = [], kind: NSString?
+            do {
+                let note = try NCNotesRuntime.newNote(in: destination)
+                try NCNotesRuntime.setValue(title, forKey: "title", of: note)
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                let built = try MarkdownNativeWriter(owner: self).attributed(markdown: "# " + title, note: note, context: context,
+                                                                              editor: editor, existing: [:]).0
+                attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
+                operation?.attachmentID = attachmentID
+                operation?.attachmentType = kind as String? ?? "public.mpeg-4-audio"
+                operation?.attachmentPosition = built.length
+                guard let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", attachmentID), in: context, limit: 1).first else {
+                    throw NotesError("attachment_not_found", "Notes created no audio attachment record.")
+                }
+                childIDs = try NCNotesRuntime.transformAudioAttachment(attachment, duration: duration)
+                if !transcript.isEmpty { _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(transcript), toAudioAttachment: attachment) }
+                if built.length > 0 { built.append(NSAttributedString(string: "\n")) }
+                let marker = try NCNotesRuntime.attachmentMarker(id: attachmentID, type: kind as String? ?? "public.mpeg-4-audio")
+                built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("NSAttachment"): marker]))
+                try editor.begin(["insert"])
+                try editor.insert(built, at: 0)
+                try editor.finish()
+                try save(context, notes: [note])
+                noteID = id(note)
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            return try recordingResult(noteID: noteID, attachmentID: attachmentID, childIDs: childIDs,
+                                       duration: duration, transcript: transcript, frozen: frozen, position: title.utf16.count + 1)
+        }
+    }
+
+    public func writeRecordingTranscripts(_ ref: String, transcripts: [String: [TranscriptWord]], allowShared: Bool) throws -> NativeWriteResult {
+        guard !transcripts.isEmpty else { throw NotesError("recording_not_found", "No recording without a transcript was found.") }
+        return try performWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note, protectsBody: false)
+            do {
+                for (attachmentID, segments) in transcripts {
+                    guard !segments.isEmpty else { throw NotesError("transcription_empty", "On-device transcription returned no speech.") }
+                    let predicate = NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note)
+                    guard let attachment = try fetch("ICAttachment", predicate: predicate, in: context, limit: 1).first else {
+                        throw NotesError("attachment_not_found", "Recording \(attachmentID) is not in this note.")
+                    }
+                    _ = try NCNotesRuntime.appendTranscriptSegments(transcriptRows(segments), toAudioAttachment: attachment)
+                }
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            let expected = transcripts.mapValues(\.count)
+            return result(id(note), native: ["recordings": "\(transcripts.count)", "segments": "\(expected.values.reduce(0, +))"], sqlite: { note in
+                let matches = note.attachments.filter { expected[$0.id] == $0.transcriptWords?.count }
+                guard matches.count == expected.count else { return nil }
+                return ["recordings": "\(matches.count)", "segments": "\(matches.compactMap(\.transcriptWords).reduce(0) { $0 + $1.count })"]
+            }, mismatch: "Fresh Notes database readback did not contain the new native transcript segments.")
+        }
+    }
+
+    private func transcriptRows(_ transcript: [TranscriptWord]) -> [[String: Any]] {
+        transcript.map { segment in
+            var row: [String: Any] = ["text": segment.text, "start": segment.start ?? 0, "duration": segment.duration ?? 0]
+            if let speaker = segment.speaker { row["speaker"] = speaker }
+            return row
+        }
+    }
+
+    private func recordingResult(noteID: String, attachmentID: String, childIDs: [String], duration: Double,
+                                 transcript: [TranscriptWord], frozen: FrozenAttachmentInput, position: Int) throws -> NativeRecordingResult {
+        let stored = storedAttachmentHash(noteID: noteID, attachmentID: attachmentID, expected: frozen.sha256)
+        let write = result(noteID, native: ["attachmentID": attachmentID, "fragments": "\(childIDs.count)",
+                                                   "duration": String(duration), "segments": "\(transcript.count)",
+                                                   "sourceSHA256": frozen.sha256, "storedSHA256": stored ?? ""],
+                           nativeVerified: !childIDs.isEmpty && stored == frozen.sha256,
+                           sqlite: { note in
+            guard let attachment = note.attachments.first(where: { $0.id == attachmentID }),
+                  Set(attachment.childAttachmentIDs ?? []) == Set(childIDs),
+                  abs((attachment.duration ?? 0) - duration) < 0.05,
+                  (attachment.transcriptWords?.count ?? 0) == transcript.count,
+                  stored == frozen.sha256 else { return nil }
+            return ["attachmentID": attachment.id, "fragments": "\(attachment.childAttachmentIDs?.count ?? 0)",
+                    "duration": String(attachment.duration ?? 0), "segments": "\(attachment.transcriptWords?.count ?? 0)",
+                    "storedSHA256": stored!]
+        }, mismatch: "Fresh Notes database readback did not match the native recording graph, audio bytes, duration, or transcript.")
+        return NativeRecordingResult(attachmentID: attachmentID, childAttachmentIDs: childIDs, duration: duration,
+                                     transcriptSegments: transcript.count, write: write)
     }
 
     private static func nativeStyle(_ kind: ParagraphStyle.Kind) -> NativeParagraphStyle {

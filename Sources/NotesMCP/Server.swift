@@ -155,6 +155,11 @@ public final class MCPServer {
         ]
         if allowNative {
             values += [
+                // MARK: w9-audio begin
+                t("recording_add", "Add a native Apple Notes recording from an audio file.", ["ref", "path"], ["ref": string, "path": string, "title": string, "transcribe": bool, "locale": string, "transcript_path": string], write: true, native: true),
+                t("recording_create", "Create a note containing a native Apple Notes recording.", ["folder", "title", "path"], ["folder": string, "title": string, "path": string, "transcribe": bool, "locale": string, "transcript_path": string], write: true, native: true),
+                t("recording_transcribe", "Transcribe native recordings that lack a transcript.", ["ref"], ["ref": string, "attachment": string, "locale": string, "transcript_path": string], write: true, native: true),
+                // MARK: w9-audio end
                 // MARK: w3-write begin
                 t("attach_pasteboard", "Attach the frozen pasteboard bytes to a note.", ["ref"], ["ref": string, "position": integer, "view": string], write: true, native: true),
                 t("add_url", "Add a URL link or native preview card.", ["ref", "url"], ["ref": string, "url": string, "card": bool, "position": integer], write: true, native: true),
@@ -229,6 +234,10 @@ public final class MCPServer {
         }
         // MARK: w3-read begin
         values += [
+            // MARK: w9-audio begin
+            t("recording_transcript", "Read native recording transcripts with timing and speakers.", ["ref"],
+              ["ref": string, "format": ["type": "string", "enum": ["text", "srt", "vtt", "json"]]]),
+            // MARK: w9-audio end
             t("index_status", "Get search index and background job progress."),
             t("get_attachment", "Return an attachment as an image/audio content block or resource link.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string]),
             t("anchor_add", "Create a persistent paragraph anchor.", ["ref"], ["ref": string, "heading": string, "offset": integer], write: true),
@@ -734,6 +743,16 @@ public final class MCPServer {
             }
             let rendered = selected.sorted { $0.key < $1.key }.map { tableText($0.value, format: format) }.joined(separator: "\n\n")
             return try content(["tables": NotePresentation.object(selected), "format": format, "body": rendered])
+        // MARK: w9-audio begin
+        case "recording_transcript":
+            let note = try reader.note(s("ref")!)
+            let format = RecordingTranscriptFormat(rawValue: s("format") ?? "text") ?? .text
+            let recordings = note.attachments.filter { $0.childAttachmentIDs?.isEmpty == false }.map {
+                RecordingTranscript(attachmentID: $0.id, duration: $0.duration, segments: $0.transcriptWords ?? [])
+            }
+            guard !recordings.isEmpty else { throw NotesError("recording_not_found", "The note has no native recordings.") }
+            return try content(["format": format.rawValue, "body": RecordingTranscriptRenderer.render(recordings, format: format)])
+        // MARK: w9-audio end
         // MARK: w3-read end
         default: return try callScriptingWrite(tool, a)
         }
@@ -836,6 +855,16 @@ public final class MCPServer {
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
         }
+        // MARK: w9-audio begin
+        if tool.name == "recording_create" {
+            let paths = try folderPaths(arguments["folder"] as! String)
+            return try safeWrite(tool: tool, arguments: arguments, note: nil, paths: paths, engine: "native") {
+                let value = try nativeHandler(tool.name, arguments)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        // MARK: w9-audio end
         // MARK: w4-format begin
         if ["smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_edit_typed", "smart_folder_delete"].contains(tool.name) {
             var dispatch = arguments

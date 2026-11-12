@@ -30,7 +30,7 @@ final class ProtocolTests: XCTestCase {
             let server = MCPServer(reader: fake, writer: fake, readOnly: readOnly)
             let result = try request(server, method: "tools/list")["result"] as! [String: Any]
             let tools = result["tools"] as! [[String: Any]]
-            XCTAssertEqual(tools.count, readOnly ? 28 : 51)
+            XCTAssertEqual(tools.count, readOnly ? 29 : 52)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "delete_note" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_add" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_prune" }, !readOnly)
@@ -41,7 +41,7 @@ final class ProtocolTests: XCTestCase {
             }
         }
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "pinned_notes", "count_notes", "get_stats", "get_capabilities", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
+        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "pinned_notes", "count_notes", "get_stats", "get_capabilities", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "recording_transcript", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
         let defaultTools = (try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
         func readOnlyHint(_ name: String) -> Bool? {
             (defaultTools.first { $0["name"] as? String == name }?["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool
@@ -51,9 +51,18 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 102)
+        XCTAssertEqual(nativeTools.count, 106)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_add" })
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_create" })
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_transcribe" })
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_transcript" })
+        for name in ["recording_add", "recording_create", "recording_transcribe"] {
+            let schema = try XCTUnwrap(nativeTools.first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            XCTAssertEqual((properties["transcript_path"] as? [String: Any])?["type"] as? String, "string")
+        }
         for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
                      "insert_divider", "insert_math", "insert_mention", "table_convert_to_text", "checklist_auto_sort"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)

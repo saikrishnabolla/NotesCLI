@@ -19,8 +19,7 @@ cp "$INFO_PLIST" "$RELEASE_INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$RELEASE_INFO_PLIST"
 
 echo "Building notescli $VERSION for arm64 and x86_64"
-swift build --package-path "$ROOT" -c release --arch arm64 --arch x86_64 \
-  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker "$RELEASE_INFO_PLIST"
+NOTESCLI_INFO_PLIST="$RELEASE_INFO_PLIST" swift build --package-path "$ROOT" -c release --arch arm64 --arch x86_64
 
 BUILT="$ROOT/.build/apple/Products/Release/notescli"
 if [[ ! -x "$BUILT" ]]; then
@@ -47,12 +46,24 @@ codesign --verify --strict --verbose=4 "$STAGING/notescli"
 codesign -d --verbose=4 --entitlements - "$STAGING/notescli" 2>&1
 
 lipo "$STAGING/notescli" -thin x86_64 -output "$STAGING/notescli-x86_64"
-otool -X -s __TEXT __info_plist "$STAGING/notescli-x86_64" | cut -f2- | tr -d ' \n' | xxd -r -p > "$STAGING/embedded-Info.plist"
+INFO_SECTION="$(otool -l "$STAGING/notescli-x86_64" | awk '$1 == "sectname" && $2 == "__info_plist" { capture = 1 } capture { print } capture && $1 == "reserved2" { exit }')"
+INFO_OFFSET="$(printf '%s\n' "$INFO_SECTION" | awk '$1 == "offset" { print $2; exit }')"
+INFO_SIZE="$(printf '%s\n' "$INFO_SECTION" | awk '$1 == "size" { print $2; exit }')"
+[[ -n "$INFO_OFFSET" && -n "$INFO_SIZE" ]] || {
+    echo "The release binary has no embedded __info_plist section." >&2
+    exit 1
+}
+dd if="$STAGING/notescli-x86_64" of="$STAGING/embedded-Info.plist" bs=1 skip="$INFO_OFFSET" count="$((INFO_SIZE))" status=none
 [[ "$(plutil -extract NSAppleEventsUsageDescription raw "$STAGING/embedded-Info.plist")" == "NotesCLI uses Apple Events to create and update notes through the Notes app." ]] || {
     echo "The embedded Info.plist is missing NSAppleEventsUsageDescription." >&2
     exit 1
 }
 echo "Embedded Info.plist: NSAppleEventsUsageDescription present"
+[[ "$(plutil -extract NSSpeechRecognitionUsageDescription raw "$STAGING/embedded-Info.plist")" == "NotesCLI uses on-device speech recognition to transcribe audio recordings you add to Apple Notes." ]] || {
+    echo "The embedded Info.plist is missing NSSpeechRecognitionUsageDescription." >&2
+    exit 1
+}
+echo "Embedded Info.plist: NSSpeechRecognitionUsageDescription present"
 
 set +e
 SPCTL_OUTPUT="$(spctl -a -t install -vv "$STAGING/notescli" 2>&1)"

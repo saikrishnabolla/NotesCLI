@@ -117,6 +117,11 @@ notescli format paragraph|inline ...
 notescli attach <ref> <path> [--position <position>] [--view <view>]
 notescli attach <ref> --pasteboard [--position <position>] [--view <view>]
 notescli attachment delete <ref> <attachment-id>
+notescli recording add <ref> --file <audio> [--transcribe | --transcript-file <json>] [--title <title>] [--locale <locale>]
+notescli recording create --folder <folder> --title <title> --file <audio> [--transcribe | --transcript-file <json>] [--locale <locale>]
+notescli recording transcribe-file --file <audio> --output <json> [--locale <locale>]
+notescli recording transcribe <ref> [--attachment <id>] [--locale <locale>] [--transcript-file <json>]
+notescli recording transcript <ref> [--format text|srt|vtt|json]
 notescli drawing add <ref> --svg <file> [--ink pen|marker|pencil|monoline]
                 [--width <width>] [--color <hex>] [--bw] [--size <width>x<height>]
                 [--fit contain|stretch] [--fill outline|hatch]
@@ -128,7 +133,7 @@ notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
 ## Diagrams
 
@@ -192,7 +197,7 @@ notescli capabilities
 notescli completion [zsh|bash|fish]
 ```
 
-`setup` connects supported MCP clients and opens permission settings. `permissions` opens Full Disk Access and requests Notes Automation access.
+`setup` connects supported MCP clients and opens permission settings. `permissions` opens Full Disk Access and requests Notes Automation and Speech Recognition access.
 
 ## MCP
 

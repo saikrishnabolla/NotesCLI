@@ -230,21 +230,22 @@ enum ImportFormatExport {
     static func writeBear(_ notes: [Note], root: URL) throws -> [String] {
         var files: [String] = []
         for note in notes {
-            let directory = root.appendingPathComponent(SafePath.component(note.summary.title) + "--" + SafePath.component(note.summary.id.uuid, limit: 24) + ".textbundle")
-            let assets = directory.appendingPathComponent("assets", isDirectory: true)
+            let directory = try SafePath.child(SafePath.component(note.summary.title) + "--" + SafePath.component(note.summary.id.uuid, limit: 24) + ".textbundle", of: root)
+            let assets = try SafePath.child("assets", of: directory)
             try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
             var copy = note
+            var used: Set<String> = []
             for index in copy.attachments.indices {
                 guard let source = copy.attachments[index].filePath, FileManager.default.fileExists(atPath: source) else { continue }
-                let name = SafePath.component(copy.attachments[index].filename ?? URL(fileURLWithPath: source).lastPathComponent)
-                try FileManager.default.copyReplacingItem(at: URL(fileURLWithPath: source), to: assets.appendingPathComponent(name))
+                let name = attachmentName(copy.attachments[index], source: source, used: &used)
+                try FileManager.default.copyReplacingItem(at: URL(fileURLWithPath: source), to: SafePath.child(name, of: assets))
                 copy.attachments[index].filePath = "assets/" + name
             }
             let text = copy.document.map { NoteRenderer.markdown($0, attachments: copy.attachments) } ?? "[Locked note]"
-            let textURL = directory.appendingPathComponent("text.md")
+            let textURL = try SafePath.child("text.md", of: directory)
             try Data(text.utf8).write(to: textURL, options: .atomic)
             let info: [String: Any] = ["version": 2, "type": "net.daringfireball.markdown", "transient": false]
-            try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("info.json"), options: .atomic)
+            try JSONSerialization.data(withJSONObject: info, options: [.prettyPrinted, .sortedKeys]).write(to: SafePath.child("info.json", of: directory), options: .atomic)
             files.append(directory.path)
         }
         return files
@@ -303,41 +304,52 @@ enum ImportFormatExport {
     // https://github.com/kuboon/quiver/blob/master/README.md
     // https://github.com/kuboon/quiver/blob/master/lib/quiver/note.rb
     static func writeQuiver(_ notes: [Note], root: URL) throws -> [String] {
-        let library = root.appendingPathComponent("Notes.qvlibrary", isDirectory: true)
+        let library = try SafePath.child("Notes.qvlibrary", of: root)
         try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
         let files: [String] = [library.path]
         for group in Dictionary(grouping: notes, by: { ExportFolderKey($0.summary) }).sorted(by: {
             ($0.key.accountID, $0.key.path.joined(separator: "/")) < ($1.key.accountID, $1.key.path.joined(separator: "/"))
         }) {
             let notebookID = String(StableHash.hex("quiver-folder:" + group.key.accountID + ":" + group.key.path.joined(separator: "/")).prefix(32))
-            let notebook = library.appendingPathComponent(notebookID + ".qvnotebook", isDirectory: true)
+            let notebook = try SafePath.child(notebookID + ".qvnotebook", of: library)
             try FileManager.default.createDirectory(at: notebook, withIntermediateDirectories: true)
             let notebookMeta: [String: Any] = ["uuid": notebookID, "name": group.key.path.last ?? "Notes", "children": []]
-            try json(notebookMeta).write(to: notebook.appendingPathComponent("meta.json"), options: .atomic)
+            try json(notebookMeta).write(to: SafePath.child("meta.json", of: notebook), options: .atomic)
             for note in group.value {
                 let noteID = String(StableHash.hex("quiver-note:" + note.summary.id.uuid).prefix(32))
-                let directory = notebook.appendingPathComponent(noteID + ".qvnote", isDirectory: true)
-                let resources = directory.appendingPathComponent("resources", isDirectory: true)
+                let directory = try SafePath.child(noteID + ".qvnote", of: notebook)
+                let resources = try SafePath.child("resources", of: directory)
                 try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
                 var copy = note
+                var used: Set<String> = []
                 for index in copy.attachments.indices {
                     guard let source = copy.attachments[index].filePath, FileManager.default.fileExists(atPath: source) else { continue }
-                    let name = SafePath.component(copy.attachments[index].filename ?? URL(fileURLWithPath: source).lastPathComponent)
-                    try FileManager.default.copyReplacingItem(at: URL(fileURLWithPath: source), to: resources.appendingPathComponent(name))
+                    let name = attachmentName(copy.attachments[index], source: source, used: &used)
+                    try FileManager.default.copyReplacingItem(at: URL(fileURLWithPath: source), to: SafePath.child(name, of: resources))
                     copy.attachments[index].filePath = "quiver-image-url/" + name
                 }
                 let body = copy.document.map { NoteRenderer.markdown($0, attachments: copy.attachments) } ?? "[Locked note]"
                 let content: [String: Any] = ["title": note.summary.title, "cells": [["type": "markdown", "data": body]]]
                 let meta: [String: Any] = ["uuid": noteID, "title": note.summary.title, "tags": note.summary.tags,
                                            "created_at": seconds(note.summary.created), "updated_at": seconds(note.summary.modified)]
-                try json(content).write(to: directory.appendingPathComponent("content.json"), options: .atomic)
-                try json(meta).write(to: directory.appendingPathComponent("meta.json"), options: .atomic)
+                try json(content).write(to: SafePath.child("content.json", of: directory), options: .atomic)
+                try json(meta).write(to: SafePath.child("meta.json", of: directory), options: .atomic)
             }
         }
         return files
     }
 
     private static func json(_ object: Any) throws -> Data { try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) }
+    private static func attachmentName(_ attachment: Attachment, source: String, used: inout Set<String>) -> String {
+        let original = SafePath.component(attachment.filename ?? URL(fileURLWithPath: source).lastPathComponent)
+        let url = URL(fileURLWithPath: original), ext = url.pathExtension
+        let stem = SafePath.component(url.deletingPathExtension().lastPathComponent)
+        let identity = SafePath.component(attachment.id, limit: 32) + "-" + String(StableHash.hex(attachment.id).prefix(10))
+        let base = stem + "--" + identity, suffix = ext.isEmpty ? "" : "." + ext
+        var candidate = base + suffix, index = 2
+        while !used.insert(candidate).inserted { candidate = base + "-\(index)" + suffix; index += 1 }
+        return candidate
+    }
     private static func seconds(_ date: Date?) -> Int64 { Int64(date?.timeIntervalSince1970 ?? 0) }
     private static func iso(_ date: Date?) -> String {
         let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

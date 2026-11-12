@@ -133,6 +133,14 @@ final class CLITests: XCTestCase {
                 for key in ["id", "title", "folder", "created", "modified", "tags"] { XCTAssertTrue(text.contains(key)) }
             }
         }
+        let syncFile = directory.appendingPathComponent("welcome.md")
+        let pull = try run(["--backend", "fake", "file", "pull", "welcome", syncFile.path])
+        XCTAssertEqual(pull.0, 0, pull.2)
+        var markdown = try String(contentsOf: syncFile, encoding: .utf8)
+        markdown += "\nchanged\n"; try markdown.write(to: syncFile, atomically: true, encoding: .utf8)
+        let denied = try run(["--backend", "fake", "file", "push", syncFile.path, "--write-folders", "Personal", "--json"])
+        XCTAssertEqual(denied.0, 1, denied.2)
+        XCTAssertTrue(denied.2.contains("write_not_allowed"), denied.2)
     }
     func testStdioMCPAndCompletion() throws {
         let requests = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"# + "\n" + #"{"jsonrpc":"2.0","method":"notifications/initialized"}"# + "\n" + #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"# + "\n"

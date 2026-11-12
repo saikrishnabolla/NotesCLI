@@ -235,12 +235,23 @@ public final class NativeNotesWriter: NotesNativeWriting {
             throw NotesError("note_in_trash", "Restore the note before changing its contents.")
         }
         if isShared(note) {
-            guard allowShared else { throw NotesError("shared_write_refused", "The note is shared. Pass --allow-shared to confirm the write.") }
-            guard let readOnly = value(note, "isSharedReadOnly") as? Bool else {
-                throw NotesError("shared_permission_unknown", "Notes did not expose the current participant's write role; nothing was changed.")
-            }
-            if readOnly { throw NotesError("shared_read_only", "The current participant has read-only access to this shared note.") }
+            try NativeSharedWriteGuard.require(isShared: true, allowShared: allowShared,
+                                               isReadOnly: value(note, "isSharedReadOnly") as? Bool)
         }
+    }
+
+    fileprivate func guardWritableFolder(_ folder: NSManagedObject, allowShared: Bool) throws {
+        try guardFolderSelectors(folder)
+        var current: NSManagedObject? = folder, sharedRole: Bool?
+        while let item = current {
+            if value(item, "serverShareData") != nil
+                || (value(item, "zoneOwnerName") as? String).map({ $0 != "__defaultOwner__" }) == true {
+                sharedRole = value(item, "isSharedReadOnly") as? Bool
+                break
+            }
+            current = value(item, "parent") as? NSManagedObject
+        }
+        try NativeSharedWriteGuard.require(isShared: isSharedFolder(folder), allowShared: allowShared, isReadOnly: sharedRole)
     }
 
     fileprivate func guardFolderSelectors(_ folder: NSManagedObject) throws {
@@ -1073,24 +1084,14 @@ public final class NativeNotesWriter: NotesNativeWriting {
             }
             return try folder(ref, in: context)
         }
-        let rows = try fetch("ICFolder", predicate: NSPredicate(format: "markedForDeletion == NO AND folderType == 0"), in: context)
-        guard let destination = rows.first(where: { (value($0, "title") as? String) == "Notes" }) ?? rows.first else {
-            throw NotesError("folder_not_found", "No writable Notes folder was found.")
-        }
-        return destination
+        let folderID = try NativeDestinationResolver.folderID(try SQLiteNotesStore(refresh: true).defaultLocation())
+        return try folder(folderID, in: context)
     }
 
     public func createNote(title: String, markdown: String, folder folderRef: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult {
         let write = try performWrite { context in
             let destination = try destinationFolder(folderRef, in: context)
-            try guardFolderSelectors(destination)
-            if isSharedFolder(destination) {
-                guard allowShared else { throw NotesError("shared_write_refused", "The destination folder is shared. Pass --allow-shared.") }
-                guard let readOnly = value(destination, "isSharedReadOnly") as? Bool else {
-                    throw NotesError("shared_permission_unknown", "Notes did not expose the current participant's write role; nothing was changed.")
-                }
-                if readOnly { throw NotesError("shared_read_only", "The current participant has read-only access to this shared folder.") }
-            }
+            try guardWritableFolder(destination, allowShared: allowShared)
             var noteID = "", attachmentIDs: [String] = []
             do {
                 let note = try NCNotesRuntime.newNote(in: destination)
@@ -1291,8 +1292,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         let target: NSManagedObject
         if let destination { target = try folder(destination, in: context) }
         else { guard let original = ["folderBeforeDeletion", "originalFolder", "previousFolder"].compactMap({ value(note, $0) as? NSManagedObject }).first else { throw NotesError("restore_folder_required", "NotesShared exposes no original folder for this note. Pass --folder.") }; target = original }
-        try guardFolderSelectors(target)
-        if (isShared(note) || isSharedFolder(target)) && !allowShared { throw NotesError("shared_write_refused", "Restoring changes shared access. Pass --allow-shared.") }
+        try guardWritableFolder(target, allowShared: allowShared)
         try appleMove(note, to: target); operation?.committed = true; operation?.noteID = id(note)
         context.refreshAllObjects(); let restored = try self.note(id(note), in: context)
         guard let restoredFolder = value(restored, "folder") as? NSManagedObject else {
@@ -1305,8 +1305,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func moveFolder(_ ref: String, parent: String?, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         let moved = try folder(ref, in: context), target = try parent.map { try folder($0, in: context) }
-        try guardFolderSelectors(moved); if let target { try guardFolderSelectors(target) }
-        if (isSharedFolder(moved) || target.map(isSharedFolder) == true) && !allowShared { throw NotesError("shared_write_refused", "The folder is shared. Pass --allow-shared.") }
+        try guardWritableFolder(moved, allowShared: allowShared); if let target { try guardWritableFolder(target, allowShared: allowShared) }
         if let target { var current: NSManagedObject? = target; while let item = current { if item == moved { throw NotesError("invalid_folder_move", "A folder cannot move inside itself.") }; current = value(item, "parent") as? NSManagedObject } }
         guard (value(moved, "account") as? NSManagedObject) == target.flatMap({ value($0, "account") as? NSManagedObject }) || target == nil else { throw NotesError("invalid_folder_move", "Folders move only within one account.") }
         do { try NCNotesRuntime.moveFolder(moved, parent: target); try NCNotesRuntime.save(context); operation?.committed = true; operation?.folderID = id(moved) } catch { context.rollback(); throw nativeError(error) }
@@ -1477,6 +1476,7 @@ private final class MarkdownNativeWriter {
         if dryRun {
             return owner.result(owner.id(note), native: ["dryRun": "true", "paragraphs": "\(lines.count)"], message: "No write made.")
         }
+        var expectedMarkers: [(String, String)] = []
         do {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["delete", "insert"])
             let existing = owner.attachmentMarkers(editor.original)
@@ -1487,22 +1487,21 @@ private final class MarkdownNativeWriter {
             for id in preservedIDs where existingByID[id] == nil { throw NotesError("attachment_not_found", "Attachment \(id) does not belong to this note.") }
             let kept = Set(preservedIDs)
             for marker in existing where !kept.contains(marker.2) {
-                if let attachment = try owner.fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@ AND note == %@", marker.2, note), in: context, limit: 1).first {
-                    throw NotesError("attachment_would_be_lost", "Markdown omitted attachment \(owner.id(attachment)); nothing was saved.")
-                }
+                throw NotesError("attachment_would_be_lost", "Markdown omitted inline marker \(marker.2); nothing was saved.")
             }
             let built = try attributed(markdown: markdown, note: note, context: context, editor: editor, existing: existingByID).0
+            expectedMarkers = owner.attachmentMarkers(built).map { ($0.2, $0.3) }
             try editor.begin(["delete", "insert"]); try editor.delete(NSRange(location: 0, length: editor.original.length)); try editor.insert(built, at: 0); try editor.finish()
             try owner.save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? owner.nativeError(error) }
         let nativeBody = try owner.body(try owner.note(owner.id(note), in: context))
-        let nativeMarkers = owner.attachmentMarkers(nativeBody).map(\.2)
-        let nativeVerified = preservedIDs.allSatisfy { id in nativeMarkers.filter { $0 == id }.count == 1 }
+        let nativeMarkers = owner.attachmentMarkers(nativeBody).map { ($0.2, $0.3) }
+        let nativeVerified = NativeVerificationRules.sameMarkerMultiset(expectedMarkers, nativeMarkers)
         return owner.result(owner.id(note), native: ["utf16Length": "\(nativeBody.length)", "paragraphs": "\(lines.count)", "preservedAttachments": "\(preservedIDs.count)"],
                             nativeVerified: nativeVerified, sqlite: { n in
             guard n.document?.text == nativeBody.string else { return nil }
-            let readbackIDs = n.document?.runs.compactMap { $0.attachment?.id } ?? []
-            guard preservedIDs.allSatisfy({ id in readbackIDs.filter { $0 == id }.count == 1 }) else { return nil }
+            let readbackMarkers = n.document?.runs.compactMap { run in run.attachment.map { ($0.id, $0.typeUTI) } } ?? []
+            guard NativeVerificationRules.sameMarkerMultiset(expectedMarkers, readbackMarkers) else { return nil }
             return ["utf16Length": "\(nativeBody.length)", "hasChecklist": "\(n.summary.hasChecklist)", "preservedAttachments": "\(preservedIDs.count)"]
         })
     }

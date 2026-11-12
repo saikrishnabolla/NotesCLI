@@ -24,6 +24,19 @@ final class ReadExtrasTests: XCTestCase {
         XCTAssertTrue(try store.list().isEmpty)
     }
 
+    func testReadOnlyAnchorResolutionDoesNotPersistRelocation() throws {
+        let fake = InMemoryNotes.sample()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-anchor-readonly-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("anchors.sqlite"), store = ParagraphAnchorStore(url: url)
+        let anchor = try store.add(note: fake.note("welcome"), offset: 0)
+        _ = try fake.replaceBody("welcome", markdown: "Inserted\nWelcome to notescli. Browse your shopping notes. #demo")
+
+        let resolved = try ParagraphAnchorStore(url: url, readOnly: true).resolve(anchor.id, reader: fake)
+        XCTAssertEqual(resolved.offset, 9)
+        XCTAssertEqual(try store.list().first?.currentOffset, 0)
+    }
+
     func testSyncAcknowledgementUsesCloudVersionsAndDirtyFlags() {
         XCTAssertFalse(NotesSyncWaiter.isAcknowledged(nil))
         XCTAssertFalse(NotesSyncWaiter.isAcknowledged(NoteSyncState(needsSave: false)))

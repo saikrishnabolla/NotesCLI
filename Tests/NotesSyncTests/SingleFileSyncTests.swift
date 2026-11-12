@@ -89,4 +89,59 @@ final class SingleFileSyncTests: XCTestCase {
         XCTAssertEqual(try sync.push(from: path).action, .unchanged)
         XCTAssertEqual(writer.replacements, 1)
     }
+
+    func testPullConflictCannotPushMarkersIntoNotes() throws {
+        let notes = InMemoryNotes.sample(), root = try root(), path = root.appendingPathComponent("note.md")
+        let sync = SingleFileSync(reader: notes, writer: notes)
+        _ = try sync.pull(note: "welcome", to: path)
+        var local = MarkdownFile.parse(try String(contentsOf: path), fallbackTitle: "note")
+        local.body = "LOCAL"; try local.rendered().write(to: path, atomically: true, encoding: .utf8)
+        _ = try notes.replaceBody("welcome", markdown: "REMOTE")
+
+        XCTAssertEqual(try sync.pull(note: "welcome", to: path).action, .conflict)
+        let state = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(".notescli/note.md.json"))) as? [String: Any])
+        XCTAssertEqual(state["conflicted"] as? Bool, true)
+        XCTAssertEqual(try sync.push(from: path).action, .conflict)
+        XCTAssertEqual(try notes.note("welcome").document?.text, "REMOTE")
+    }
+
+    func testPushRejectsConflictMarkersWithoutSidecarState() throws {
+        let notes = InMemoryNotes.sample(), root = try root(), path = root.appendingPathComponent("note.md")
+        let body = "<<<<<<< OURS\nlocal\n=======\nremote\n>>>>>>> THEIRS"
+        let file = MarkdownFile(noteID: "welcome", title: "Welcome", modified: nil, body: body)
+        try file.rendered().write(to: path, atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(try SingleFileSync(reader: notes, writer: notes).push(from: path).action, .conflict)
+        XCTAssertEqual(try notes.note("welcome").document?.text, "Welcome to notescli. Browse your shopping notes. #demo")
+    }
+
+    func testConfirmedUnknownMergeUpdatesLocalFileWithoutRetrying() throws {
+        let notes = InMemoryNotes.sample(), root = try root(), path = root.appendingPathComponent("note.md")
+        _ = try SingleFileSync(reader: notes, writer: notes).pull(note: "welcome", to: path)
+        var local = MarkdownFile.parse(try String(contentsOf: path), fallbackTitle: "note")
+        local.body = "LOCAL\n" + local.body; try local.rendered().write(to: path, atomically: true, encoding: .utf8)
+        _ = try notes.replaceBody("welcome", markdown: (try notes.note("welcome").document?.text ?? "") + "\nREMOTE")
+        let writer = UnknownWriter(notes), sync = SingleFileSync(reader: notes, writer: writer)
+
+        XCTAssertThrowsError(try sync.push(from: path))
+        XCTAssertEqual(try sync.push(from: path).action, .unchanged)
+        XCTAssertEqual(MarkdownFile.parse(try String(contentsOf: path), fallbackTitle: "note").body,
+                       "LOCAL\nWelcome to notescli. Browse your shopping notes. #demo\nREMOTE")
+        XCTAssertEqual(writer.replacements, 1)
+    }
+
+    func testPushRejectsSymlinkedSidecarDirectory() throws {
+        let notes = InMemoryNotes.sample(), root = try root(), path = root.appendingPathComponent("note.md")
+        let outside = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-sidecar-outside-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: outside) }
+        let file = MarkdownFile(noteID: "welcome", title: "Welcome", modified: nil, body: "changed")
+        try file.rendered().write(to: path, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent(".notescli"),
+                                                   withDestinationURL: outside.appendingPathComponent("missing"))
+
+        XCTAssertThrowsError(try SingleFileSync(reader: notes, writer: notes).push(from: path)) {
+            XCTAssertEqual($0 as? NotesSyncError, .invalidPath(".notescli/note.md.json"))
+        }
+    }
 }

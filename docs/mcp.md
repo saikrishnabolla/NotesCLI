@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 49 tools. Read-only mode exposes the 28 read tools. `notescli mcp --allow-native` exposes 36 more tools that use Apple's private Notes framework.
+The default server exposes 49 tools. Read-only mode exposes 26 read tools. `notescli mcp --allow-native` exposes 85 tools in total.
 
 ## Tools
 
@@ -17,14 +17,14 @@ list_accounts  list_folders  list_notes  search_notes  query_notes
 get_note  get_notes  list_tags  list_attachments  list_backlinks
 get_deeplink  list_smart_folders  list_deleted  recent_notes  today_notes
 count_notes  get_stats  get_raw_note  related_notes  get_write_policy  file_diff
-index_status  get_attachment  anchor_add  anchor_list  anchor_resolve
-anchor_prune  table_get
+index_status  get_attachment  anchor_list  anchor_resolve  table_get
 ```
 
 Scripting, export, and sync tools:
 
 ```text
-save_attachment  export_notes  file_pull  file_push  sync_notes
+save_attachment  export_notes  file_pull  file_push  sync_notes  anchor_add
+anchor_prune
 create_note  append_to_note  prepend_to_note  update_note
 insert_under_heading  replace_section  replace_text  rename_note
 move_note  delete_note  batch_move_notes  batch_delete_notes

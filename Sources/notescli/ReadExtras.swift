@@ -33,7 +33,7 @@ enum ReadCursorPaging {
         case .modified: key = String(note.modified?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude); secondary = nil
         case .created: key = String(note.created?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude); secondary = nil
         case .opened: key = String(note.lastOpened?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude); secondary = String(note.modified?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude)
-        case .title: key = note.title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")); secondary = nil
+        case .title: key = note.title; secondary = nil
         case .display: key = String(note.displayOrder ?? Double.greatestFiniteMagnitude); secondary = nil
         }
         return StableCursorPayload(sort: sort.rawValue, key: key, secondary: secondary, id: note.id.uuid)
@@ -99,7 +99,8 @@ enum ReadCursorPaging {
             let leftSecondary = Double(candidate.secondary ?? "") ?? 0, rightSecondary = Double(cursor.secondary ?? "") ?? 0
             return left < right || (left == right && (leftSecondary < rightSecondary || (leftSecondary == rightSecondary && candidate.id < cursor.id)))
         case .title:
-            return candidate.key > cursor.key || (candidate.key == cursor.key && candidate.id > cursor.id)
+            let order = NoteTitleOrder.compare(candidate.key, cursor.key)
+            return order == .orderedDescending || (order == .orderedSame && candidate.id > cursor.id)
         case .display:
             let left = Double(candidate.key) ?? 0, right = Double(cursor.key) ?? 0
             return left > right || (left == right && candidate.id > cursor.id)

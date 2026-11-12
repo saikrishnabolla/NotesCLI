@@ -194,7 +194,7 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(smart.matchingNoteIDs,["N1"])
         XCTAssertEqual(note.attachments.first { $0.id == "preview" }?.url,"https://example.com")
         XCTAssertEqual(note.document?.runs[2].attachment?.url,"applenotes://showNote?identifier=N2")
-        XCTAssertTrue(note.document?.markdown(attachments:note.attachments).contains("#work @Pat [Second](applenotes://showNote?identifier=N2)") == true)
+        XCTAssertTrue(note.document?.markdown(attachments:note.attachments).contains("[#work](notescli-attachment:tag) [@Pat](notescli-attachment:mention) [Second](applenotes://showNote?identifier=N2)") == true)
         XCTAssertEqual(try Data(contentsOf:fixture.database),beforeDB)
         XCTAssertEqual(try Data(contentsOf:URL(fileURLWithPath:fixture.database.path + "-wal")),beforeWAL)
         try fixture.sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Changed' WHERE Z_PK=21")

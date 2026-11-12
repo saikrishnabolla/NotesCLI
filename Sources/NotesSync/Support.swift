@@ -76,6 +76,13 @@ enum SafePath {
             throw NotesSyncError.invalidPath(relative)
         }
         let canonicalRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+        var component = root.standardizedFileURL
+        for part in relative.split(separator: "/") {
+            component.appendPathComponent(String(part))
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: component.path)) != nil {
+                throw NotesSyncError.invalidPath(relative)
+            }
+        }
         let url = canonicalRoot.appendingPathComponent(relative).standardizedFileURL
         let rootPath = canonicalRoot.path
         let resolved = url.resolvingSymlinksInPath().path

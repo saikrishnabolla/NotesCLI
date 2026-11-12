@@ -12,6 +12,27 @@ public struct NoteID: Hashable, Codable, Sendable, CustomStringConvertible {
     public var description: String { uuid }
 }
 
+public enum NoteReference {
+    public static func explicitNumber(_ ref: String) -> Int? {
+        let digits: Substring
+        if ref.hasPrefix("#") { digits = ref.dropFirst() }
+        else if ref.count > 1, ref.first?.lowercased() == "n" { digits = ref.dropFirst() }
+        else { return nil }
+        guard !digits.isEmpty, digits.allSatisfy(\.isNumber) else { return nil }
+        return Int(digits)
+    }
+
+    public static func bareNumber(_ ref: String) -> Int? {
+        guard !ref.isEmpty, ref.allSatisfy(\.isNumber) else { return nil }
+        return Int(ref)
+    }
+
+    public static func number(fromShortID shortID: String?) -> Int? {
+        guard let shortID else { return nil }
+        return explicitNumber(shortID)
+    }
+}
+
 public struct Account: Codable, Sendable, Hashable {
     public var id: String          // ZIDENTIFIER
     public var name: String
@@ -124,6 +145,7 @@ public struct NoteSyncState: Codable, Sendable, Hashable {
 /// Note metadata, cheap to list.
 public struct NoteSummary: Codable, Sendable, Hashable {
     public var id: NoteID
+    public var number: Int?
     public var title: String
     public var snippet: String
     public var folderID: String?
@@ -149,8 +171,9 @@ public struct NoteSummary: Codable, Sendable, Hashable {
                 created: Date?, modified: Date?, isPinned: Bool, isLocked: Bool, isDeleted: Bool,
                 hasChecklist: Bool, attachmentCount: Int, tags: [String], hasChecklistInProgress: Bool? = nil, lastOpened: Date? = nil,
                 displayOrder: Double? = nil, isShared: Bool? = nil, participants: [NoteParticipant]? = nil,
-                syncState: NoteSyncState? = nil, isSystemPaper: Bool? = nil, deepLink: String? = nil) {
-        self.id = id; self.title = title; self.snippet = snippet; self.folderID = folderID; self.folderPath = folderPath
+                syncState: NoteSyncState? = nil, isSystemPaper: Bool? = nil, deepLink: String? = nil, number: Int? = nil) {
+        self.id = id; self.number = number ?? NoteReference.number(fromShortID: id.shortID)
+        self.title = title; self.snippet = snippet; self.folderID = folderID; self.folderPath = folderPath
         self.accountID = accountID; self.created = created; self.modified = modified; self.isPinned = isPinned
         self.isLocked = isLocked; self.isDeleted = isDeleted; self.hasChecklist = hasChecklist
         self.hasChecklistInProgress = hasChecklistInProgress; self.attachmentCount = attachmentCount; self.tags = tags

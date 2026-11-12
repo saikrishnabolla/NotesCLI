@@ -263,15 +263,21 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
 
     private func resolve(_ ref: String) throws -> NoteSummary {
         let visible = summaries.filter { !placeholderIDs.contains($0.id.uuid.lowercased()) }
-        let shortRef = ref.allSatisfy(\.isNumber) ? "n\(ref)" : ref
         let byID = visible.filter {
             $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame ||
             $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
-            $0.id.shortID?.caseInsensitiveCompare(shortRef) == .orderedSame
+            $0.id.shortID?.caseInsensitiveCompare(ref) == .orderedSame
         }
-        let matches = byID.isEmpty ? visible.filter { $0.title == ref && !$0.isDeleted } : byID
+        let matches: [NoteSummary]
+        if let number = NoteReference.explicitNumber(ref) {
+            matches = Array(Dictionary(grouping: byID + visible.filter { $0.number == number }, by: \.id.uuid).values.compactMap(\.first))
+        } else if let number = NoteReference.bareNumber(ref) {
+            matches = Array(Dictionary(grouping: byID + visible.filter { $0.number == number || ($0.title == ref && !$0.isDeleted) }, by: \.id.uuid).values.compactMap(\.first))
+        } else {
+            matches = byID.isEmpty ? visible.filter { $0.title == ref && !$0.isDeleted } : byID
+        }
         guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }
+        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note matches. Use #ID or a UUID.") }
         return matches[0]
     }
     public func tags() throws -> [String: Int] {

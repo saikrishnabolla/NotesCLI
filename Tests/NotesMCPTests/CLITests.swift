@@ -39,6 +39,37 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(confirmation.0, 1)
         XCTAssertTrue(confirmation.2.contains("confirmation_required"))
     }
+    func testHomePinnedCapabilitiesHelpAndExamples() throws {
+        let plain = try run([])
+        XCTAssertEqual(plain.0, 0, plain.2)
+        XCTAssertTrue(plain.1.contains("USAGE: notescli"), plain.1)
+        XCTAssertFalse(plain.1.contains("Recently Edited"), plain.1)
+
+        let json = try run(["--backend", "fake", "--json"])
+        XCTAssertEqual(json.0, 0, json.2)
+        let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
+        XCTAssertEqual(home["version"] as? String, "1.0.0")
+        XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
+        XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
+
+        let pinned = try run(["--backend", "fake", "pinned", "--limit", "1"])
+        XCTAssertEqual(pinned.0, 0, pinned.2)
+        XCTAssertTrue(pinned.1.contains("#1"), pinned.1)
+
+        let capabilities = try run(["--backend", "fake", "capabilities", "--json"])
+        XCTAssertEqual(capabilities.0, 0, capabilities.2)
+        let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(capabilities.1.utf8)) as? [String: Any])
+        XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 94)
+
+        let help = try run(["help", "search"])
+        XCTAssertEqual(help.0, 0, help.2)
+        XCTAssertTrue(help.1.contains("EXAMPLES:"), help.1)
+        XCTAssertTrue(help.1.contains("notescli search"), help.1)
+
+        let typo = try run(["serach"])
+        XCTAssertEqual(typo.0, 2)
+        XCTAssertTrue(typo.2.contains("Did you mean 'search'?"), typo.2)
+    }
     func testQuietSuppressesHumanOutputButNotErrors() throws {
         let quiet = try run(["--backend", "fake", "--quiet", "accounts"])
         XCTAssertEqual(quiet.0, 0, quiet.2)

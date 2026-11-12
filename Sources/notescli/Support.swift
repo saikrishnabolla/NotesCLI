@@ -27,6 +27,13 @@ struct GlobalOptions: ParsableArguments {
     }
 }
 
+enum TerminalStyle {
+    static var enabled: Bool {
+        isatty(STDOUT_FILENO) == 1 && ProcessInfo.processInfo.environment["NO_COLOR"] == nil &&
+            ProcessInfo.processInfo.environment["TERM"]?.lowercased() != "dumb"
+    }
+}
+
 enum Output {
     static func error(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
     static func json<T: Encodable>(_ value: T) throws { print(String(decoding: try NotePresentation.json(value), as: UTF8.self)) }
@@ -43,7 +50,18 @@ enum Output {
     }
     static func notes(_ notes: [NoteSummary], json: Bool) throws {
         if json { try Self.json(notes) }
-        else { table(["SHORT ID", "ID", "TITLE", "FOLDER", "MODIFIED"], notes.map { [$0.id.shortID ?? "", $0.id.uuid, $0.title + ($0.isLocked ? " [locked]" : ""), $0.folderPath.joined(separator: " > "), $0.modified.map { ISO8601DateFormatter().string(from: $0) } ?? ""] }) }
+        else { table(["#ID", "ID", "TITLE", "FOLDER", "MODIFIED"], notes.map {
+            [$0.number.map { "#\($0)" } ?? $0.id.shortID ?? "", $0.id.uuid,
+             $0.title + ($0.isLocked ? " [locked]" : ""), $0.folderPath.joined(separator: " > "),
+             $0.modified.map { NotePresentation.relativeDate($0) } ?? ""]
+        }) }
+    }
+    static func outcome(_ outcome: WriteOutcome) -> String {
+        switch outcome {
+        case .verified: return "✓ verified"
+        case .unverified: return "• unverified"
+        case .unknown: return "? unknown"
+        }
     }
     static func write(_ result: WriteResult, json: Bool) throws {
         let response = EngineWriteResponse(engine: "scripting", result: result, operationID: result.operationID, syncPending: result.syncPending)
@@ -52,7 +70,7 @@ enum Output {
             throw NotesError("write_outcome_unknown", result.message ?? "The write may have completed. Do not retry automatically.", hint: "Read the note before retrying.")
         }
         if json { try Self.json(response) }
-        else { table(["ENGINE", "OUTCOME", "ID", "MESSAGE"], [[response.engine, result.outcome.rawValue, result.noteID?.uuid ?? result.folderID ?? "", result.message ?? ""]]) }
+        else { table(["ENGINE", "OUTCOME", "ID", "MESSAGE"], [[response.engine, outcome(result.outcome), result.noteID?.uuid ?? result.folderID ?? "", result.message ?? ""]]) }
     }
 }
 

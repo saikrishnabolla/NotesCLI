@@ -14,6 +14,7 @@ public struct NotesIndexStatus: Codable, Sendable {
 public struct NotesSearchHit: Codable, Sendable {
     public var noteID: String
     public var shortID: String?
+    public var number: Int?
     public var title: String
     public var folder: String
     public var snippet: String
@@ -114,7 +115,8 @@ public final class LocalNotesIndex: @unchecked Sendable {
             let bodyMatches = terms.reduce(0) { $0 + Self.occurrences($1, in: body) }
             let score = typo ? 1 : Double(titleMatches * 100 + bodyMatches * 10 + terms.count)
             let snippet = Self.snippet(body.isEmpty ? title : body, terms: terms)
-            return NotesSearchHit(noteID: row["id"] ?? "", shortID: row["short_id"].flatMap { $0.isEmpty ? nil : $0 }, title: title, folder: row["folder"] ?? "", snippet: snippet.plain,
+            let shortID = row["short_id"].flatMap { $0.isEmpty ? nil : $0 }
+            return NotesSearchHit(noteID: row["id"] ?? "", shortID: shortID, number: NoteReference.number(fromShortID: shortID), title: title, folder: row["folder"] ?? "", snippet: snippet.plain,
                                   highlights: snippet.highlights, score: score,
                                   modified: row["modified"].flatMap(Double.init).map(Date.init(timeIntervalSince1970:)))
         }.sorted { ($0.score, $0.modified ?? .distantPast, $0.noteID) > ($1.score, $1.modified ?? .distantPast, $1.noteID) }

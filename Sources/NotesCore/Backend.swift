@@ -33,7 +33,7 @@ public protocol NotesReading: Sendable {
     func defaultLocation() throws -> DefaultNotesLocation?
     func folders(account: String?) throws -> [Folder]
     func notes(_ query: NoteQuery) throws -> [NoteSummary]
-    /// Accepts a uuid, x-coredata id, short id, or exact title (title must be unique).
+    /// Accepts #number, legacy n-number/bare number, UUID, x-coredata id, or exact title.
     func note(_ ref: String) throws -> Note
     func tags() throws -> [String: Int]
     func notes(_ query: NoteQuery, sort: NoteSort) throws -> [NoteSummary]
@@ -75,15 +75,21 @@ public extension NotesReading {
     }
     func summary(_ ref: String) throws -> NoteSummary {
         let notes = try notes(NoteQuery(includeDeleted: true))
-        let shortRef = ref.allSatisfy(\.isNumber) ? "n\(ref)" : ref
         let ids = notes.filter {
             $0.id.uuid.caseInsensitiveCompare(ref) == .orderedSame ||
             $0.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
-            $0.id.shortID?.caseInsensitiveCompare(shortRef) == .orderedSame
+            $0.id.shortID?.caseInsensitiveCompare(ref) == .orderedSame
         }
-        let matches = ids.isEmpty ? notes.filter { $0.title == ref } : ids
+        let matches: [NoteSummary]
+        if let number = NoteReference.explicitNumber(ref) {
+            matches = Array(Dictionary(grouping: ids + notes.filter { $0.number == number }, by: \.id.uuid).values.compactMap(\.first))
+        } else if let number = NoteReference.bareNumber(ref) {
+            matches = Array(Dictionary(grouping: ids + notes.filter { $0.number == number || $0.title == ref }, by: \.id.uuid).values.compactMap(\.first))
+        } else {
+            matches = ids.isEmpty ? notes.filter { $0.title == ref } : ids
+        }
         guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use a UUID.") }
+        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note matches. Use #ID or a UUID.") }
         return matches[0]
     }
     func attachments(_ ref: String) throws -> [Attachment] { try note(ref).attachments }

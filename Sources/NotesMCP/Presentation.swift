@@ -159,4 +159,26 @@ public enum NotePresentation {
         if let d = simple.date(from: input), simple.string(from: d) == input { return d }
         throw NotesError("invalid_date", "Invalid date: \(input). Use ISO 8601, today, yesterday, or 7d.")
     }
+
+    public static func relativeDate(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let interval = now.timeIntervalSince(date)
+        if interval >= 0, interval < 60 { return "just now" }
+        if interval >= 60, interval < 3_600 { return "\(Int(interval / 60))m ago" }
+        if interval >= 3_600, interval < 86_400, calendar.isDate(date, inSameDayAs: now) { return "\(Int(interval / 3_600))h ago" }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "HH:mm"
+        let startOfToday = calendar.startOfDay(for: now)
+        if let startOfYesterday = calendar.date(byAdding: .day, value: -1, to: startOfToday),
+           date >= startOfYesterday, date < startOfToday { return "yesterday \(formatter.string(from: date))" }
+        if let weekAgo = calendar.date(byAdding: .day, value: -6, to: calendar.startOfDay(for: now)), date >= weekAgo, date <= now {
+            formatter.dateFormat = "EEE HH:mm"
+            return formatter.string(from: date).lowercased()
+        }
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
 }

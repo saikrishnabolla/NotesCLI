@@ -2,6 +2,26 @@ import XCTest
 @testable import NotesCore
 
 final class FakesTests: XCTestCase {
+    func testNumberReferencesPreferExplicitHashAndRejectAmbiguousBareNumbers() throws {
+        let sample = InMemoryNotes.sample()
+        XCTAssertEqual(try sample.note("#1").summary.title, "Welcome")
+        XCTAssertEqual(try sample.note("n1").summary.title, "Welcome")
+        XCTAssertEqual(try sample.note("1").summary.title, "Welcome")
+        XCTAssertEqual(try sample.summary("#2").number, 2)
+
+        let account = try XCTUnwrap(try sample.accounts().first)
+        let folder = try XCTUnwrap(try sample.folders(account: nil).first)
+        let titledNumber = Note(summary: NoteSummary(
+            id: NoteID(uuid: "numeric-title", shortID: "n99"), title: "1", snippet: "", folderID: folder.id,
+            folderPath: folder.path, accountID: account.id, created: nil, modified: nil, isPinned: false,
+            isLocked: false, isDeleted: false, hasChecklist: false, attachmentCount: 0, tags: []
+        ), document: NoteDocument(text: "", runs: []), attachments: [])
+        let ambiguous = InMemoryNotes(accounts: [account], folders: [folder], notes: [try sample.note("#1"), titledNumber])
+        XCTAssertThrowsError(try ambiguous.note("1")) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "ambiguous_note")
+        }
+        XCTAssertEqual(try ambiguous.note("#1").summary.title, "Welcome")
+    }
     func testNoteLifecycleAndFilters() throws {
         let fake = InMemoryNotes.sample()
         let folder = try fake.createFolder(name: "Work", parent: "Notes", account: "Demo").folderID!

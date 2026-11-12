@@ -30,8 +30,8 @@ let package = Package(
         // MCP server over stdio, same operations as the CLI.
         // Write journal, snapshots/undo, and the write-folder allowlist.
         .target(name: "NotesSafety", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
-        .target(name: "NotesMCP", dependencies: ["NotesCore", "NotesIndex", "NotesSafety", "NotesStore", "NotesSync"], linkerSettings: [
-            .linkedFramework("ImageIO"), .linkedFramework("CoreGraphics")
+        .target(name: "NotesMCP", dependencies: ["NotesCore", "NotesIndex", "NotesNative", "NotesSafety", "NotesStore", "NotesSync"], linkerSettings: [
+            .linkedFramework("ImageIO"), .linkedFramework("CoreGraphics"), .linkedFramework("Speech")
         ]),
         .target(name: "NotesSync", dependencies: ["NotesCore"], linkerSettings: [
             .linkedLibrary("sqlite3"),

@@ -14,7 +14,9 @@ This reference follows `notescli --help` from version 1.0.0.
 -h, --help           Show help information.
 ```
 
-Use `--json` for scripts and agents. A note reference can be a UUID, Core Data ID, short ID such as `n123`, bare numeric ID such as `123`, or an unambiguous title. Short IDs come from Notes' stable `Z_PK` value and appear in note listings.
+Use `--json` for scripts and agents. A note reference can be `#123`, a UUID, Core Data ID, legacy short ID such as `n123`, bare numeric ID such as `123`, or an unambiguous title. Use `#123` in new commands. A bare number is ambiguous when another note has that exact title. Numbers come from Notes' stable `Z_PK` value and appear as `#ID` in human listings and `number` in JSON.
+
+With no command, a terminal shows the NotesCLI home screen and five recently edited notes. Redirected output shows plain help. `notescli --json` returns the home data as JSON.
 
 ## Read commands
 
@@ -33,7 +35,9 @@ notescli search <query> [--folder <folder>] [--limit <limit>]
                 [--has image|audio|pdf|scan|drawing|table|checklist|link|file]
                 [--cursor <cursor>] [--fuzzy | --index] [--rebuild]
 notescli tags
-notescli recent [<n>]
+notescli recent [<n>] [--limit <limit>]
+notescli pinned [--limit <limit>]
+notescli capabilities
 notescli fetch <ref> | --all [--wait <seconds>]
 notescli index [--rebuild] [--background | --status | --cancel]
 notescli stats
@@ -51,6 +55,7 @@ notescli wait-sync <ref> [--timeout <seconds>]
 notescli raw <ref>
 notescli deleted
 notescli smart-folders [--evaluate]
+notescli help [<command>]
 notescli open <ref>
 notescli open <account> --account
 notescli open <folder> --folder
@@ -162,6 +167,7 @@ The default output directory is `notes-export`. `--combine` writes one PDF per f
 notescli setup
 notescli permissions
 notescli doctor
+notescli capabilities
 notescli completion [zsh|bash|fish]
 ```
 

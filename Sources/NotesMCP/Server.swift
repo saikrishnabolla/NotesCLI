@@ -99,8 +99,14 @@ public final class MCPServer {
             t("list_deleted", "List notes in Recently Deleted.", [], page),
             t("recent_notes", "List recently modified notes.", [], ["days": integer].merging(page) { old, _ in old }),
             t("today_notes", "List notes modified today.", [], page),
+            // MARK: w9-ux begin
+            t("pinned_notes", "List pinned notes.", [], ["limit": integer]),
+            // MARK: w9-ux end
             t("count_notes", "Count notes matching filters.", [], filters),
             t("get_stats", "Get note, folder, account, and attachment-kind counts."),
+            // MARK: w9-ux begin
+            t("get_capabilities", "Report Apple Notes feature, engine, permission, and native selector support."),
+            // MARK: w9-ux end
             t("get_raw_note", "Read decoded raw note protobuf data with paging.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
             t("related_notes", "Find notes related by links or tags.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
             t("get_write_policy", "Show read-only, native, and write-folder policy."),
@@ -571,6 +577,12 @@ public final class MCPServer {
             let all = try reader.notes(NoteQuery(modifiedAfter: start), sort: .modified)
             var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }; result["notes"] = result.removeValue(forKey: "items")
             return try content(result)
+        // MARK: w9-ux begin
+        case "pinned_notes":
+            let requested = a["limit"] == nil ? 100 : i("limit")
+            let notes = try reader.notes(NoteQuery(pinnedOnly: true, limit: requested), sort: .modified)
+            return try content(["notes": NotePresentation.object(notes), "limit": requested, "total": notes.count])
+        // MARK: w9-ux end
         case "count_notes":
             let query = NoteQuery(folder: s("folder"), account: s("account"), includeDeleted: b("include_deleted"), pinnedOnly: b("pinned"), tag: s("tag"), modifiedAfter: try s("since").map { try NotePresentation.date($0) }, modifiedBefore: try s("until").map { try NotePresentation.date($0) })
             return try content(["count": reader.notes(query).count])
@@ -579,6 +591,10 @@ public final class MCPServer {
             var folders: [String: Int] = [:], accounts: [String: Int] = [:]
             for note in notes { folders[note.folderPath.joined(separator: " > "), default: 0] += 1; accounts[note.accountID, default: 0] += 1 }
             return try content(["total": notes.count, "by_folder": folders, "by_account": accounts, "by_kind": reader.attachmentKindCounts()])
+        // MARK: w9-ux begin
+        case "get_capabilities":
+            return try content(try NotePresentation.object(CapabilityReporter.report()) as! [String: Any])
+        // MARK: w9-ux end
         case "get_raw_note":
             let raw = try String(decoding: NotePresentation.json(reader.rawNote(s("ref")!)), as: UTF8.self)
             let value = textPage(raw, offset: offset, limit: min(a["limit"] == nil ? 16_000 : limit, 16_000))
@@ -701,23 +717,26 @@ public final class MCPServer {
         return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting") {
             guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }
             let result: WriteResult
+            // MARK: w9-ux begin
+            let resolvedRef = note?.summary.id.uuid ?? s("ref")
             switch tool.name {
             case "create_note": result = try writer.createNote(title: s("title")!, markdown: s("body")!, folder: s("folder"))
-            case "append_to_note": result = try writer.appendToNote(s("ref")!, markdown: s("body")!)
-            case "prepend_to_note": result = try writer.prependToNote(s("ref")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "update_note", "write_markdown": result = try writer.replaceBody(s("ref")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "insert_under_heading": result = try writer.insertUnderHeading(s("ref")!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "replace_section": result = try writer.replaceSection(s("ref")!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "replace_text": result = try writer.replaceText(s("ref")!, find: s("find")!, replacement: s("replacement")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "rename_note": result = try writer.renameNote(s("ref")!, title: s("title")!)
-            case "move_note": result = try writer.moveNote(s("ref")!, toFolder: s("folder")!)
-            case "delete_note": result = try writer.deleteNote(s("ref")!)
+            case "append_to_note": result = try writer.appendToNote(resolvedRef!, markdown: s("body")!)
+            case "prepend_to_note": result = try writer.prependToNote(resolvedRef!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "update_note", "write_markdown": result = try writer.replaceBody(resolvedRef!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "insert_under_heading": result = try writer.insertUnderHeading(resolvedRef!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "replace_section": result = try writer.replaceSection(resolvedRef!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "replace_text": result = try writer.replaceText(resolvedRef!, find: s("find")!, replacement: s("replacement")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "rename_note": result = try writer.renameNote(resolvedRef!, title: s("title")!)
+            case "move_note": result = try writer.moveNote(resolvedRef!, toFolder: s("folder")!)
+            case "delete_note": result = try writer.deleteNote(resolvedRef!)
             case "create_folder": result = try writer.createFolder(name: s("name")!, parent: s("parent"), account: s("account"))
             case "rename_folder": result = try writer.renameFolder(s("ref")!, name: s("name")!)
             case "move_folder": result = try writer.moveFolder(s("ref")!, toParent: s("parent"), account: s("account"))
             case "delete_folder": result = try writer.deleteFolder(s("ref")!)
             default: throw NotesError("unknown_tool", "Unknown tool.")
             }
+            // MARK: w9-ux end
             return (result, nil, nil)
         }
     }

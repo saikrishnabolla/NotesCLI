@@ -204,7 +204,7 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
 }
 
 struct MCPInstall: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.")
+    static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.", discussion: "The agent skill is in skills/notescli/SKILL.md and is included by the NotesCLI Claude and Codex plugins.")
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
 
@@ -212,6 +212,7 @@ struct MCPInstall: ParsableCommand {
         try MCPConfiguration.apply(client: client) { selected in
             try MCPConfiguration.install(selected, readOnly: options.readOnly)
         }
+        print("Agent skill: install the NotesCLI plugin or use skills/notescli/SKILL.md")
     }
 }
 

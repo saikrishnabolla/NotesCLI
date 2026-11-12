@@ -39,7 +39,7 @@ struct MCPRoot: ParsableCommand {
     func run() throws {
         let backend = try options.backends()
         let selectedWriter: (any NotesWriting)? = options.readOnly ? nil : try backend.writer()
-        let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1) } : nil
+        let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
         let server = MCPServer(reader: backend.reader, writer: selectedWriter, readOnly: options.readOnly,
                                allowNative: allowNative, nativeHandler: handler,
                                syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
@@ -48,7 +48,7 @@ struct MCPRoot: ParsableCommand {
     }
 }
 
-private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws -> MCPNativeResult {
+private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: any NotesReading) throws -> MCPNativeResult {
     func string(_ key: String) -> String? { arguments[key] as? String }
     func integer(_ key: String) -> Int? { (arguments[key] as? NSNumber)?.intValue }
     func boolean(_ key: String) -> Bool? { arguments[key] as? Bool }
@@ -81,6 +81,25 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
         return try result(writer.renameSmartFolder(ref(), name: string("name")!, expectedCount: integer("expected_count")!))
     case "smart_folder_edit_rules":
         return try result(writer.editSmartFolderRules(ref(), queryJSON: string("query_json")!, expectedCount: integer("expected_count")!))
+    case "smart_folder_edit_typed":
+        func date(_ key: String) throws -> Date? { try string(key).map { try NotePresentation.date($0) } }
+        func match(_ key: String, default fallback: SmartFolderRuleMatch) throws -> SmartFolderRuleMatch {
+            guard let value = string(key) else { return fallback }
+            guard let result = SmartFolderRuleMatch(rawValue: value) else { throw NotesError("invalid_smart_folder_rules", "\(key) must be all or any.") }
+            return result
+        }
+        let sections = try (arguments["attachments"] as? [String] ?? []).map { value -> SmartFolderAttachmentSection in
+            guard let section = SmartFolderAttachmentSection(name: value) else { throw NotesError("invalid_smart_folder_rules", "Unknown attachment rule: \(value).") }
+            return section
+        }
+        let rules = SmartFolderRules(match: try match("match", default: .all), tags: arguments["tags"] as? [String] ?? [],
+                                     tagsMatch: try match("tags_match", default: .any),
+                                     createdFrom: try date("created_from"), createdTo: try date("created_to"),
+                                     modifiedFrom: try date("modified_from"), modifiedTo: try date("modified_to"),
+                                     folders: arguments["folders"] as? [String] ?? [], checklists: arguments["checklists"] as? Bool,
+                                     attachmentSections: sections, shared: arguments["shared"] as? Bool, locked: arguments["locked"] as? Bool,
+                                     mentions: arguments["mentions"] as? Bool, quickNotes: arguments["quick_notes"] as? Bool)
+        return try result(writer.editSmartFolderRules(ref(), queryJSON: rules.json(), expectedCount: integer("expected_count")!))
     case "smart_folder_delete":
         return try result(writer.deleteSmartFolder(ref(), expectedCount: integer("expected_count")!))
     case "checklist_list": return try MCPNativeResult(value: writer.checklistItems(ref()))
@@ -131,7 +150,26 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
         guard let rows = arguments["rows"] as? [[String]] else { throw NotesError("invalid_arguments", "rows must be an array of string arrays.") }
         return try result(writer.createTable(ref(), rows: rows, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "table_set": return try result(writer.editTable(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!, text: string("text")!, allowShared: (boolean("allow_shared") ?? false)))
+    case "table_format_cell":
+        let script = boolean("superscript") == true ? 1 : (boolean("subscript") == true ? -1 : (boolean("clear_script") == true ? 0 : nil))
+        let format = InlineFormat(bold: boolean("bold"), italic: boolean("italic"), underline: boolean("underline"), strike: boolean("strike"),
+                                  link: string("link"), clearLink: boolean("clear_link") ?? false, color: string("color"), clearColor: boolean("clear_color") ?? false,
+                                  superscript: script, fontName: string("font_name"), fontSize: (arguments["font_size"] as? NSNumber)?.doubleValue,
+                                  highlight: string("highlight").flatMap(HighlightColor.init(rawValue:)), clearHighlight: boolean("clear_highlight") ?? false)
+        return try result(writer.formatTableCell(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!,
+                                                 range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format,
+                                                 allowShared: boolean("allow_shared") ?? false))
     case "table_convert_to_text": return try result(writer.convertTableToText(ref(), attachmentID: string("attachment_id")!, separator: string("separator") ?? "tab", allowShared: (boolean("allow_shared") ?? false)))
+    case "get_folder_sort": return try MCPNativeResult(value: writer.folderSort(ref()))
+    case "set_folder_sort":
+        guard let order = NativeFolderSortOrder(rawValue: string("by")!), let direction = NativeFolderSortDirection(rawValue: string("direction")!) else { throw NotesError("invalid_folder_sort", "Unknown folder sort order or direction.") }
+        return try result(writer.setFolderSort(ref(), order: order, direction: direction))
+    case "set_default_account":
+        let identifier = string("account_id")!
+        guard try reader.accounts().contains(where: { $0.id.caseInsensitiveCompare(identifier) == .orderedSame }) else {
+            throw NotesError("account_not_found", "The account was not found.")
+        }
+        return try result(writer.setDefaultAccount(identifier))
     case "table_add_row", "table_remove_row", "table_add_column", "table_remove_column":
         let axis = tool.contains("row") ? "row" : "column", add = tool.contains("add")
         return try result(writer.resizeTable(ref(), attachmentID: string("attachment_id")!, axis: axis, index: integer("index")!, add: add, allowShared: (boolean("allow_shared") ?? false)))

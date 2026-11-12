@@ -154,12 +154,37 @@ public enum NoteRenderer {
     }
     private static func attachment(_ ref: InlineRef, _ document: NoteDocument, _ a: Attachment?, _ format: Format) -> String {
         if let rows = document.tables?[ref.id], let first = rows.first {
+            let richRows = document.tableCells?[ref.id]
+            func richCell(_ row: Int, _ column: Int) -> TableCellDocument? {
+                guard let richRows, richRows.indices.contains(row), richRows[row].indices.contains(column) else { return nil }
+                return richRows[row][column]
+            }
             switch format {
             case .plain: return rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
-            case .html: return "<table>" + rows.map { "<tr>" + $0.map { "<td>\(escaped($0, .html).replacingOccurrences(of: "\n", with: "<br>"))</td>" }.joined() + "</tr>" }.joined() + "</table>"
+            case .html:
+                return "<table>" + rows.enumerated().map { row, cells in "<tr>" + cells.enumerated().map { column, value in
+                    var rendered = richCell(row, column)?.document.html() ?? escaped(value, .html).replacingOccurrences(of: "\n", with: "<br>")
+                    if rendered.hasPrefix("<p>"), rendered.hasSuffix("</p>") {
+                        rendered = String(rendered.dropFirst(3).dropLast(4)).replacingOccurrences(of: "</p>\n<p>", with: "<br>")
+                    }
+                    return "<td>\(rendered)</td>"
+                }.joined() + "</tr>" }.joined() + "</table>"
             case .markdown:
-                func row(_ cells: [String]) -> String { "| " + cells.map { escaped($0, .markdown).replacingOccurrences(of: "\n", with: "<br>") }.joined(separator: " | ") + " |" }
-                return ([row(first), "| " + first.map { _ in "---" }.joined(separator: " | ") + " |"] + rows.dropFirst().map(row)).joined(separator: "\n")
+                func escapePipes(_ value: String) -> String {
+                    var result = "", backslashes = 0
+                    for character in value {
+                        if character == "|", backslashes.isMultiple(of: 2) { result.append("\\") }
+                        result.append(character)
+                        backslashes = character == "\\" ? backslashes + 1 : 0
+                    }
+                    return result
+                }
+                func row(_ index: Int, _ cells: [String]) -> String {
+                    "| " + cells.enumerated().map { column, value in
+                        escapePipes(richCell(index, column)?.document.markdown() ?? escaped(value, .markdown)).replacingOccurrences(of: "\n", with: "<br>")
+                    }.joined(separator: " | ") + " |"
+                }
+                return ([row(0, first), "| " + first.map { _ in "---" }.joined(separator: " | ") + " |"] + rows.dropFirst().enumerated().map { row($0.offset + 1, $0.element) }).joined(separator: "\n")
             }
         }
         let uti = ref.typeUTI.lowercased()

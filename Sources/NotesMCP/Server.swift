@@ -140,6 +140,7 @@ public final class MCPServer {
                 t("smart_folder_rename", "Rename one Smart Folder after an expected-count check.", ["ref", "name", "expected_count"], ["ref": string, "name": string, "expected_count": integer], write: true, native: true),
                 // MARK: w4-format begin
                 t("smart_folder_edit_rules", "Replace a Smart Folder query JSON after an expected-count check.", ["ref", "query_json", "expected_count"], ["ref": string, "query_json": string, "expected_count": integer], write: true, native: true, destructive: true),
+                t("smart_folder_edit_typed", "Replace Smart Folder rules from typed predicates.", ["ref", "expected_count"], ["ref": string, "expected_count": integer, "match": ["type": "string", "enum": ["all", "any"]], "tags": strings, "tags_match": ["type": "string", "enum": ["all", "any"]], "created_from": string, "created_to": string, "modified_from": string, "modified_to": string, "folders": strings, "checklists": bool, "attachments": strings, "shared": bool, "locked": bool, "mentions": bool, "quick_notes": bool], write: true, native: true, destructive: true),
                 // MARK: w4-format end
                 t("smart_folder_delete", "Delete one Smart Folder after an expected-count check.", ["ref", "expected_count"], ["ref": string, "expected_count": integer], write: true, native: true, destructive: true),
                 // MARK: w3-write end
@@ -170,7 +171,11 @@ public final class MCPServer {
                 t("insert_divider", "Insert a native divider line.", ["ref"], ["ref": string, "position": integer], write: true, native: true),
                 t("insert_math", "Insert a native math graph expression.", ["ref", "expression"], ["ref": string, "expression": string, "position": integer], write: true, native: true),
                 t("insert_mention", "Insert a participant mention in a shared note.", ["ref", "text", "user_record_name"], ["ref": string, "text": string, "user_record_name": string, "position": integer], write: true, native: true),
+                t("table_format_cell", "Apply native inline formatting inside a table cell.", ["ref", "attachment_id", "row", "column", "start", "length"], ["ref": string, "attachment_id": string, "row": integer, "column": integer, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "highlight": string, "clear_link": bool, "clear_color": bool, "clear_highlight": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number", "exclusiveMinimum": 0]], write: true, native: true),
                 t("table_convert_to_text", "Replace a native table with tab- or comma-separated text.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string, "separator": ["type": "string", "enum": ["tab", "comma"]]], write: true, native: true, destructive: true),
+                t("get_folder_sort", "Read a folder's native custom sort.", ["ref"], ["ref": string], native: true),
+                t("set_folder_sort", "Set a folder's native custom sort.", ["ref", "by", "direction"], ["ref": string, "by": string, "direction": string], write: true, native: true),
+                t("set_default_account", "Set the account Notes uses for new notes.", ["account_id"], ["account_id": string], write: true, native: true),
                 // MARK: w4-format end
                 t("attach_file", "Insert a file or positioned image.", ["ref", "path"], ["ref": string, "path": string, "position": integer, "view": string], write: true, native: true),
                 t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),
@@ -638,7 +643,10 @@ public final class MCPServer {
             } else { selected = tables }
             guard !selected.isEmpty else { throw NotesError("table_not_found", "The note has no decoded table.") }
             let format = s("format") ?? "json"
-            if format == "json" { return try content(["tables": NotePresentation.object(selected), "format": format]) }
+            if format == "json" {
+                let rich = note.document?.tableCells?.filter { selected[$0.key] != nil } ?? [:]
+                return try content(["tables": NotePresentation.object(selected), "table_cells": NotePresentation.object(rich), "format": format])
+            }
             let rendered = selected.sorted { $0.key < $1.key }.map { tableText($0.value, format: format) }.joined(separator: "\n\n")
             return try content(["tables": NotePresentation.object(selected), "format": format, "body": rendered])
         // MARK: w3-read end
@@ -710,7 +718,8 @@ public final class MCPServer {
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
         }
-        if ["smart_folder_create", "smart_folder_rename", "smart_folder_delete"].contains(tool.name) {
+        // MARK: w4-format begin
+        if ["smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_edit_typed", "smart_folder_delete"].contains(tool.name) {
             var dispatch = arguments
             var paths: [[String]] = []
             if tool.name == "smart_folder_create" { paths = [[arguments["name"] as! String]] }
@@ -725,6 +734,18 @@ public final class MCPServer {
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
         }
+        if tool.name == "set_folder_sort" {
+            let target = try folder(arguments["ref"] as! String)
+            guard !target.isSmartFolder, !target.isRecentlyDeleted else { throw NotesError("folder_not_found", "No writable folder matches the reference.") }
+            var dispatch = arguments
+            dispatch["ref"] = target.id
+            return try safeWrite(tool: tool, arguments: arguments, note: nil, paths: [target.path], engine: "native") {
+                let value = try nativeHandler(tool.name, dispatch)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        // MARK: w4-format end
         var targetNotes: [Note] = []
         if let ref = arguments["ref"] as? String { targetNotes = [try reader.note(ref)] }
         else if let tag = arguments["tag"] as? String { targetNotes = try reader.notes(NoteQuery(tag: tag)).map { try reader.note($0.id.uuid) } }

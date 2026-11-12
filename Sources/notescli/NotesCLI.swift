@@ -33,7 +33,10 @@ struct NotesCLI: ParsableCommand {
 
 struct Accounts: ParsableCommand {
     @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Option var setDefault: String?
     func run() throws {
+        if let setDefault { try UnifiedNative.defaultAccount(options, write, ref: setDefault); return }
         let rows = try options.backends().reader.accounts()
         if options.json { try Output.json(rows) }
         else { Output.table(["ID", "NAME", "KIND", "DEFAULT", "DEFAULT FOLDER"], rows.map { [$0.id, $0.name, $0.kind, $0.isDefault ? "yes" : "", $0.defaultFolderName ?? ""] }) }
@@ -260,7 +263,7 @@ struct Delete: ParsableCommand {
     }
 }
 struct FolderCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "folder", subcommands: [CreateFolder.self, RenameFolder.self, MoveFolder.self, DeleteFolder.self, FolderExists.self])
+    static let configuration = CommandConfiguration(commandName: "folder", subcommands: [CreateFolder.self, RenameFolder.self, MoveFolder.self, DeleteFolder.self, FolderExists.self, FolderSortCommand.self])
     @OptionGroup var options: GlobalOptions
 }
 struct CreateFolder: ParsableCommand {

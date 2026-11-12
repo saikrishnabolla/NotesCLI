@@ -5,6 +5,7 @@ import Foundation
 public struct NoteDocument: Codable, Sendable, Equatable {
     public var text: String
     public var tables: [String: [[String]]]?
+    public var tableCells: [String: [[TableCellDocument]]]?
     public var collapsedParagraphIDs: [String]?
     public var runs: [AttributeRun]
     public init(text: String, runs: [AttributeRun], collapsedParagraphIDs: [String]? = nil) {
@@ -21,6 +22,13 @@ public struct NoteDocument: Codable, Sendable, Equatable {
             runs[index].paragraph?.collapsed = collapsed.contains(id.uppercased())
         }
     }
+}
+
+public struct TableCellDocument: Codable, Sendable, Equatable {
+    public var text: String
+    public var runs: [AttributeRun]
+    public init(text: String, runs: [AttributeRun]) { self.text = text; self.runs = runs }
+    public var document: NoteDocument { NoteDocument(text: text, runs: runs) }
 }
 
 public enum HighlightColor: String, Codable, Sendable, Equatable, CaseIterable {

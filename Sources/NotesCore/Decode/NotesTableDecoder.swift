@@ -3,6 +3,10 @@ import Foundation
 /// Reconstructs ICTable's ordered row/column identities and redirected cell references.
 public enum NotesTableDecoder {
     public static func decode(_ data: Data, inlineText: (InlineRef) -> String? = { _ in nil }) throws -> [[String]] {
+        try decodeDocuments(data, inlineText: inlineText).map { $0.map { $0.document.plainText() } }
+    }
+
+    public static func decodeDocuments(_ data: Data, inlineText: (InlineRef) -> String? = { _ in nil }) throws -> [[TableCellDocument]] {
         let root = try ProtobufMessage(NotesInflate.decompressIfNeeded(data))
         let versions = try root.messages(2)
         guard versions.count == 1 else { throw DecodeError.invalidTable }
@@ -61,7 +65,8 @@ public enum NotesTableDecoder {
         guard let rows = parts["crRows"], let columns = parts["crColumns"], let cells = parts["cellColumns"] else { throw DecodeError.invalidTable }
         let (rowIndex, rowCount) = try ordering(rows), (columnIndex, columnCount) = try ordering(columns)
         guard rowCount <= 100_000, columnCount <= 100_000, rowCount * columnCount <= 1_000_000 else { throw DecodeError.sizeLimit }
-        var result = [[String]](repeating: [String](repeating: "", count: columnCount), count: rowCount)
+        let empty = TableCellDocument(text: "", runs: [])
+        var result = [[TableCellDocument]](repeating: [TableCellDocument](repeating: empty, count: columnCount), count: rowCount)
         for column in try cells.required(6).messages(1) {
             let columnID = try identity(column.required(1))
             let columnObject = try object(column.required(2))
@@ -77,7 +82,7 @@ public enum NotesTableDecoder {
                         document.runs[i].attachment = ref
                     }
                 }
-                result[r][c] = document.plainText()
+                result[r][c] = TableCellDocument(text: document.text, runs: document.runs)
             }
         }
         return rtl ? result.map { Array($0.reversed()) } : result

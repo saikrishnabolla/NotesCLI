@@ -69,6 +69,10 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(requireSelectors(_:of:));
 + (BOOL)checklistAutoSortEnabled;
 + (BOOL)setChecklistAutoSortEnabled:(BOOL)enabled error:(NSError **)error NS_SWIFT_NAME(setChecklistAutoSort(_:));
++ (nullable id)folderSortTypeWithOrder:(NSInteger)order direction:(NSInteger)direction error:(NSError **)error
+    NS_SWIFT_NAME(folderSortType(order:direction:));
++ (nullable NSString *)defaultAccountIdentifier:(NSError **)error NS_SWIFT_NAME(defaultAccountIdentifier());
++ (BOOL)setDefaultAccountIdentifier:(NSString *)identifier error:(NSError **)error NS_SWIFT_NAME(setDefaultAccountIdentifier(_:));
 @end
 
 @interface NCBodyEditor : NSObject
@@ -90,12 +94,16 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSNumber *)rowCount:(NSError **)error NS_SWIFT_NAME(rowCount());
 - (nullable NSNumber *)columnCount:(NSError **)error NS_SWIFT_NAME(columnCount());
 - (nullable NSString *)textAtColumn:(NSInteger)column row:(NSInteger)row error:(NSError **)error NS_SWIFT_NAME(text(column:row:));
+- (nullable NSAttributedString *)attributedTextAtColumn:(NSInteger)column row:(NSInteger)row error:(NSError **)error
+    NS_SWIFT_NAME(attributedText(column:row:));
 - (BOOL)insertRow:(NSInteger)index error:(NSError **)error;
 - (BOOL)removeRow:(NSInteger)index error:(NSError **)error;
 - (BOOL)insertColumn:(NSInteger)index error:(NSError **)error;
 - (BOOL)removeColumn:(NSInteger)index error:(NSError **)error;
 - (BOOL)setCellColumn:(NSInteger)column row:(NSInteger)row text:(NSString *)text style:(id)style error:(NSError **)error
     NS_SWIFT_NAME(setCell(column:row:text:style:));
+- (BOOL)setAttributedCellColumn:(NSInteger)column row:(NSInteger)row text:(NSAttributedString *)text error:(NSError **)error
+    NS_SWIFT_NAME(setAttributedCell(column:row:text:));
 - (BOOL)save:(NSError **)error NS_SWIFT_NAME(save());
 @end
 

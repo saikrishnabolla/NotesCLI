@@ -18,12 +18,22 @@ public final class PreparedRecording: @unchecked Sendable {
 }
 
 public enum AudioTranscriber {
+    static func requireSpeechUsageDescription(in bundle: Bundle = .main) throws {
+        guard let value = bundle.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") as? String,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NotesError("speech_permission_unavailable",
+                             "Speech Recognition is unavailable because this build has no NSSpeechRecognitionUsageDescription.",
+                             hint: "Run the packaged notescli release.")
+        }
+    }
+
     public static var authorizationStatus: SFSpeechRecognizerAuthorizationStatus {
         SFSpeechRecognizer.authorizationStatus()
     }
 
-    public static func requestAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
-        await withCheckedContinuation { continuation in
+    public static func requestAuthorization() async throws -> SFSpeechRecognizerAuthorizationStatus {
+        try requireSpeechUsageDescription()
+        return await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
     }
@@ -58,8 +68,9 @@ public enum AudioTranscriber {
     }
 
     public static func transcribe(_ file: URL, locale identifier: String? = nil) async throws -> [TranscriptWord] {
+        try requireSpeechUsageDescription()
         var status = authorizationStatus
-        if status == .notDetermined { status = await requestAuthorization() }
+        if status == .notDetermined { status = try await requestAuthorization() }
         guard status == .authorized else {
             throw NotesError("speech_permission_required", "Speech Recognition access is required. Run notescli permissions.")
         }
@@ -92,12 +103,13 @@ public enum AudioTranscriber {
         return try box.wait()
     }
 
-    public static func requestAuthorizationBlocking() -> SFSpeechRecognizerAuthorizationStatus {
+    public static func requestAuthorizationBlocking() throws -> SFSpeechRecognizerAuthorizationStatus {
         let box = BlockingResult<SFSpeechRecognizerAuthorizationStatus>()
         Task {
-            box.set(.success(await requestAuthorization()))
+            do { box.set(.success(try await requestAuthorization())) }
+            catch { box.set(.failure(error)) }
         }
-        return (try? box.wait()) ?? authorizationStatus
+        return try box.wait()
     }
 
     @available(macOS 26, *)

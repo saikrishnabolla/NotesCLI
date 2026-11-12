@@ -519,7 +519,7 @@ enum MCPConfiguration {
 enum PermissionGuide {
     static func run() throws {
         let speech = AudioTranscriber.authorizationStatus == .notDetermined
-            ? AudioTranscriber.requestAuthorizationBlocking()
+            ? try AudioTranscriber.requestAuthorizationBlocking()
             : AudioTranscriber.authorizationStatus
         switch speech {
         case .authorized: print("Speech Recognition: authorized.")

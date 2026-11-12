@@ -3,6 +3,16 @@ import NotesCore
 import NotesMCP
 
 final class PresentationTests: XCTestCase {
+    func testMarkdownPrefixesEveryListItemCoveredByOneRun() throws {
+        var note = try InMemoryNotes.sample().note("welcome")
+        note.document = NoteDocument(text: "one\ntwo\nthree\n", runs: [
+            AttributeRun(length: 8, paragraph: ParagraphStyle(kind: .bulleted)),
+            AttributeRun(length: 6, paragraph: ParagraphStyle(kind: .body)),
+        ])
+
+        XCTAssertEqual(try NotePresentation.render(note, format: "markdown", attachments: false), "- one\n- two\nthree\n")
+    }
+
     func testFormatsAndAttachments() throws {
         var note = try InMemoryNotes.sample().note("welcome")
         note.document = NoteDocument(text: "Bold\nTask\n\u{fffc}", runs: [

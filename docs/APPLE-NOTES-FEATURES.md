@@ -4,9 +4,9 @@ Verified on macOS 27.2.1 on 2026-11-11. Apple documents the user-facing features
 
 | Feature | Read | Write | Notes |
 | --- | --- | --- | --- |
-| Title style | Done | Done | Native paragraph style 0. |
-| Heading style | Done | Done | Native paragraph style 1. |
-| Subheading style | Done | Done | Native paragraph style 2. |
+| Title style | Done | Done | Native paragraph style 0. Scripting imports `<h1>` as 24px bold body text; use `--engine native` for a native Title. |
+| Heading style | Done | Done | Native paragraph style 1. Scripting imports `<h2>` as 18px bold body text; use `--engine native` for a native Heading. |
+| Subheading style | Done | Done | Native paragraph style 2. Scripting imports `<h3>` as bold body text; use `--engine native` for a native Subheading. |
 | Body style | Done | Done | Native paragraph style 4. |
 | Monospaced style | Done | Done | Native paragraph style 100. |
 | Block quote | Done | Done | Paragraph style and quote level are preserved. |

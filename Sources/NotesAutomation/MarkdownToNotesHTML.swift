@@ -18,7 +18,15 @@ public enum MarkdownToNotesHTML {
     public static func plainText(_ markdown: String) -> String { plainText(html: convert(markdown).html) }
 
     static func exactPlainText(html: String) -> String {
-        var value = html.replacingOccurrences(of: "<\\s*br\\s*/?>", with: "\n", options: [.regularExpression, .caseInsensitive])
+        var value = html.replacingOccurrences(
+            of: "(</?\\s*(?:div|p|h[1-3]|ul|ol|li|pre|blockquote)\\b[^>]*>)\\s*\\r?\\n\\s*",
+            with: "$1", options: [.regularExpression, .caseInsensitive]
+        )
+        value = value.replacingOccurrences(
+            of: "<\\s*br\\s*/?>\\s*(</\\s*(?:div|p|h[1-3]|li|pre|blockquote)\\s*>)",
+            with: "$1", options: [.regularExpression, .caseInsensitive]
+        )
+        value = value.replacingOccurrences(of: "<\\s*br\\s*/?>", with: "\n", options: [.regularExpression, .caseInsensitive])
         for tag in ["div", "p", "h1", "h2", "h3", "li", "pre", "blockquote"] {
             value = value.replacingOccurrences(of: "<\\s*/\\s*\(tag)\\s*>", with: "\n", options: [.regularExpression, .caseInsensitive])
         }

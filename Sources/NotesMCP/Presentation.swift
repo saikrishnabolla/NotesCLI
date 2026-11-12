@@ -50,10 +50,14 @@ public enum NotePresentation {
             } else if format == "markdown" {
                 let trailingNewlines = String(part.reversed().prefix { $0 == "\n" || $0 == "\r" }.reversed())
                 part.removeLast(trailingNewlines.count)
-                if run.font.bold { part = "**\(part)**" }
-                if run.font.italic { part = "*\(part)*" }
-                if run.font.strikethrough { part = "~~\(part)~~" }
-                if let link = run.link { part = "[\(part)](\(link))" }
+                var paragraphs = part.components(separatedBy: "\n").map { paragraph in
+                    var paragraph = paragraph
+                    if run.font.bold { paragraph = "**\(paragraph)**" }
+                    if run.font.italic { paragraph = "*\(paragraph)*" }
+                    if run.font.strikethrough { paragraph = "~~\(paragraph)~~" }
+                    if let link = run.link { paragraph = "[\(paragraph)](\(link))" }
+                    return paragraph
+                }
                 if let p = run.paragraph {
                     let prefix: String
                     switch p.kind {
@@ -66,9 +70,12 @@ public enum NotePresentation {
                     case .blockquote: prefix = "> "
                     default: prefix = ""
                     }
-                    if body.isEmpty || body.hasSuffix("\n") { part = String(repeating: "  ", count: max(0, p.indent)) + prefix + part }
+                    let blockPrefix = String(repeating: "  ", count: max(0, p.indent)) + prefix
+                    for index in paragraphs.indices where index > 0 || body.isEmpty || body.hasSuffix("\n") {
+                        paragraphs[index] = blockPrefix + paragraphs[index]
+                    }
                 }
-                part += trailingNewlines
+                part = paragraphs.joined(separator: "\n") + trailingNewlines
             }
             body += part
         }

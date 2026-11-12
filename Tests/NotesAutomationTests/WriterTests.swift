@@ -194,6 +194,23 @@ final class WriterTests: XCTestCase {
         XCTAssertEqual(try writer.appendToNote(id, markdown: "append").outcome, .verified)
         XCTAssertEqual(try writer.replaceBody(id, markdown: "after  ").outcome, .verified)
     }
+    func testAppendVerificationPreservesBoundaryAfterListHTML() throws {
+        let runner = StubRunner([
+            ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123","bodyBefore":"<div><b><span style=\"font-size: 24px\">T</span></b><br></div>\n<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n"}"#)
+        ])
+        let writer = ScriptingNotesWriter(runner: runner, verifier: { request in
+            XCTAssertEqual(request.bodyBefore, "T\none\ntwo\n")
+            XCTAssertEqual(request.expectedBody, "T\none\ntwo\nthree\n")
+            XCTAssertTrue(request.expectedBodyIncludesTitle)
+            return WriteVerificationResult(outcome: .verified)
+        })
+
+        XCTAssertEqual(try writer.appendToNote(id, markdown: "three").outcome, .verified)
+    }
+    func testExactHTMLTextMatchesAppleBlockBoundariesForFullBodyEdits() {
+        let html = #"<div><b><span style="font-size: 24px">T</span></b><br></div><div>before<br></div><div><br></div><h2>Section</h2><div>after</div>"#
+        XCTAssertEqual(MarkdownToNotesHTML.exactPlainText(html: html), "T\nbefore\n\nSection\nafter\n")
+    }
     func testDisabledAttachmentsDowngradeWithoutDispatch() throws {
         let runner = StubRunner([ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
         let writer = ScriptingNotesWriter(runner: runner, attachLocalImages: false)

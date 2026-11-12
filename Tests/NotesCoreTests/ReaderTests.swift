@@ -173,6 +173,22 @@ final class ReaderDecodeTests: XCTestCase {
 }
 
 final class ReaderRendererTests: XCTestCase {
+    func testOneParagraphRunCanCoverMultipleListItems() {
+        let document = NoteDocument(
+            text: "notescli-test-smoke\nPlan\none\ntwo\nthree\n",
+            runs: [
+                .init(length: 19, paragraph: .init(kind: .body), font: .init(bold: true)),
+                .init(length: 1, paragraph: .init(kind: .body)),
+                .init(length: 4, paragraph: .init(kind: .body), font: .init(bold: true)),
+                .init(length: 1, paragraph: .init(kind: .body)),
+                .init(length: 8, paragraph: .init(kind: .bulleted)),
+                .init(length: 6, paragraph: .init(kind: .body)),
+            ]
+        )
+
+        XCTAssertEqual(document.markdown(), "**notescli-test-smoke**\n**Plan**\n- one\n- two\nthree\n")
+    }
+
     func testParagraphGolden() {
         let paragraphs: [(String, ParagraphStyle)] = [
             ("Title", .init(kind:.title)),("Heading",.init(kind:.heading)),("Subheading",.init(kind:.subheading)),

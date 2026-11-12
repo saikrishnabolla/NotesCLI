@@ -97,6 +97,9 @@ static BOOL NCRequireInstanceClass(Class cls, NSArray<NSString *> *selectors, NS
 + (id)newHashtagAttachmentWithIdentifier:(NSString *)identifier hashtagText:(NSString *)text
               creatingHashtagIfNecessary:(BOOL)create note:(id)note parentAttachment:(id)parent;
 + (id)newLinkAttachmentWithIdentifier:(NSString *)identifier toNote:(id)target fromNote:(id)source parentAttachment:(id)parent;
++ (id)newDividerLineAttachmentWithIdentifier:(NSString *)identifier note:(id)note parentAttachment:(id)parent;
++ (id)newCalculateGraphExpressionAttachmentWithIdentifier:(NSString *)identifier altText:(NSString *)text note:(id)note parentAttachment:(id)parent rightToLeft:(BOOL)rightToLeft;
++ (id)newMentionAttachmentWithIdentifier:(NSString *)identifier mentionText:(NSString *)text userRecordName:(NSString *)userRecordName note:(id)note parentAttachment:(id)parent;
 + (void)renameHashtagsWithStandardizedContent:(NSString *)content newDisplayText:(NSString *)name context:(NSManagedObjectContext *)context;
 + (void)reviveOrTouchHashtag:(id)attachment;
 @end
@@ -142,7 +145,10 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *NCClassSelectors(void) {
     return @{
         @"ICNoteContext": @[@"startSharedContextWithOptions:", @"sharedContext"],
         @"ICInlineAttachment": @[@"newHashtagAttachmentWithIdentifier:hashtagText:creatingHashtagIfNecessary:note:parentAttachment:",
-                                  @"newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:", @"reviveOrTouchHashtag:"],
+                                  @"newLinkAttachmentWithIdentifier:toNote:fromNote:parentAttachment:",
+                                  @"newDividerLineAttachmentWithIdentifier:note:parentAttachment:",
+                                  @"newCalculateGraphExpressionAttachmentWithIdentifier:altText:note:parentAttachment:rightToLeft:",
+                                  @"newMentionAttachmentWithIdentifier:mentionText:userRecordName:note:parentAttachment:", @"reviveOrTouchHashtag:"],
         @"ICHashtag": @[@"renameHashtagsWithStandardizedContent:newDisplayText:context:"],
     };
 }
@@ -353,6 +359,41 @@ static void NCInstallTableStyleMethod(void) {
     return identifier;
 }
 
+static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, NSError **error) {
+    if (!NCRequireObject(item, @[@"identifier", @"typeUTI"], action, error)) return nil;
+    NSString *identifier = [item valueForKey:@"identifier"], *kind = [item valueForKey:@"typeUTI"];
+    if (!identifier.length || !kind.length) { if (error) *error = NCError([NSString stringWithFormat:@"%@ created no typed attachment", action]); return nil; }
+    if (type) *type = kind;
+    return identifier;
+}
+
++ (NSString *)makeDividerInNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {
+    Class cls = NSClassFromString(@"ICInlineAttachment");
+    NSString *selector = @"newDividerLineAttachmentWithIdentifier:note:parentAttachment:";
+    if (!NCRequireClass(cls, @[selector], @"creating divider", error)) return nil;
+    __block id item = nil;
+    if (!NCCatch(@"creating divider", error, ^{ item = [(id<NCInlineClass>)cls newDividerLineAttachmentWithIdentifier:NSUUID.UUID.UUIDString note:note parentAttachment:nil]; })) return nil;
+    return NCInlineIdentifier(item, type, @"creating divider", error);
+}
+
++ (NSString *)makeMathExpression:(NSString *)expression inNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {
+    Class cls = NSClassFromString(@"ICInlineAttachment");
+    NSString *selector = @"newCalculateGraphExpressionAttachmentWithIdentifier:altText:note:parentAttachment:rightToLeft:";
+    if (!NCRequireClass(cls, @[selector], @"creating math expression", error)) return nil;
+    __block id item = nil;
+    if (!NCCatch(@"creating math expression", error, ^{ item = [(id<NCInlineClass>)cls newCalculateGraphExpressionAttachmentWithIdentifier:NSUUID.UUID.UUIDString altText:expression note:note parentAttachment:nil rightToLeft:NO]; })) return nil;
+    return NCInlineIdentifier(item, type, @"creating math expression", error);
+}
+
++ (NSString *)makeMention:(NSString *)text userRecordName:(NSString *)userRecordName inNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {
+    Class cls = NSClassFromString(@"ICInlineAttachment");
+    NSString *selector = @"newMentionAttachmentWithIdentifier:mentionText:userRecordName:note:parentAttachment:";
+    if (!NCRequireClass(cls, @[selector], @"creating mention", error)) return nil;
+    __block id item = nil;
+    if (!NCCatch(@"creating mention", error, ^{ item = [(id<NCInlineClass>)cls newMentionAttachmentWithIdentifier:NSUUID.UUID.UUIDString mentionText:text userRecordName:userRecordName note:note parentAttachment:nil]; })) return nil;
+    return NCInlineIdentifier(item, type, @"creating mention", error);
+}
+
 + (NSString *)addFile:(NSURL *)file toNote:(NSManagedObject *)note title:(NSString *)title type:(NSString **)type error:(NSError **)error {
     if (!NCRequireObject(note, @[@"setShouldAddMediaAsynchronously:", @"addAttachmentWithFileURL:"], @"adding file", error)) return nil;
     __block NSString *identifier = nil, *kind = nil;
@@ -451,6 +492,16 @@ static void NCInstallTableStyleMethod(void) {
 }
 + (BOOL)requireSelectors:(NSArray<NSString *> *)selectors ofObject:(id)object error:(NSError **)error {
     return NCRequireObject(object, selectors, NSStringFromClass([object class]), error);
+}
++ (BOOL)checklistAutoSortEnabled {
+    id value = (__bridge_transfer id)CFPreferencesCopyAppValue(CFSTR("ICChecklistAutoSortEnabledDefaultsKey"), CFSTR("com.apple.Notes"));
+    return [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
+}
++ (BOOL)setChecklistAutoSortEnabled:(BOOL)enabled error:(NSError **)error {
+    CFPreferencesSetAppValue(CFSTR("ICChecklistAutoSortEnabledDefaultsKey"), enabled ? kCFBooleanTrue : kCFBooleanFalse, CFSTR("com.apple.Notes"));
+    if (!CFPreferencesAppSynchronize(CFSTR("com.apple.Notes"))) { if (error) *error = NCError(@"could not save the Notes checklist auto-sort preference"); return NO; }
+    if ([self checklistAutoSortEnabled] != enabled) { if (error) *error = NCError(@"Notes checklist auto-sort preference did not match after save"); return NO; }
+    return YES;
 }
 @end
 

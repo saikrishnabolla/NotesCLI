@@ -55,6 +55,16 @@ enum UnifiedNative {
         let report = NativeNotesWriter().doctor()
         return report.frameworkLoaded && report.error == nil && report.missing.isEmpty
     }
+    static func checklistAutoSort(_ o: GlobalOptions, _ w: WriteOptions, enabled: Bool) throws {
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let plan = DryRunPlan(operation: "checklistAutoSort", target: "Notes settings", arguments: ["enabled": String(enabled)], resultingHTML: nil, engine: "native")
+        var captured: NativeWriteResult?
+        let result = try SafetyExecutor.run(options: w, operation: "checklistAutoSort", arguments: ["enabled": String(enabled), "engine": "native"], allowedPaths: [], plan: plan) {
+            let value = try NativeNotesWriter().setChecklistAutoSort(enabled); captured = value; return value.writeResult
+        }
+        guard let result else { return }
+        try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)
+    }
 
     static func engine(_ options: GlobalOptions, scriptingAvailable: Bool, fake: Bool) throws -> WriteEngine {
         switch options.resolvedEngine {
@@ -179,6 +189,21 @@ enum UnifiedNative {
             NativeActionResult(try NativeNotesWriter().insertNoteLink(stableRef, target: stableTarget, text: text, position: position, allowShared: w.allowShared))
         }
     }
+    static func dividerInsert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, position: Int?) throws {
+        try noteWrite(options: o, write: w, ref: ref, operation: "insertDivider", arguments: ["position": position.map(String.init) ?? ""]) { stableRef in
+            NativeActionResult(try NativeNotesWriter().insertDivider(stableRef, position: position, allowShared: w.allowShared))
+        }
+    }
+    static func mathInsert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, expression: String, position: Int?) throws {
+        try noteWrite(options: o, write: w, ref: ref, operation: "insertMath", arguments: ["expression": expression, "position": position.map(String.init) ?? ""]) { stableRef in
+            NativeActionResult(try NativeNotesWriter().insertMathExpression(stableRef, expression: expression, position: position, allowShared: w.allowShared))
+        }
+    }
+    static func mentionInsert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, text: String, userRecordName: String, position: Int?) throws {
+        try noteWrite(options: o, write: w, ref: ref, operation: "insertMention", arguments: ["text": text, "user_record_name": userRecordName, "position": position.map(String.init) ?? ""]) { stableRef in
+            NativeActionResult(try NativeNotesWriter().insertMention(stableRef, text: text, userRecordName: userRecordName, position: position, allowShared: w.allowShared))
+        }
+    }
     static func textEdit(_ o: GlobalOptions, _ w: WriteOptions, ref: String, operation: String, start: Int, length: Int, text: String?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: operation, arguments: ["start": String(start), "length": String(length), "text": text ?? ""]) { stableRef in
             let writer = NativeNotesWriter(), range = UTF16Range(location: start, length: length)
@@ -223,6 +248,11 @@ enum UnifiedNative {
     static func tableResize(_ o: GlobalOptions, _ w: WriteOptions, ref: String, id: String, axis: String, index: Int, add: Bool) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "table\(add ? "Add" : "Remove")\(axis.capitalized)", arguments: ["attachment_id": id, "index": String(index)]) { stableRef in
             NativeActionResult(try NativeNotesWriter().resizeTable(stableRef, attachmentID: id, axis: axis, index: index, add: add, allowShared: w.allowShared))
+        }
+    }
+    static func tableConvert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, id: String, separator: String) throws {
+        try noteWrite(options: o, write: w, ref: ref, operation: "tableConvertToText", arguments: ["attachment_id": id, "separator": separator]) { stableRef in
+            NativeActionResult(try NativeNotesWriter().convertTableToText(stableRef, attachmentID: id, separator: separator, allowShared: w.allowShared))
         }
     }
     static func duplicate(_ o: GlobalOptions, _ w: WriteOptions, ref: String, title: String?) throws {
@@ -273,7 +303,7 @@ struct EngineDoctor: ParsableCommand {
 }
 
 struct ChecklistCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "checklist", subcommands: [ChecklistAdd.self, ChecklistToggle.self, ChecklistCheckAll.self, ChecklistUncheckAll.self, ChecklistClearDone.self, ChecklistList.self])
+    static let configuration = CommandConfiguration(commandName: "checklist", subcommands: [ChecklistAdd.self, ChecklistToggle.self, ChecklistCheckAll.self, ChecklistUncheckAll.self, ChecklistClearDone.self, ChecklistList.self, ChecklistAutoSort.self])
 }
 struct ChecklistAdd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "add")
@@ -306,6 +336,15 @@ struct ChecklistList: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list")
     @OptionGroup var options: GlobalOptions; @Argument var ref: String
     func run() throws { try UnifiedNative.read(options, ref: ref) { try NativeNotesWriter().checklistItems($0) } }
+}
+struct ChecklistAutoSort: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "auto-sort")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Option var enabled: Bool?
+    func run() throws {
+        if let enabled { try UnifiedNative.checklistAutoSort(options, write, enabled: enabled) }
+        else if options.json { try Output.json(["enabled": NativeNotesWriter().checklistAutoSortEnabled()]) }
+        else { Output.table(["ENABLED"], [[String(NativeNotesWriter().checklistAutoSortEnabled())]]) }
+    }
 }
 
 struct PinCommand: ParsableCommand {
@@ -382,7 +421,7 @@ struct TextFind: ParsableCommand {
     func run() throws { try UnifiedNative.read(options, ref: ref) { try NativeNotesWriter().searchOffsets($0, text: text, caseInsensitive: caseInsensitive) } }
 }
 
-struct FormatCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "format", subcommands: [FormatParagraph.self, FormatInline.self]) }
+struct FormatCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "format", subcommands: [FormatParagraph.self, FormatInline.self, FormatDivider.self, FormatMath.self, FormatMention.self]) }
 struct FormatParagraph: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "paragraph")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
@@ -405,6 +444,21 @@ struct FormatInline: ParsableCommand {
                              superscript: superscript ? 1 : (`subscript` ? -1 : (clearScript ? 0 : nil)), fontName: fontName, fontSize: fontSize,
                              highlight: highlight, clearHighlight: clearHighlight)) }
 }
+struct FormatDivider: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "divider")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var position: Int?
+    func run() throws { try UnifiedNative.dividerInsert(options, write, ref: ref, position: position) }
+}
+struct FormatMath: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "math")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var expression: String; @Option var position: Int?
+    func run() throws { try UnifiedNative.mathInsert(options, write, ref: ref, expression: expression, position: position) }
+}
+struct FormatMention: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "mention")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var text: String; @Option var userRecordName: String; @Option var position: Int?
+    func run() throws { try UnifiedNative.mentionInsert(options, write, ref: ref, text: text, userRecordName: userRecordName, position: position) }
+}
 struct AttachCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "attach")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
@@ -420,7 +474,7 @@ struct AttachmentDelete: ParsableCommand {
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String
     func run() throws { try UnifiedNative.attachmentDelete(options, write, ref: ref, id: attachmentID) }
 }
-struct TableCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableCreate.self, TableSet.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self]) }
+struct TableCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableCreate.self, TableSet.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self, TableConvertToText.self]) }
 struct TableCreate: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var rows: String; @Option var position: Int?
@@ -440,6 +494,11 @@ struct TableAddRow: TableResizeCommand { static let configuration = CommandConfi
 struct TableAddColumn: TableResizeCommand { static let configuration = CommandConfiguration(commandName: "add-column"); static let axis = "column"; static let add = true; @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String; @Option var index: Int }
 struct TableRemoveRow: TableResizeCommand { static let configuration = CommandConfiguration(commandName: "remove-row"); static let axis = "row"; static let add = false; @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String; @Option var index: Int }
 struct TableRemoveColumn: TableResizeCommand { static let configuration = CommandConfiguration(commandName: "remove-column"); static let axis = "column"; static let add = false; @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String; @Option var index: Int }
+struct TableConvertToText: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "convert-to-text")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String; @Option var separator: String = "tab"
+    func run() throws { try UnifiedNative.tableConvert(options, write, ref: ref, id: attachmentID, separator: separator) }
+}
 struct DuplicateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "duplicate")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var title: String?

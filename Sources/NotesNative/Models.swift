@@ -135,6 +135,8 @@ public enum ChecklistSelection: Sendable {
 public protocol NotesNativeWriting {
     func doctor() -> NativeDoctorReport
     func checklistItems(_ ref: String) throws -> [ChecklistItem]
+    func checklistAutoSortEnabled() -> Bool
+    func setChecklistAutoSort(_ enabled: Bool) throws -> NativeWriteResult
     func insertChecklist(_ ref: String, text: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func toggleChecklist(_ ref: String, selection: ChecklistSelection, done: Bool?, allowShared: Bool) throws -> NativeWriteResult
     func setAllChecklist(_ ref: String, done: Bool, allowShared: Bool) throws -> NativeWriteResult
@@ -145,6 +147,9 @@ public protocol NotesNativeWriting {
     func renameTag(_ tag: String, to: String, expectedCount: Int, allowShared: Bool) throws -> NativeWriteResult
     func deleteTag(_ tag: String, expectedCount: Int, allowShared: Bool) throws -> NativeWriteResult
     func insertNoteLink(_ ref: String, target: String, text: String?, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func insertDivider(_ ref: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func insertMathExpression(_ ref: String, expression: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func insertMention(_ ref: String, text: String, userRecordName: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func links(_ ref: String) throws -> [NativeNoteLink]
     func backlinks(_ ref: String) throws -> [NativeNoteLink]
     func insertText(_ ref: String, text: String, position: Int, allowShared: Bool) throws -> NativeWriteResult
@@ -163,11 +168,13 @@ public protocol NotesNativeWriting {
     func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func editTable(_ ref: String, attachmentID: String, row: Int, column: Int, text: String, allowShared: Bool) throws -> NativeWriteResult
     func resizeTable(_ ref: String, attachmentID: String, axis: String, index: Int, add: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func convertTableToText(_ ref: String, attachmentID: String, separator: String, allowShared: Bool) throws -> NativeWriteResult
     func duplicate(_ ref: String, title: String?, allowShared: Bool) throws -> NativeWriteResult
     func restore(_ ref: String, folder: String?, allowShared: Bool) throws -> NativeWriteResult
     func moveFolder(_ ref: String, parent: String?, allowShared: Bool) throws -> NativeWriteResult
     func createSmartFolder(name: String, tags: [String], matchAll: Bool) throws -> NativeWriteResult
     func renameSmartFolder(_ ref: String, name: String, expectedCount: Int) throws -> NativeWriteResult
+    func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult
     func deleteSmartFolder(_ ref: String, expectedCount: Int) throws -> NativeWriteResult
     func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult
 }

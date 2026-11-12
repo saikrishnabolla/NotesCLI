@@ -138,6 +138,9 @@ public final class MCPServer {
                 t("add_url", "Add a URL link or native preview card.", ["ref", "url"], ["ref": string, "url": string, "card": bool, "position": integer], write: true, native: true),
                 t("smart_folder_create", "Create a tag-based Smart Folder.", ["name", "tags", "match"], ["name": string, "tags": strings, "match": ["type": "string", "enum": ["any", "all"]]], write: true, native: true),
                 t("smart_folder_rename", "Rename one Smart Folder after an expected-count check.", ["ref", "name", "expected_count"], ["ref": string, "name": string, "expected_count": integer], write: true, native: true),
+                // MARK: w4-format begin
+                t("smart_folder_edit_rules", "Replace a Smart Folder query JSON after an expected-count check.", ["ref", "query_json", "expected_count"], ["ref": string, "query_json": string, "expected_count": integer], write: true, native: true, destructive: true),
+                // MARK: w4-format end
                 t("smart_folder_delete", "Delete one Smart Folder after an expected-count check.", ["ref", "expected_count"], ["ref": string, "expected_count": integer], write: true, native: true, destructive: true),
                 // MARK: w3-write end
                 t("checklist_list", "List native checklist items.", ["ref"], ["ref": string], native: true),
@@ -146,6 +149,9 @@ public final class MCPServer {
                 t("checklist_check_all", "Check all native checklist items.", ["ref"], ["ref": string], write: true, native: true),
                 t("checklist_uncheck_all", "Uncheck all native checklist items.", ["ref"], ["ref": string], write: true, native: true),
                 t("checklist_clear_done", "Delete completed checklist items.", ["ref"], ["ref": string], write: true, native: true, destructive: true),
+                // MARK: w4-format begin
+                t("checklist_auto_sort", "Set whether Notes moves checked checklist items to the bottom.", ["enabled"], ["enabled": bool], write: true, native: true),
+                // MARK: w4-format end
                 t("pin_note", "Pin a note.", ["ref"], ["ref": string], write: true, native: true),
                 t("unpin_note", "Unpin a note.", ["ref"], ["ref": string], write: true, native: true),
                 t("tag_add", "Add a native tag.", ["ref", "tag"], ["ref": string, "tag": string, "position": integer], write: true, native: true),
@@ -161,6 +167,10 @@ public final class MCPServer {
                 // MARK: w4-format begin
                 t("format_paragraph", "Apply native paragraph formatting.", ["ref", "start", "length", "style"], ["ref": string, "start": integer, "length": integer, "style": string, "indent": integer, "alignment": string, "writing_direction": string, "collapsed": bool], write: true, native: true),
                 t("format_inline", "Apply native inline formatting.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "clear_link": bool, "clear_color": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number"], "highlight": string, "clear_highlight": bool], write: true, native: true),
+                t("insert_divider", "Insert a native divider line.", ["ref"], ["ref": string, "position": integer], write: true, native: true),
+                t("insert_math", "Insert a native math graph expression.", ["ref", "expression"], ["ref": string, "expression": string, "position": integer], write: true, native: true),
+                t("insert_mention", "Insert a participant mention in a shared note.", ["ref", "text", "user_record_name"], ["ref": string, "text": string, "user_record_name": string, "position": integer], write: true, native: true),
+                t("table_convert_to_text", "Replace a native table with tab- or comma-separated text.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string, "separator": ["type": "string", "enum": ["tab", "comma"]]], write: true, native: true, destructive: true),
                 // MARK: w4-format end
                 t("attach_file", "Insert a file or positioned image.", ["ref", "path"], ["ref": string, "path": string, "position": integer, "view": string], write: true, native: true),
                 t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),

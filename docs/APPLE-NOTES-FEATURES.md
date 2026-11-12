@@ -34,63 +34,63 @@ Verified on macOS 27.2.1 on 2026-11-11. Apple documents the user-facing features
 | Numbered lists and starting number | Done | Done | Style and starting item number are preserved. |
 | Nested lists | Done | Done | List style plus indent level. |
 | Checklists | Done | Done | Native todo paragraph state, including checked state. |
-| Checklist sorting preference | Partial | Missing | Item state is available; the Notes setting that moves checked items is not exposed. |
+| Checklist sorting preference | Done | Done | Reads and writes `ICChecklistAutoSortEnabledDefaultsKey` for Notes, with exact preference readback. |
 | Native tables | Done | Done | Rows, columns, identities, and text support readback and structural edits. |
 | Add or remove table rows and columns | Done | Done | Native table operations. |
 | Table cell text | Done | Done | Cells can be read and set by row and column. |
 | Table cell rich formatting | Partial | Partial | Cell text is complete; arbitrary run attributes inside every cell are not yet round-tripped. |
-| Convert table to text | Done | Missing | Markdown/CSV export is available; no in-note destructive conversion command. |
+| Convert table to text | Done | Done | `table convert-to-text` replaces the native table marker with tab- or comma-separated text and verifies the table was deleted. |
 | External web links | Done | Done | Native link runs retain URL and label. |
 | Native note-to-note links | Done | Done | Target UUID and display text are preserved. |
 | Paragraph links and persistent anchors | Done | Done | Paragraph UUIDs and local anchor resolution are supported. |
 | URL preview cards | Done | Done | Native URL cards are decoded and inserted. |
 | Native tags | Done | Done | Tag identity, counts, add, replace, and remove are supported. |
-| Mentions | Done | Missing | Stored participant identity is rendered; mention creation is not implemented. |
+| Mentions | Done | Partial | `ICInlineAttachment.newMentionAttachmentWithIdentifier:mentionText:userRecordName:note:parentAttachment:` creates mentions in shared notes. NotesCLI requires `--allow-shared`; participant notification behavior was not verified in an isolated account. |
 | Photos and images | Done | Done | Metadata, originals, previews, insertion, and export. |
 | Videos | Done | Done | Original media and preview frames are available; files can be inserted. |
 | PDFs | Done | Done | Original, preview, indexed text, insertion, and export. |
 | General file attachments | Done | Done | Original bytes and metadata are preserved. |
 | Maps and location cards | Done | Partial | Existing cards are retained; a file or URL can be attached, but native Maps-card construction is absent. |
 | Contact cards | Done | Partial | Existing vCards are retained; generic attachment insertion does not create every native contact-card variant. |
-| Scanned documents | Done | Missing | Ordered pages, OCR, originals, and PDF export work; document-camera capture is not implemented. |
-| Image and PDF markup | Partial | Not possible | Flattened output can be read; Notes does not expose a stable local API for editable markup graphs. |
-| Classic drawings and sketches | Done | Not possible | Classic strokes and SVG or raster fallback are readable; no safe native stroke-object constructor is exposed. |
-| Modern Paper drawings | Partial | Not possible | Fallback generations and handwriting are readable; the private Paper editing model has no stable checked write path. |
+| Scanned documents | Done | Not possible | Runtime inspection found `addGalleryAttachmentWithIdentifier:` and `addPaperDocumentAttachmentWithIdentifier:subtype:`, but no selector that imports image or PDF bytes into a complete scan gallery with its required mergeable data. |
+| Image and PDF markup | Partial | Not possible | Runtime selector listings expose rendered assets but no constructor or setter for an editable markup graph. |
+| Classic drawings and sketches | Done | Not possible | Runtime inspection of drawing attachment classes found read/export properties but no stroke-object constructor that can be selector-checked. |
+| Modern Paper drawings | Partial | Not possible | `addPaperDocumentAttachmentWithIdentifier:subtype:` creates only a shell; no selector supplies the editable Paper mergeable-data payload. |
 | Audio file attachments | Done | Done | Original audio can be fetched, exported, and inserted. |
 | Native audio recordings | Done | Partial | Recording fragments and metadata are decoded; inserting an audio file does not create the full recorder object. |
-| Stored audio transcripts | Done | Not possible | Text, timing, speakers, and fragments are decoded; Notes owns transcript generation and storage. |
-| Recording summaries and call metadata | Done | Not possible | Stored summaries and call fields are readable; generation is a Notes and system service. |
-| Math expressions, results, and graphs | Done | Missing | Inline math objects and alternate text are retained; native calculation-object creation is not implemented. |
-| Divider lines | Done | Missing | Divider inline objects are retained; native insertion is not implemented. |
+| Stored audio transcripts | Done | Not possible | Runtime transcript classes expose stored segments, timing, and speakers, but no checked constructor or note setter for generated transcript data. |
+| Recording summaries and call metadata | Done | Not possible | Runtime listings expose stored summary and call fields but no constructor or generation selector. |
+| Math expressions, results, and graphs | Done | Partial | `newCalculateGraphExpressionAttachmentWithIdentifier:altText:note:parentAttachment:rightToLeft:` creates a native expression object. Notes still owns result evaluation and graph rendering. |
+| Divider lines | Done | Done | `newDividerLineAttachmentWithIdentifier:note:parentAttachment:` creates the native divider and exact native and SQLite readback verifies it. |
 | Pin and unpin | Done | Done | Native pinned state is readable and writable. |
-| Locked-note state | Done | Not possible | Locked notes are detected without content access; encryption credentials and key handling are not safely exposed. |
-| Share state and participants | Done | Not possible | Participants and permissions are readable; CloudKit invitation and access-right mutation has no stable local contract. |
+| Locked-note state | Done | Not possible | `ICNote` exposes lock-state getters, but runtime inspection found no authenticated unlock or key-management write contract suitable for a background CLI. |
+| Share state and participants | Done | Not possible | Share and participant objects expose read properties; runtime selector listings found no stable invitation, removal, or access-right mutation contract. |
 | Edit an existing shared note | Done | Done | Native writes require an explicit shared-note opt-in and reject read-only or unknown roles. |
-| Collaboration activity and changes | Partial | Not possible | Current share metadata is readable; Notes activity UI and notification history are not a stable note data API. |
+| Collaboration activity and changes | Partial | Not possible | Notes.app contains activity-view controllers, but NotesShared exposes no persistent activity-history fetch or mutation selector. |
 | Accounts and default location | Done | Partial | Accounts are listed and selected for writes; account creation and settings remain system-owned. |
 | Folders and subfolders | Done | Done | Create, rename, move, list, and guarded recursive delete are supported. |
 | Recently Deleted | Done | Done | Listing and restore are supported; permanent deletion is intentionally excluded. |
-| Smart Folders and rules | Done | Missing | Rules and matching notes are decoded; Smart Folder creation and rule editing are not implemented. |
+| Smart Folders and rules | Done | Partial | Tag-rule create, rename, and delete are supported. `ICFolder.smartFolderQueryJSON` and `setSmartFolderQueryJSON:` support guarded raw rule replacement for broader predicates; typed rule editing and isolated live verification remain open. |
 | Quick Notes | Done | Partial | Quick Notes are detected and their folder can be targeted; hot-corner and capture metadata are app-owned. |
-| Folder list and gallery views | Not possible | Not possible | These are Notes.app window states, not persistent note or folder content. |
-| Folder sort and group options | Partial | Not possible | NotesCLI can sort query results; it does not read or mutate Notes.app window preferences. |
-| Note display order | Done | Partial | Stored display order is read and exported; manual UI reordering is not implemented. |
-| Search by title and body | Done | Not possible | Search is implemented; there is no note content to write for this feature. |
-| Search filters and Boolean queries | Done | Not possible | Dates, tags, pins, folders, and attachment kinds are queryable. |
-| OCR and image labels | Done | Not possible | Stored recognition is decoded and indexed; recognition generation belongs to Notes and Vision services. |
-| Handwriting recognition | Done | Not possible | Stored handwriting text is decoded and indexed; recognition generation is system-owned. |
-| PDF text search | Done | Not possible | Cached PDF text is indexed; source PDFs remain unchanged. |
-| Audio transcript search | Done | Not possible | Stored transcript text is indexed; search has no write operation. |
+| Folder list and gallery views | Not possible | Not possible | Runtime inspection found these modes only on Notes.app view-controller selectors, with no NotesShared folder property to read or write. |
+| Folder sort and group options | Partial | Partial | NotesCLI sorts query results. `ICFolder.customNoteSortType` and `setCustomNoteSortType:` exist, but persistent per-folder sort and grouping are not exposed as commands. |
+| Note display order | Done | Partial | Stored display order is read and exported. SQLite has `ZSORTORDER`, but runtime inspection found no checked `ICNote.setSortOrder:` selector for manual or pinned ordering. |
+| Search by title and body | Done | Not possible | NotesShared exposes fetch/search paths, but search is a read operation with no persistent object to mutate. |
+| Search filters and Boolean queries | Done | Not possible | Dates, tags, pins, folders, and attachment kinds are query predicates; runtime inspection found no writable query object on notes. |
+| OCR and image labels | Done | Not possible | Attachment recognition properties are readable, but runtime listings found no selector that requests or writes Notes' OCR and label payloads. |
+| Handwriting recognition | Done | Not possible | Paper attachments expose stored handwriting text, but no selector starts recognition or writes its result. |
+| PDF text search | Done | Not possible | NotesShared exposes cached PDF text for reads but no setter or indexing request selector. |
+| Audio transcript search | Done | Not possible | Transcript text is readable; search has no persistent write target or runtime mutation selector. |
 | Import plain text, HTML, and Markdown | Done | Done | New and existing notes support file, standard input, and Markdown workflows. |
 | Export Markdown and HTML | Done | Done | Folder trees and original attachments are supported. |
 | Export JSON, NDJSON, and SQLite | Done | Done | Structured and normalized exports are supported. |
 | Export PDF, DOCX, RTF, and EPUB | Done | Done | PDF supports combined output; EPUB preserves folder chapters. |
 | Export Bear, Joplin, Quiver, TextBundle, and ZIP | Done | Done | Merged export formats are reflected here. |
-| Print | Not possible | Not possible | Printing is a Notes.app or system print-panel action with no stable headless Notes API. |
-| Widgets | Not possible | Not possible | Widgets are system UI, not note data readable or writable by NotesCLI. |
-| Note notifications | Partial | Not possible | Collaboration metadata may be present; delivery and notification settings are system-owned. |
-| Notes settings | Partial | Not possible | Some effects are visible in stored data; Notes.app preferences are not a stable supported API. |
-| Default account and formatting settings | Partial | Not possible | The effective account can be read; changing Notes defaults is app-owned. |
+| Print | Not possible | Not possible | Notes.app exposes print-panel actions, but runtime inspection found no headless NotesShared print read or write API. |
+| Widgets | Not possible | Not possible | Widget classes live in system UI extensions; NotesShared exposes no widget state property or mutation selector. |
+| Note notifications | Partial | Not possible | Collaboration metadata can be read, but runtime listings found no NotesShared notification-delivery setting or setter. |
+| Notes settings | Partial | Partial | Checklist auto-sort is readable and writable through `ICChecklistAutoSortEnabledDefaultsKey`; no stable NotesShared contract covers every app preference. |
+| Default account and formatting settings | Partial | Not possible | The effective account is readable; runtime inspection found no checked NotesShared setter for the default account or default paragraph style. |
 | Note links and Share-sheet capture | Done | Partial | Deep links and inserted content work; invoking another app's Share sheet is outside the CLI. |
 | Open notes, folders, accounts, and attachments | Done | Done | NotesCLI can ask Notes or Finder to reveal the selected object. |
 | Sync and upload state | Done | Done | State is readable; writes can request upload and wait for bounded acknowledgement. |

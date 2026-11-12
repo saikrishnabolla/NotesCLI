@@ -169,7 +169,7 @@ struct WaitSyncCommand: ParsableCommand {
 
 enum TableReadFormat: String, ExpressibleByArgument { case markdown, json, csv }
 struct ReadTableCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableShow.self, TableCreate.self, TableSet.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self])
+    static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableShow.self, TableCreate.self, TableSet.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self, TableConvertToText.self])
 }
 struct TableShow: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "show")

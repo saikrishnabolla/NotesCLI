@@ -30,6 +30,14 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(makeTag(_:in:));
 + (nullable NSString *)makeNoteLinkTo:(NSManagedObject *)target from:(NSManagedObject *)source text:(NSString *)text error:(NSError **)error
     NS_SWIFT_NAME(makeNoteLink(to:from:text:));
++ (nullable NSString *)makeDividerInNote:(NSManagedObject *)note type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
+    NS_SWIFT_NAME(makeDivider(in:type:));
++ (nullable NSString *)makeMathExpression:(NSString *)expression inNote:(NSManagedObject *)note
+                                      type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
+    NS_SWIFT_NAME(makeMathExpression(_:in:type:));
++ (nullable NSString *)makeMention:(NSString *)text userRecordName:(NSString *)userRecordName inNote:(NSManagedObject *)note
+                               type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
+    NS_SWIFT_NAME(makeMention(_:userRecordName:in:type:));
 + (nullable NSString *)addFile:(NSURL *)file toNote:(NSManagedObject *)note title:(NSString *)title
                            type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
     NS_SWIFT_NAME(addFile(_:to:title:type:));
@@ -59,6 +67,8 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(requireInstanceSelectors(_:className:));
 + (BOOL)requireSelectors:(NSArray<NSString *> *)selectors ofObject:(id)object error:(NSError **)error
     NS_SWIFT_NAME(requireSelectors(_:of:));
++ (BOOL)checklistAutoSortEnabled;
++ (BOOL)setChecklistAutoSortEnabled:(BOOL)enabled error:(NSError **)error NS_SWIFT_NAME(setChecklistAutoSort(_:));
 @end
 
 @interface NCBodyEditor : NSObject

@@ -136,7 +136,7 @@ struct LinkAddURL: ParsableCommand {
 enum SmartFolderMatch: String, ExpressibleByArgument { case any, all }
 
 struct SmartFolderCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "smart-folder", subcommands: [SmartFolderCreate.self, SmartFolderRename.self, SmartFolderDelete.self])
+    static let configuration = CommandConfiguration(commandName: "smart-folder", subcommands: [SmartFolderCreate.self, SmartFolderRename.self, SmartFolderEditRules.self, SmartFolderDelete.self])
 }
 
 struct SmartFolderCreate: ParsableCommand {
@@ -191,6 +191,24 @@ struct SmartFolderRename: ParsableCommand {
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var ref: String; @Argument var name: String; @Option var expectedCount: Int
     func run() throws { try smartFolderWrite(options: options, write: write, ref: ref, name: name, expected: expectedCount, delete: false) }
+}
+
+struct SmartFolderEditRules: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "edit-rules")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Option var queryJSON: String; @Option var expectedCount: Int
+    func run() throws {
+        let backend = try options.writable(); _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        let folder = try SafetyExecutor.folder(ref, reader: backend.reader)
+        guard let folder, folder.isSmartFolder else { throw NotesError("smart_folder_not_found", "No Smart Folder matches the reference.") }
+        let plan = DryRunPlan(operation: "smartFolderEditRules", target: folder.id, arguments: ["query_json": queryJSON, "expected_count": String(expectedCount)], resultingHTML: nil, engine: "native")
+        var captured: NativeWriteResult?
+        let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditRules", arguments: ["ref": folder.id, "query_json": queryJSON, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
+            let value = try NativeNotesWriter().editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
+        }
+        guard let result else { return }
+        try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: options)
+    }
 }
 
 struct SmartFolderDelete: ParsableCommand {

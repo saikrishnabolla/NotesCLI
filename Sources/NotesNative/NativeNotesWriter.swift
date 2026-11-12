@@ -309,6 +309,15 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func checklistItems(_ ref: String) throws -> [ChecklistItem] {
         try performRead { context in try checklist(note(ref, in: context)) }
     }
+    public func checklistAutoSortEnabled() -> Bool { NCNotesRuntime.checklistAutoSortEnabled() }
+    public func setChecklistAutoSort(_ enabled: Bool) throws -> NativeWriteResult {
+        try performWrite { _ in
+            do { try NCNotesRuntime.setChecklistAutoSort(enabled); operation?.committed = true }
+            catch { throw nativeError(error) }
+            let readback = NCNotesRuntime.checklistAutoSortEnabled()
+            return globalResult(native: ["enabled": String(readback)], nativeVerified: readback == enabled)
+        }
+    }
 
     fileprivate func save(_ context: NSManagedObjectContext, notes: [NSManagedObject]) throws {
         do { try NCNotesRuntime.save(context) }
@@ -727,6 +736,57 @@ public final class NativeNotesWriter: NotesNativeWriting {
             n.document?.runs.filter { $0.attachment?.id == attachmentID && $0.attachment?.url?.localizedCaseInsensitiveContains(destinationID) == true }.count == 1 ? ["target": destinationID, "attachmentID": attachmentID] : nil
         }, mismatch: "Attachment \(attachmentID) did not point to note \(destinationID) exactly once.")
         }
+    }
+
+    fileprivate enum InlineObjectRequest {
+        case divider
+        case math(String)
+        case mention(text: String, userRecordName: String)
+    }
+
+    fileprivate func insertInlineObject(_ ref: String, request: InlineObjectRequest, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+        let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
+        if case .mention = request {
+            guard isShared(note) else { throw NotesError("mention_requires_shared_note", "Mentions are supported only in shared notes.") }
+            guard allowShared else { throw NotesError("shared_write_refused", "Creating a mention changes a shared note. Pass --allow-shared.") }
+        }
+        var attachmentID = "", kind: NSString?
+        do {
+            let editor = try NCBodyEditor(note: note); try editor.prepare(["insert"])
+            switch request {
+            case .divider: attachmentID = try NCNotesRuntime.makeDivider(in: note, type: &kind)
+            case .math(let expression):
+                guard !expression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw NotesError("invalid_math_expression", "Math expression cannot be empty.") }
+                attachmentID = try NCNotesRuntime.makeMathExpression(expression, in: note, type: &kind)
+            case .mention(let text, let userRecordName):
+                guard !text.isEmpty, !userRecordName.isEmpty else { throw NotesError("invalid_mention", "Mention text and user record name are required.") }
+                attachmentID = try NCNotesRuntime.makeMention(text, userRecordName: userRecordName, in: note, type: &kind)
+            }
+            try insertMarker(editor, original: editor.original, id: attachmentID, type: kind as String? ?? "public.data", position: position)
+            try editor.finish(); try save(context, notes: [note])
+        } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+        let fresh = try self.note(id(note), in: context), placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID }
+        return result(id(note), native: ["attachmentID": attachmentID, "type": kind as String? ?? ""], nativeVerified: placements.count == 1,
+                      sqlite: { decoded in
+            guard let attachment = decoded.attachments.first(where: { $0.id == attachmentID }) else { return nil }
+            switch request {
+            case .divider: return attachment.isDivider == true ? ["attachmentID": attachmentID, "type": attachment.typeUTI] : nil
+            case .math(let expression): return attachment.mathExpression == expression || attachment.graphExpression == expression ? ["attachmentID": attachmentID, "expression": expression] : nil
+            case .mention(_, let userRecordName): return attachment.participantUserID == userRecordName || attachment.participantID == userRecordName ? ["attachmentID": attachmentID, "userRecordName": userRecordName] : nil
+            }
+        }, mismatch: "Inline attachment \(attachmentID) did not match after insertion.")
+        }
+    }
+
+    public func insertDivider(_ ref: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        try insertInlineObject(ref, request: .divider, position: position, allowShared: allowShared)
+    }
+    public func insertMathExpression(_ ref: String, expression: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        try insertInlineObject(ref, request: .math(expression), position: position, allowShared: allowShared)
+    }
+    public func insertMention(_ ref: String, text: String, userRecordName: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        try insertInlineObject(ref, request: .mention(text: text, userRecordName: userRecordName), position: position, allowShared: allowShared)
     }
 
     fileprivate func linkRows(_ source: NSManagedObject) throws -> [NativeNoteLink] {
@@ -1191,6 +1251,29 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func convertTableToText(_ ref: String, attachmentID: String, separator: String, allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+        guard separator == "tab" || separator == "comma" else { throw NotesError("invalid_separator", "Separator must be tab or comma.") }
+        let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
+        let attachment = try table(attachmentID, note: note, context: context), rows = try tableRows(attachment)
+        let delimiter = separator == "tab" ? "\t" : ","
+        let text = rows.map { $0.joined(separator: delimiter) }.joined(separator: "\n")
+        guard let marker = attachmentMarkers(try body(note)).first(where: { $0.2 == attachmentID }) else { throw NotesError("table_marker_not_found", "The table marker is missing from the note body.") }
+        do {
+            let editor = try NCBodyEditor(note: note); try editor.begin(["delete", "insert"]); try editor.delete(marker.0)
+            if !text.isEmpty { try editor.insert(NSAttributedString(string: text), at: UInt(marker.0.location)) }
+            try NCNotesRuntime.markForDeletion(attachment); try editor.finish(); try save(context, notes: [note])
+        } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+        let fresh = try self.note(id(note), in: context), nativeBody = try body(fresh)
+        let nativeOK = attachmentMarkers(nativeBody).allSatisfy { $0.2 != attachmentID } && nativeBody.string.contains(text)
+        return result(id(note), native: ["tableID": attachmentID, "text": text, "separator": separator], nativeVerified: nativeOK,
+                      sqlite: { decoded in
+            guard decoded.document?.tables?[attachmentID] == nil, decoded.document?.text.contains(text) == true else { return nil }
+            return ["tableID": attachmentID, "text": text]
+        }, mismatch: "Table \(attachmentID) was not replaced with text exactly once.")
+        }
+    }
+
     public func duplicate(_ ref: String, title newTitle: String?, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         let source = try note(ref, in: context); try guardWritable(source, allowShared: allowShared); try refreshIfStale(source, protectsBody: false); guard let folder = value(source, "folder") as? NSManagedObject else { throw NotesError("folder_not_found", "The source note has no folder.") }
@@ -1295,6 +1378,27 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 guard let row = try SQLiteNotesStore(refresh: true).folders(account: nil).first(where: { $0.id.caseInsensitiveCompare(folderID) == .orderedSame }),
                       row.isSmartFolder, row.name == cleanName else { return nil }
                 return ["folderID": row.id, "name": row.name]
+            })
+        }
+    }
+
+    public func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult {
+        try performWrite { context in
+            guard let data = queryJSON.data(using: .utf8), (try? JSONSerialization.jsonObject(with: data)) != nil else { throw NotesError("invalid_smart_folder_query", "Smart Folder query must be valid JSON.") }
+            let matches = try matchingSmartFolders(ref, in: context)
+            guard matches.count == expectedCount else { throw NotesError("expected_count_mismatch", "Found \(matches.count) matching Smart Folders, not \(expectedCount).") }
+            guard expectedCount == 1, let folder = matches.first else { throw NotesError("invalid_expected_count", "Smart Folder rule editing requires --expected-count 1.") }
+            let folderID = id(folder)
+            do {
+                try NCNotesRuntime.requireSelectors(["smartFolderQueryJSON", "setSmartFolderQueryJSON:", "updateChangeCountWithReason:"], of: folder)
+                try NCNotesRuntime.setValue(queryJSON, forKey: "smartFolderQueryJSON", of: folder)
+                try NCNotesRuntime.save(context); operation?.committed = true; operation?.folderID = folderID; context.refreshAllObjects()
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            let nativeQuery = value(folder, "smartFolderQueryJSON") as? String
+            return globalResult(native: ["folderID": folderID, "queryJSON": nativeQuery ?? ""], nativeVerified: nativeQuery == queryJSON, folderID: folderID,
+                                sqlite: {
+                guard let row = try SQLiteNotesStore(refresh: true).folders(account: nil).first(where: { $0.id.caseInsensitiveCompare(folderID) == .orderedSame }), row.smartFolderQuery == queryJSON else { return nil }
+                return ["folderID": folderID, "queryJSON": queryJSON]
             })
         }
     }

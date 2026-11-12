@@ -79,6 +79,8 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
         return try result(writer.createSmartFolder(name: string("name")!, tags: arguments["tags"] as! [String], matchAll: string("match") == "all"))
     case "smart_folder_rename":
         return try result(writer.renameSmartFolder(ref(), name: string("name")!, expectedCount: integer("expected_count")!))
+    case "smart_folder_edit_rules":
+        return try result(writer.editSmartFolderRules(ref(), queryJSON: string("query_json")!, expectedCount: integer("expected_count")!))
     case "smart_folder_delete":
         return try result(writer.deleteSmartFolder(ref(), expectedCount: integer("expected_count")!))
     case "checklist_list": return try MCPNativeResult(value: writer.checklistItems(ref()))
@@ -92,6 +94,7 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
     case "checklist_check_all": return try result(writer.setAllChecklist(ref(), done: true, allowShared: (boolean("allow_shared") ?? false)))
     case "checklist_uncheck_all": return try result(writer.setAllChecklist(ref(), done: false, allowShared: (boolean("allow_shared") ?? false)))
     case "checklist_clear_done": return try result(writer.deleteCompleted(ref(), allowShared: (boolean("allow_shared") ?? false)))
+    case "checklist_auto_sort": return try result(writer.setChecklistAutoSort(boolean("enabled")!))
     case "pin_note": return try result(writer.setPinned(ref(), pinned: true, allowShared: (boolean("allow_shared") ?? false)))
     case "unpin_note": return try result(writer.setPinned(ref(), pinned: false, allowShared: (boolean("allow_shared") ?? false)))
     case "tag_add": return try result(writer.addTag(ref(), tag: string("tag")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
@@ -117,6 +120,9 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
                                   superscript: script, fontName: string("font_name"), fontSize: (arguments["font_size"] as? NSNumber)?.doubleValue,
                                   highlight: string("highlight").flatMap(HighlightColor.init(rawValue:)), clearHighlight: boolean("clear_highlight") ?? false)
         return try result(writer.setInlineFormat(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format, allowShared: (boolean("allow_shared") ?? false)))
+    case "insert_divider": return try result(writer.insertDivider(ref(), position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
+    case "insert_math": return try result(writer.insertMathExpression(ref(), expression: string("expression")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
+    case "insert_mention": return try result(writer.insertMention(ref(), text: string("text")!, userRecordName: string("user_record_name")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "attach_file":
         let value = try writer.insertFile(ref(), file: URL(fileURLWithPath: string("path")!), position: integer("position"), imageView: string("view"), allowShared: (boolean("allow_shared") ?? false))
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
@@ -125,6 +131,7 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any]) throws ->
         guard let rows = arguments["rows"] as? [[String]] else { throw NotesError("invalid_arguments", "rows must be an array of string arrays.") }
         return try result(writer.createTable(ref(), rows: rows, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "table_set": return try result(writer.editTable(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!, text: string("text")!, allowShared: (boolean("allow_shared") ?? false)))
+    case "table_convert_to_text": return try result(writer.convertTableToText(ref(), attachmentID: string("attachment_id")!, separator: string("separator") ?? "tab", allowShared: (boolean("allow_shared") ?? false)))
     case "table_add_row", "table_remove_row", "table_add_column", "table_remove_column":
         let axis = tool.contains("row") ? "row" : "column", add = tool.contains("add")
         return try result(writer.resizeTable(ref(), attachmentID: string("attachment_id")!, axis: axis, index: integer("index")!, add: add, allowShared: (boolean("allow_shared") ?? false)))

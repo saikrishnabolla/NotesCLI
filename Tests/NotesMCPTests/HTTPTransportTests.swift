@@ -233,6 +233,25 @@ final class HTTPTransportTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(calls.value, 1)
     }
 
+    func testProtocolErrorsUseTheirRequiredHTTPStatus() throws {
+        let server = try makeServer { request in
+            let method = request["method"] as? String
+            let code = method == "missing" ? -32601 : -32022
+            return ["jsonrpc": "2.0", "id": request["id"] ?? NSNull(),
+                    "error": ["code": code, "message": "Protocol error"]]
+        }
+        let endpoint = try server.start()
+        defer { server.stop() }
+
+        let missingBody = modernBody(id: 1, method: "missing")
+        let missing = try exchange(port: endpoint.port, request: authorizedRequest(body: missingBody, method: "missing"))
+        XCTAssertTrue(missing.hasPrefix("HTTP/1.1 404"), missing)
+
+        let versionBody = modernBody(id: 2, method: "ping")
+        let unsupported = try exchange(port: endpoint.port, request: authorizedRequest(body: versionBody, method: "ping"))
+        XCTAssertTrue(unsupported.hasPrefix("HTTP/1.1 400"), unsupported)
+    }
+
     func testDefaultBodyLimitIsFourMiBAndHostIsMandatory() throws {
         let configuration = try HTTPMCPServer.Configuration(
             tokenProvider: { "token" },

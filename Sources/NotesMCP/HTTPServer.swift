@@ -361,7 +361,7 @@ public final class HTTPMCPServer: @unchecked Sendable {
             Self.sendResponse(descriptor, status: 500, body: Self.errorBody(code: -32603, message: "Internal error"), headers: protocolHeaders)
             return
         }
-        Self.sendResponse(descriptor, status: 200, body: responseData, headers: protocolHeaders)
+        Self.sendResponse(descriptor, status: Self.httpStatus(for: response), body: responseData, headers: protocolHeaders)
     }
 
     private func readRequestHead(_ descriptor: Int32) throws -> Data {
@@ -532,6 +532,15 @@ public final class HTTPMCPServer: @unchecked Sendable {
         path == "/health" || path == "/notescli/health"
     }
 
+    private static func httpStatus(for response: [String: Any]) -> Int {
+        guard let error = response["error"] as? [String: Any], let code = error["code"] as? Int else { return 200 }
+        switch code {
+        case -32601: return 404
+        case -32700, -32600, -32602, -32020, -32021, -32022: return 400
+        default: return 500
+        }
+    }
+
     private static func errorBody(code: Int, message: String) -> Data? {
         jsonData([
             "jsonrpc": "2.0",
@@ -557,6 +566,7 @@ public final class HTTPMCPServer: @unchecked Sendable {
         case 400: reason = "Bad Request"
         case 401: reason = "Unauthorized"
         case 403: reason = "Forbidden"
+        case 404: reason = "Not Found"
         case 405: reason = "Method Not Allowed"
         case 406: reason = "Not Acceptable"
         case 408: reason = "Request Timeout"

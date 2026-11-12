@@ -75,7 +75,7 @@ ZIP="$OUTPUT_DIR/notescli-$VERSION-macos-universal.zip"
 TARBALL="$OUTPUT_DIR/notescli-$VERSION-macos-universal.tar.gz"
 CHECKSUMS="$OUTPUT_DIR/notescli-$VERSION-macos-universal.sha256"
 rm -f -- "$ZIP" "$TARBALL" "$CHECKSUMS"
-ditto -c -k --keepParent "$STAGING/notescli" "$ZIP"
+(cd "$STAGING" && zip -q -X "$ZIP" notescli)
 COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$STAGING" notescli
 (cd "$OUTPUT_DIR" && shasum -a 256 "$(basename "$ZIP")" "$(basename "$TARBALL")") > "$CHECKSUMS"
 

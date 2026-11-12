@@ -363,10 +363,25 @@ struct MCPInstall: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.", discussion: "The agent skill is in skills/notescli/SKILL.md and is included by the NotesCLI Claude and Codex plugins.")
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
+    @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.")
+    var allowNative = false
+
+    private var resolvedAllowNative: Bool { allowNative || CommandLine.arguments.contains("--allow-native") }
+    private var resolvedReadOnly: Bool { options.readOnly || CommandLine.arguments.contains("--read-only") }
+
+    func validate() throws {
+        if resolvedReadOnly && resolvedAllowNative {
+            throw ValidationError("--read-only cannot be combined with --allow-native.")
+        }
+    }
 
     func run() throws {
         try MCPConfiguration.apply(client: client) { selected in
-            try MCPConfiguration.install(selected, readOnly: options.readOnly)
+            let result = try MCPConfiguration.install(selected, readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
+            if !result.hasPrefix("skipped") {
+                try InstallManifest.recordMCPClient(selected, readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
+            }
+            return result
         }
         print("Agent skill: install the NotesCLI plugin or use skills/notescli/SKILL.md")
     }
@@ -375,12 +390,51 @@ struct MCPInstall: ParsableCommand {
 struct MCPUninstall: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "uninstall", abstract: "Disconnect notescli from an MCP client.")
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, or all.") var client: MCPClient = .all
+    @OptionGroup var options: GlobalOptions
+    @Flag(help: "Show exactly what would be removed without changing files.") var dryRun = false
+    @Flag(help: "Keep NotesCLI configuration and onboarding state.") var keepConfig = false
 
     func run() throws {
-        try MCPConfiguration.apply(client: client) { selected in
-            try MCPConfiguration.uninstall(selected)
+        let selectedClients = client == .all ? MCPClient.concrete : [client]
+        var actions: [UninstallAction] = []
+        for selected in selectedClients {
+            guard try InstallManifest.ownsMCPClient(selected) else {
+                if client == .all {
+                    actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: "not_recorded"))
+                    continue
+                }
+                throw NotesError("uninstall_not_owned", "Refusing to remove the \(selected.label) entry because NotesCLI did not record owning it.")
+            }
+            if dryRun {
+                actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: "would_remove"))
+            } else {
+                let result = try MCPConfiguration.uninstall(selected)
+                try InstallManifest.removeMCPClient(selected)
+                actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: result))
+            }
+        }
+        if client == .all {
+            for file in try InstallManifest.filesToRemove(keepConfig: keepConfig) {
+                if dryRun {
+                    actions.append(UninstallAction(kind: "file", target: file.path, status: "would_remove"))
+                } else {
+                    try InstallManifest.removeRecordedFile(file)
+                    actions.append(UninstallAction(kind: "file", target: file.path, status: "removed"))
+                }
+            }
+        }
+        if !dryRun { try InstallManifest.removeManifestIfEmpty(keepConfig: keepConfig) }
+        if options.json { try Output.json(actions) }
+        else {
+            Output.table(["KIND", "TARGET", "STATUS"], actions.map { [$0.kind, $0.target, $0.status] })
         }
     }
+}
+
+private struct UninstallAction: Codable {
+    var kind: String
+    var target: String
+    var status: String
 }
 
 struct MCPStatus: ParsableCommand {
@@ -394,13 +448,14 @@ struct MCPStatus: ParsableCommand {
 }
 
 struct Setup: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Connect MCP clients and open macOS permission settings.")
+    static let configuration = CommandConfiguration(commandName: "onboard", abstract: "Resume NotesCLI setup and report readiness.", aliases: ["setup"])
+    @OptionGroup var options: GlobalOptions
+    @Flag(help: "Report setup state without changing files or requesting permissions.") var checkOnly = false
 
     func run() throws {
-        try MCPConfiguration.apply(client: .all) { selected in
-            try MCPConfiguration.install(selected, readOnly: false)
-        }
-        try PermissionGuide.run()
+        let report = try Onboarding.run(options: options, checkOnly: checkOnly)
+        if options.json { try Output.json(report) }
+        else { Output.table(["STEP", "STATUS", "REQUIRED"], report.steps.map { [$0.id, $0.status, $0.required ? "yes" : "no"] }) }
     }
 }
 
@@ -440,21 +495,21 @@ enum MCPConfiguration {
         }
     }
 
-    static func install(_ client: MCPClient, readOnly: Bool) throws -> String {
+    static func install(_ client: MCPClient, readOnly: Bool, allowNative: Bool) throws -> String {
         switch client {
-        case .claudeCode: return try installClaudeCode(readOnly: readOnly)
+        case .claudeCode: return try installClaudeCode(readOnly: readOnly, allowNative: allowNative)
         case .claudeDesktop:
             return try installJSON(
                 at: home.appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json"),
-                serversKey: "mcpServers", readOnly: readOnly, includeType: false
+                serversKey: "mcpServers", readOnly: readOnly, allowNative: allowNative, includeType: false
             )
-        case .codex: return try installCodex(readOnly: readOnly)
+        case .codex: return try installCodex(readOnly: readOnly, allowNative: allowNative)
         case .cursor:
-            return try installJSON(at: home.appendingPathComponent(".cursor/mcp.json"), serversKey: "mcpServers", readOnly: readOnly, includeType: false)
+            return try installJSON(at: home.appendingPathComponent(".cursor/mcp.json"), serversKey: "mcpServers", readOnly: readOnly, allowNative: allowNative, includeType: false)
         case .vscode:
             return try installJSON(
                 at: home.appendingPathComponent("Library/Application Support/Code/User/mcp.json"),
-                serversKey: "servers", readOnly: readOnly, includeType: true
+                serversKey: "servers", readOnly: readOnly, allowNative: allowNative, includeType: true
             )
         case .all: preconditionFailure("Expand all before installing")
         }
@@ -491,17 +546,17 @@ enum MCPConfiguration {
         }
     }
 
-    private static func arguments(readOnly: Bool) -> [String] {
-        readOnly ? ["mcp", "--read-only"] : ["mcp"]
+    private static func arguments(readOnly: Bool, allowNative: Bool) -> [String] {
+        ["mcp"] + (readOnly ? ["--read-only"] : []) + (allowNative ? ["--allow-native"] : [])
     }
 
-    private static func installJSON(at path: URL, serversKey: String, readOnly: Bool, includeType: Bool) throws -> String {
+    private static func installJSON(at path: URL, serversKey: String, readOnly: Bool, allowNative: Bool, includeType: Bool) throws -> String {
         var root = try readJSON(at: path)
         if let value = root[serversKey], !(value is [String: Any]) {
             throw NotesError("invalid_client_config", "\(path.path): \(serversKey) must be an object.")
         }
         var servers = root[serversKey] as? [String: Any] ?? [:]
-        var entry: [String: Any] = ["command": executable, "args": arguments(readOnly: readOnly)]
+        var entry: [String: Any] = ["command": executable, "args": arguments(readOnly: readOnly, allowNative: allowNative)]
         if includeType { entry["type"] = "stdio" }
         servers["notescli"] = entry
         root[serversKey] = servers
@@ -535,12 +590,12 @@ enum MCPConfiguration {
         return "installed"
     }
 
-    private static func installCodex(readOnly: Bool) throws -> String {
+    private static func installCodex(readOnly: Bool, allowNative: Bool) throws -> String {
         let path = home.appendingPathComponent(".codex/config.toml")
         let existing = (try? String(contentsOf: path, encoding: .utf8)) ?? ""
         let base = removingTOMLSection("mcp_servers.notescli", from: existing).trimmingCharacters(in: .whitespacesAndNewlines)
         var lines = base.isEmpty ? [] : [base, ""]
-        lines += ["[mcp_servers.notescli]", "command = \(tomlString(executable))", "args = \(tomlArray(arguments(readOnly: readOnly)))"]
+        lines += ["[mcp_servers.notescli]", "command = \(tomlString(executable))", "args = \(tomlArray(arguments(readOnly: readOnly, allowNative: allowNative)))"]
         return try write(Data((lines.joined(separator: "\n") + "\n").utf8), to: path)
     }
 
@@ -580,16 +635,16 @@ enum MCPConfiguration {
         "[" + values.map(tomlString).joined(separator: ", ") + "]"
     }
 
-    private static func installClaudeCode(readOnly: Bool) throws -> String {
+    private static func installClaudeCode(readOnly: Bool, allowNative: Bool) throws -> String {
         guard let claude = findExecutable("claude") else { return "skipped (claude CLI not found)" }
         let current = try? run(claude, ["mcp", "get", "notescli"])
-        let wantedReadOnly = readOnly
-        if let current, current.status == 0, current.output.contains(executable), current.output.contains("mcp"), current.output.contains("--read-only") == wantedReadOnly {
+        if let current, current.status == 0, current.output.contains(executable), current.output.contains("mcp"),
+           current.output.contains("--read-only") == readOnly, current.output.contains("--allow-native") == allowNative {
             return "already installed"
         }
         _ = try backupIfPresent(home.appendingPathComponent(".claude.json"))
         _ = try? run(claude, ["mcp", "remove", "--scope", "user", "notescli"])
-        let result = try run(claude, ["mcp", "add", "--scope", "user", "notescli", "--", executable] + arguments(readOnly: readOnly))
+        let result = try run(claude, ["mcp", "add", "--scope", "user", "notescli", "--", executable] + arguments(readOnly: readOnly, allowNative: allowNative))
         guard result.status == 0 else { throw NotesError("client_command_failed", result.output) }
         return "installed with claude mcp"
     }
@@ -648,28 +703,30 @@ enum MCPConfiguration {
 }
 
 enum PermissionGuide {
-    static func run() throws {
+    static func run(silent: Bool = false) throws {
+        func info(_ message: String) { if !silent { print(message) } }
+        func warning(_ message: String) { if !silent { Output.error(message) } }
         let speech = AudioTranscriber.authorizationStatus == .notDetermined
             ? try AudioTranscriber.requestAuthorizationBlocking()
             : AudioTranscriber.authorizationStatus
         switch speech {
-        case .authorized: print("Speech Recognition: authorized.")
-        case .denied: Output.error("Speech Recognition: denied. Open System Settings > Privacy & Security > Speech Recognition.")
-        case .restricted: Output.error("Speech Recognition: restricted by system policy.")
-        case .notDetermined: Output.error("Speech Recognition: no decision was recorded.")
-        @unknown default: Output.error("Speech Recognition: unknown status.")
+        case .authorized: info("Speech Recognition: authorized.")
+        case .denied: warning("Speech Recognition: denied. Open System Settings > Privacy & Security > Speech Recognition.")
+        case .restricted: warning("Speech Recognition: restricted by system policy.")
+        case .notDetermined: warning("Speech Recognition: no decision was recorded.")
+        @unknown default: warning("Speech Recognition: unknown status.")
         }
 
-        print("Full Disk Access is required to read Apple Notes.")
-        print("Add the app that launches notescli: Terminal for shell use, or the MCP host app (Claude, Codex, Cursor, or VS Code).")
+        info("Full Disk Access is required to read Apple Notes.")
+        info("Add the app that launches notescli: Terminal for shell use, or the MCP host app (Claude, Codex, Cursor, or VS Code).")
         let settings = Process()
         settings.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         settings.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
         try settings.run()
         settings.waitUntilExit()
-        if settings.terminationStatus != 0 { Output.error("Could not open the Full Disk Access pane.") }
+        if settings.terminationStatus != 0 { warning("Could not open the Full Disk Access pane.") }
 
-        print("Requesting Automation access with a harmless read of the Notes app name. No note content is read.")
+        info("Requesting Automation access with a harmless read of the Notes app name. No note content is read.")
         let automation = Process()
         let pipe = Pipe()
         automation.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -679,10 +736,10 @@ enum PermissionGuide {
         try automation.run()
         automation.waitUntilExit()
         let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        if automation.terminationStatus == 0 { print("Automation: authorized for Notes.") }
+        if automation.terminationStatus == 0 { info("Automation: authorized for Notes.") }
         else {
-            Output.error("Automation was not authorized: \(output)")
-            Output.error("Open System Settings > Privacy & Security > Automation and allow Notes for the same terminal or MCP host app.")
+            warning("Automation was not authorized: \(output)")
+            warning("Open System Settings > Privacy & Security > Automation and allow Notes for the same terminal or MCP host app.")
         }
 
     }

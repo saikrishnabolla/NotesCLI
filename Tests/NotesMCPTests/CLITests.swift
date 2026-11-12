@@ -16,6 +16,166 @@ final class CLITests: XCTestCase {
         process.waitUntilExit()
         return (process.terminationStatus, String(decoding: out, as: UTF8.self), String(decoding: err, as: UTF8.self))
     }
+    private func temporaryHome() throws -> URL {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-cli-home-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        return home
+    }
+
+    func testDoctorAgentReadinessHasStableAccessContract() throws {
+        let result = try run(["--backend", "fake", "doctor", "--for-agent", "--json"])
+        XCTAssertEqual(result.0, 0, result.2)
+        let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any])
+        let access = try XCTUnwrap(report["access"] as? [String: Any])
+        let direct = try XCTUnwrap(access["direct"] as? [String: Any])
+        let effective = try XCTUnwrap(access["effective"] as? [String: Any])
+        let readiness = try XCTUnwrap(report["readiness"] as? [String: Any])
+        XCTAssertNotNil(direct["available"] as? Bool)
+        XCTAssertEqual(effective["available"] as? Bool, true)
+        XCTAssertEqual(effective["fidelity"] as? String, "full")
+        XCTAssertEqual(readiness["ready"] as? Bool, true)
+        XCTAssertTrue(access.keys.contains("capabilityHost"))
+    }
+
+    func testOnboardCheckOnlyIsIdempotentAndDoesNotWriteState() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+
+        let first = try run(["--backend", "fake", "onboard", "--check-only", "--json"], environment: environment)
+        let second = try run(["--backend", "fake", "onboard", "--check-only", "--json"], environment: environment)
+        XCTAssertEqual(first.0, 0, first.2)
+        XCTAssertEqual(first.1, second.1)
+        let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(first.1.utf8)) as? [String: Any])
+        XCTAssertEqual(report["checkOnly"] as? Bool, true)
+        XCTAssertNotNil(report["complete"] as? Bool)
+        let steps = try XCTUnwrap(report["steps"] as? [[String: Any]])
+        XCTAssertEqual(steps.first { $0["id"] as? String == "host-install" }?["status"] as? String, "not_available")
+        XCTAssertEqual(steps.first { $0["id"] as? String == "host-ready" }?["required"] as? Bool, false)
+        let state = home.appendingPathComponent("Library/Application Support/NotesCLI/onboarding.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
+    }
+
+    func testManifestUninstallDryRunAndOwnershipGuard() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+
+        let installed = try run(["mcp", "install", "--client", "codex"], environment: environment)
+        XCTAssertEqual(installed.0, 0, installed.2)
+        let config = home.appendingPathComponent(".codex/config.toml")
+        let before = try Data(contentsOf: config)
+
+        let dryRun = try run(["mcp", "uninstall", "--client", "codex", "--dry-run", "--json"], environment: environment)
+        XCTAssertEqual(dryRun.0, 0, dryRun.2)
+        XCTAssertEqual(try Data(contentsOf: config), before)
+        XCTAssertTrue(dryRun.1.contains("mcp_client"), dryRun.1)
+
+        let removed = try run(["mcp", "uninstall", "--client", "codex", "--json"], environment: environment)
+        XCTAssertEqual(removed.0, 0, removed.2)
+        XCTAssertFalse((try String(contentsOf: config, encoding: .utf8)).contains("[mcp_servers.notescli]"))
+
+        try "[mcp_servers.notescli]\ncommand = \"unowned\"\n".write(to: config, atomically: true, encoding: .utf8)
+        let refused = try run(["mcp", "uninstall", "--client", "codex", "--json"], environment: environment)
+        XCTAssertNotEqual(refused.0, 0)
+        XCTAssertTrue(refused.2.contains("uninstall_not_owned"), refused.2)
+        XCTAssertTrue((try String(contentsOf: config, encoding: .utf8)).contains("unowned"))
+    }
+
+    func testMCPInstallPersistsAllowNativeForEveryFileBasedStdioClient() throws {
+        let cases: [(String, String, String)] = [
+            ("codex", ".codex/config.toml", ""),
+            ("claude-desktop", "Library/Application Support/Claude/claude_desktop_config.json", "mcpServers"),
+            ("cursor", ".cursor/mcp.json", "mcpServers"),
+            ("vscode", "Library/Application Support/Code/User/mcp.json", "servers"),
+        ]
+        for (client, relativePath, serversKey) in cases {
+            let home = try temporaryHome()
+            defer { try? FileManager.default.removeItem(at: home) }
+            let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+            let result = try run(["mcp", "install", "--client", client, "--allow-native"], environment: environment)
+            XCTAssertEqual(result.0, 0, "\(client): \(result.2)")
+            let data = try Data(contentsOf: home.appendingPathComponent(relativePath))
+            if serversKey.isEmpty {
+                XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(#"args = ["mcp", "--allow-native"]"#))
+            } else {
+                let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let servers = try XCTUnwrap(root[serversKey] as? [String: Any])
+                let notescli = try XCTUnwrap(servers["notescli"] as? [String: Any])
+                XCTAssertEqual(notescli["args"] as? [String], ["mcp", "--allow-native"])
+            }
+        }
+    }
+
+    func testMCPInstallRejectsReadOnlyWithAllowNativeBeforeWritingConfig() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let result = try run(["mcp", "install", "--client", "codex", "--read-only", "--allow-native", "--json"], environment: environment)
+        XCTAssertEqual(result.0, 2, result.2)
+        XCTAssertTrue(result.2.contains("allow-native"), result.2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex/config.toml").path))
+    }
+
+    func testMCPInstallPassesAllowNativeToClaudeCode() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let bin = home.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: false)
+        let claude = bin.appendingPathComponent("claude")
+        let log = home.appendingPathComponent("claude.log")
+        try "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CLAUDE_LOG\"\ncase \"$*\" in *'mcp get notescli'*) exit 1;; esac\nexit 0\n"
+            .write(to: claude, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: claude.path)
+        let environment = [
+            "HOME": home.path, "CFFIXED_USER_HOME": home.path,
+            "PATH": bin.path + ":/usr/bin:/bin", "CLAUDE_LOG": log.path,
+        ]
+
+        let result = try run(["mcp", "install", "--client", "claude-code", "--allow-native"], environment: environment)
+        XCTAssertEqual(result.0, 0, result.2)
+        let calls = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(calls.contains("mcp add --scope user notescli --"), calls)
+        XCTAssertTrue(calls.contains("mcp --allow-native"), calls)
+    }
+
+    func testManifestUninstallKeepsConfigAndRefusesTamperedPaths() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI")
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let onboarding = support.appendingPathComponent("onboarding.json")
+        try Data(#"{"schemaVersion":1,"steps":{}}"#.utf8).write(to: onboarding)
+        let manifest = support.appendingPathComponent("install-manifest.json")
+        func writeManifest(path: String) throws {
+            let value: [String: Any] = [
+                "schemaVersion": 1, "owner": "NotesCLI", "mcpClients": [],
+                "files": [["path": path, "category": "config"]],
+            ]
+            try JSONSerialization.data(withJSONObject: value).write(to: manifest)
+        }
+        try writeManifest(path: onboarding.path)
+
+        let kept = try run(["mcp", "uninstall", "--dry-run", "--keep-config", "--json"], environment: environment)
+        XCTAssertEqual(kept.0, 0, kept.2)
+        XCTAssertFalse(kept.1.contains(onboarding.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: onboarding.path))
+
+        let outside = home.appendingPathComponent("outside.txt")
+        try Data("keep".utf8).write(to: outside)
+        try writeManifest(path: outside.path)
+        let refused = try run(["mcp", "uninstall", "--json"], environment: environment)
+        XCTAssertNotEqual(refused.0, 0)
+        XCTAssertTrue(refused.2.contains("uninstall_path_refused"), refused.2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
+
+        try writeManifest(path: onboarding.path)
+        let removed = try run(["mcp", "uninstall", "--json"], environment: environment)
+        XCTAssertEqual(removed.0, 0, removed.2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: onboarding.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.path))
+    }
     func testGlobalOptionsAndParsing() throws {
         for args in [["--backend", "fake", "accounts", "--json"], ["accounts", "--backend", "fake", "--json"], ["--json", "--backend", "fake", "accounts"]] {
             let r = try run(args); XCTAssertEqual(r.0, 0, r.2)

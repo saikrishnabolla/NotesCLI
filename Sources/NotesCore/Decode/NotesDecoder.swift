@@ -38,8 +38,8 @@ public enum NotesDecoder {
             }
             var color: String?
             if let c = try run.message(10) {
-                let channels = [c.float(1) ?? 0, c.float(2) ?? 0, c.float(3) ?? 0]
-                guard channels.allSatisfy(\.isFinite) else { throw DecodeError.invalidProtobuf }
+                let channels: [Float] = [c.float(1) ?? 0, c.float(2) ?? 0, c.float(3) ?? 0]
+                guard channels.allSatisfy({ $0.isFinite }) else { throw DecodeError.invalidProtobuf }
                 color = "#" + channels.map { String(format: "%02X", Int((min(1, max(0, $0)) * 255).rounded())) }.joined()
             }
             let a = try run.message(12)

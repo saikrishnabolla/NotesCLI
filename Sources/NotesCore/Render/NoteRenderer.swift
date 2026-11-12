@@ -265,11 +265,15 @@ public enum NoteRenderer {
             let time = word.start.map { String(format: "%.2fs", $0) }
             return [time.map { "[\($0)]" }, word.speaker.map { "\($0):" }, word.text].compactMap { $0 }.joined(separator: " ")
         }.joined(separator: " ") ?? ""
-        let call = a?.recording.map { recording in
-            [recording.isCallRecording.map { "call=\($0)" }, recording.callType.map { "type=\($0)" },
-             recording.localSpeakerHandle.map { "local=\($0)" }, recording.remoteSpeakerHandle.map { "remote=\($0)" },
-             recording.startTime.map { "started=\(ISO8601DateFormatter().string(from: $0))" }].compactMap { $0 }.joined(separator: ", ")
-        } ?? ""
+        var callParts: [String] = []
+        if let recording = a?.recording {
+            if let value = recording.isCallRecording { callParts.append("call=\(value)") }
+            if let value = recording.callType { callParts.append("type=\(value)") }
+            if let value = recording.localSpeakerHandle { callParts.append("local=\(value)") }
+            if let value = recording.remoteSpeakerHandle { callParts.append("remote=\(value)") }
+            if let value = recording.startTime { callParts.append("started=\(ISO8601DateFormatter().string(from: value))") }
+        }
+        let call = callParts.joined(separator: ", ")
         let details: [(String, String)] = [
             ("Transcript", a?.transcriptText ?? ""), ("Recording summary", a?.recording?.summary ?? a?.recording?.topLineSummary ?? ""),
             ("Word timing", timing), ("Call metadata", call), ("PDF text", a?.pdfText ?? ""),

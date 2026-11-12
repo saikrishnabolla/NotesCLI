@@ -1,9 +1,9 @@
 name: Release
 
+# Releases are built, signed, and notarized locally with scripts/build-release.sh
+# and scripts/notarize.sh. Run this workflow manually only when CI signing secrets exist.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write

@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 49 tools. Read-only mode exposes 26 read tools. `notescli mcp --allow-native` exposes 96 tools in total.
+The default server exposes 51 tools. Read-only mode exposes 28 read tools. `notescli mcp --allow-native` exposes 98 tools in total.
 
 ## Tools
 
@@ -16,7 +16,8 @@ Read tools:
 list_accounts  list_folders  list_notes  search_notes  query_notes
 get_note  get_notes  list_tags  list_attachments  list_backlinks
 get_deeplink  list_smart_folders  list_deleted  recent_notes  today_notes
-count_notes  get_stats  get_raw_note  related_notes  get_write_policy  file_diff
+pinned_notes  count_notes  get_stats  get_capabilities  get_raw_note
+related_notes  get_write_policy  file_diff
 index_status  get_attachment  anchor_list  anchor_resolve  table_get
 ```
 
@@ -49,7 +50,7 @@ table_create  table_set  table_add_row  table_add_column
 table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
 ```
 
-The server also provides `notes://folders`, the `notes://note/{uuid}` resource template, and the `find_note` and `weekly_review` prompts. Note references accept UUIDs, Core Data IDs, short IDs such as `n123`, bare numeric IDs such as `123`, and unambiguous titles.
+The server also provides `notes://folders`, the `notes://note/{uuid}` resource template, and the `find_note` and `weekly_review` prompts. Note references accept `#123`, UUIDs, Core Data IDs, legacy short IDs such as `n123`, bare numeric IDs such as `123`, and unambiguous titles. Use `#123` for new calls. A bare number is ambiguous when a note has the same numeric title.
 
 `list_notes`, `search_notes`, and `query_notes` return an opaque `next_cursor` made from the sort key and note ID. Pass it back as `cursor`. Body reads still use `offset` and `limit`. Responses stay within the 48 KB budget.
 
@@ -70,7 +71,7 @@ Use `--read-only` to hide every write tool:
 notescli mcp install --client codex --read-only
 ```
 
-The installer records the absolute path of the running `notescli` binary. It updates only the `notescli` server entry and preserves other servers. Before changing an existing file, it writes a timestamped `.backup-*` copy.
+The installer records the absolute path of the running `notescli` binary. It updates only the `notescli` server entry and preserves other servers. Before changing an existing file, it writes a timestamped `.backup-*` copy. It also points to `skills/notescli/SKILL.md`, which teaches agents how to build structured research notes.
 
 | Client | Config method |
 | --- | --- |

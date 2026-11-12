@@ -187,10 +187,29 @@ public final class NativeNotesWriter: NotesNativeWriting {
         if ref.hasPrefix("x-coredata://"), let url = URL(string: ref),
            let objectID = context.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: url),
            let object = try? context.existingObject(with: objectID), object.entity.name == "ICNote" { return object }
+        func primaryKeyNote(_ number: Int) -> NSManagedObject? {
+            guard let coordinator = context.persistentStoreCoordinator else { return nil }
+            for store in coordinator.persistentStores {
+                guard let uuid = coordinator.metadata(for: store)[NSStoreUUIDKey] as? String,
+                      let url = URL(string: "x-coredata://\(uuid)/ICNote/p\(number)"),
+                      let objectID = coordinator.managedObjectID(forURIRepresentation: url),
+                      let object = try? context.existingObject(with: objectID), object.entity.name == "ICNote" else { continue }
+                return object
+            }
+            return nil
+        }
         var matches = try fetch("ICNote", predicate: NSPredicate(format: "identifier ==[c] %@", ref), in: context)
-        if matches.isEmpty { matches = try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context) }
+        if let number = NoteReference.explicitNumber(ref) {
+            if let object = primaryKeyNote(number), !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
+        } else if let number = NoteReference.bareNumber(ref) {
+            if let object = primaryKeyNote(number), !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
+            for object in try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context)
+                where !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
+        } else if matches.isEmpty {
+            matches = try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context)
+        }
         guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use its UUID.") }
+        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note matches. Use #ID or a UUID.") }
         return matches[0]
     }
 

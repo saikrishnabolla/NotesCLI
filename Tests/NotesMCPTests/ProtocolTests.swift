@@ -30,7 +30,7 @@ final class ProtocolTests: XCTestCase {
             let server = MCPServer(reader: fake, writer: fake, readOnly: readOnly)
             let result = try request(server, method: "tools/list")["result"] as! [String: Any]
             let tools = result["tools"] as! [[String: Any]]
-            XCTAssertEqual(tools.count, readOnly ? 26 : 49)
+            XCTAssertEqual(tools.count, readOnly ? 28 : 51)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "delete_note" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_add" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_prune" }, !readOnly)
@@ -41,7 +41,7 @@ final class ProtocolTests: XCTestCase {
             }
         }
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "count_notes", "get_stats", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
+        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "pinned_notes", "count_notes", "get_stats", "get_capabilities", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
         let defaultTools = (try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
         func readOnlyHint(_ name: String) -> Bool? {
             (defaultTools.first { $0["name"] as? String == name }?["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool
@@ -51,7 +51,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 96)
+        XCTAssertEqual(nativeTools.count, 98)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
         for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
@@ -68,6 +68,39 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNotNil(createProperties?["wait_sync"])
         XCTAssertNotNil(createProperties?["allow_shared"])
         XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
+    }
+
+    func testPinnedNotesAndCapabilities() throws {
+        let server = MCPServer(reader: InMemoryNotes.sample())
+        let pinned = try structured(call(server, "pinned_notes", ["limit": 1]))
+        let notes = try XCTUnwrap(pinned["notes"] as? [[String: Any]])
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertEqual(notes[0]["title"] as? String, "Welcome")
+        XCTAssertEqual(notes[0]["number"] as? Int, 1)
+
+        let capabilities = try structured(call(server, "get_capabilities"))
+        XCTAssertEqual(capabilities["macOS"] as? String, ProcessInfo.processInfo.operatingSystemVersionString)
+        XCTAssertEqual((capabilities["features"] as? [[String: Any]])?.count, 94)
+        let pin = (capabilities["features"] as? [[String: Any]])?.first { $0["feature"] as? String == "Pin and unpin" }
+        XCTAssertEqual(pin?["read"] as? String, "Done")
+        XCTAssertEqual(pin?["write"] as? String, "Done")
+        XCTAssertEqual(pin?["writeEngine"] as? String, "native")
+        XCTAssertNotNil(pin?["permissions"])
+        XCTAssertNotNil(pin?["nativeSelectors"])
+    }
+
+    func testCapabilityCatalogMatchesFeatureDocument() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let text = try String(contentsOf: root.appendingPathComponent("docs/APPLE-NOTES-FEATURES.md"), encoding: .utf8)
+        let documented = text.split(separator: "\n").compactMap { line -> FeatureDefinition? in
+            guard line.hasPrefix("| "), !line.hasPrefix("| Feature"), !line.hasPrefix("| ---") else { return nil }
+            let columns = line.dropFirst().dropLast().split(separator: "|", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+            guard columns.count == 4 else { return nil }
+            return FeatureDefinition(feature: columns[0], read: columns[1], write: columns[2])
+        }
+        XCTAssertEqual(documented.count, 94)
+        XCTAssertEqual(CapabilityCatalog.features, documented)
     }
 
     func testNativeFormattingSchemasAndValidationRejectInvalidValuesBeforeDispatch() throws {

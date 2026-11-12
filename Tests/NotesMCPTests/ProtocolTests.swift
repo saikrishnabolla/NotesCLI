@@ -614,3 +614,12 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(items.allSatisfy { $0["error"] == nil })
     }
 }
+
+final class OptionalSelectorCapabilityTests: XCTestCase {
+    func testMissingDividerSelectorMarksOnlyDividerUnavailable() {
+        let missing = ["+[ICInlineAttachment newDividerLineAttachmentWithIdentifier:note:parentAttachment:]"]
+        XCTAssertFalse(CapabilityCatalog.optionalSelectorsPresent(for: "Divider lines", missing: missing))
+        XCTAssertTrue(CapabilityCatalog.optionalSelectorsPresent(for: "Mentions", missing: missing))
+        XCTAssertTrue(CapabilityCatalog.optionalSelectorsPresent(for: "Bold", missing: missing))
+    }
+}

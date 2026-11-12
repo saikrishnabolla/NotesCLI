@@ -6,9 +6,27 @@ public struct NativeDoctorReport: Codable, Sendable {
     public var frameworkLoaded: Bool
     public var frameworkPath: String
     public var macOS: String
+    /// Every checked selector that this macOS lacks, core and optional.
     public var missing: [String]
     public var error: String?
     public var classes: [String: NativeClassReport]
+
+    /// Selectors used by only one feature. Each of those features checks its own selector before it runs,
+    /// so a missing optional selector disables that feature alone, not the native engine.
+    public static let optionalSelectors: Set<String> = [
+        "+[ICInlineAttachment newDividerLineAttachmentWithIdentifier:note:parentAttachment:]",
+        "+[ICInlineAttachment newCalculateGraphExpressionAttachmentWithIdentifier:altText:note:parentAttachment:rightToLeft:]",
+        "+[ICInlineAttachment newMentionAttachmentWithIdentifier:mentionText:userRecordName:note:parentAttachment:]",
+        "-[ICOutlineState initWithCollapsedUUIDs:]",
+        "-[ICOutlineState data]",
+        "-[ICOutlineState collapsedUUIDStrings]",
+    ]
+    /// Missing selectors that the whole native engine depends on.
+    public var missingCore: [String] { missing.filter { !Self.optionalSelectors.contains($0) } }
+    /// Missing selectors that disable only their own feature.
+    public var missingOptional: [String] { missing.filter { Self.optionalSelectors.contains($0) } }
+    /// True when native writes can run; individual features may still be unavailable.
+    public var usable: Bool { frameworkLoaded && error == nil && missingCore.isEmpty }
 }
 
 public struct NativeClassReport: Codable, Sendable {

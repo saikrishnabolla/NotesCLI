@@ -255,11 +255,27 @@ final class NativeTests: XCTestCase {
         }
     }
 
-    func testDoctorResolvesSupportedSurface() {
+    func testDoctorResolvesSupportedSurface() throws {
         let report = NativeNotesWriter().doctor()
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        XCTAssertEqual(report.macOS, "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)")
         XCTAssertTrue(report.frameworkLoaded, report.error ?? "framework did not load")
-        XCTAssertEqual(report.macOS, "27.2.1")
-        XCTAssertTrue(report.missing.isEmpty, report.missing.joined(separator: ", "))
+        XCTAssertTrue(report.missingCore.isEmpty, report.missingCore.joined(separator: ", "))
+        XCTAssertTrue(report.usable)
+        if version.majorVersion >= 27 {
+            XCTAssertTrue(report.missing.isEmpty, report.missing.joined(separator: ", "))
+        }
+    }
+
+    func testMissingOptionalSelectorDisablesOnlyItsFeature() {
+        let divider = "+[ICInlineAttachment newDividerLineAttachmentWithIdentifier:note:parentAttachment:]"
+        let optional = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2", missing: [divider], error: nil, classes: [:])
+        XCTAssertTrue(optional.usable)
+        XCTAssertEqual(optional.missingOptional, [divider])
+        XCTAssertEqual(optional.missingCore, [])
+        let core = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2", missing: ["-[ICNote saveNoteData]"], error: nil, classes: [:])
+        XCTAssertFalse(core.usable)
+        XCTAssertEqual(core.missingCore, ["-[ICNote saveNoteData]"])
     }
 
     func testStyleNumbersMatchNotes() {

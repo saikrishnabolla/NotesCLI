@@ -167,6 +167,20 @@ public enum CapabilityCatalog {
     }
 }
 
+extension CapabilityCatalog {
+    /// Features that depend on one optional Notes selector. If that selector is missing, only the feature is unavailable.
+    static let optionalSelectorFeatures: [String: String] = [
+        "Divider lines": "newDividerLineAttachmentWithIdentifier:",
+        "Math expressions, results, and graphs": "newCalculateGraphExpressionAttachmentWithIdentifier:",
+        "Mentions": "newMentionAttachmentWithIdentifier:",
+        "Collapsible headings and subheadings": "ICOutlineState",
+    ]
+    static func optionalSelectorsPresent(for feature: String, missing: [String]) -> Bool {
+        guard let marker = optionalSelectorFeatures[feature] else { return true }
+        return !missing.contains { $0.contains(marker) }
+    }
+}
+
 public enum CapabilityReporter {
     public static func report() -> CapabilityReport {
         let permissionStates = [
@@ -175,7 +189,7 @@ public enum CapabilityReporter {
             "speech": speech()
         ]
         let doctor = NativeNotesWriter().doctor()
-        let nativeAvailable = doctor.frameworkLoaded && doctor.missing.isEmpty
+        let nativeAvailable = doctor.usable
         let rows = CapabilityCatalog.features.map { definition in
             let readEngine = CapabilityCatalog.readEngine(for: definition)
             let writeEngine = CapabilityCatalog.writeEngine(for: definition)
@@ -193,7 +207,7 @@ public enum CapabilityReporter {
                     "automation": writeEngine == "scripting" ? permissionStates["automation"]! : "not required",
                     "speech": audioFeature ? permissionStates["speech"]! : "not required"
                 ],
-                nativeSelectors: writeEngine == "native" ? (nativeAvailable ? "available" : "missing") : "not required"
+                nativeSelectors: writeEngine == "native" ? (nativeAvailable && CapabilityCatalog.optionalSelectorsPresent(for: definition.feature, missing: doctor.missingOptional) ? "available" : "missing") : "not required"
             )
         }
         return CapabilityReport(macOS: ProcessInfo.processInfo.operatingSystemVersionString,

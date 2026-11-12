@@ -63,8 +63,7 @@ func outputEngineWrite(_ input: EngineWriteResponse, options: GlobalOptions) thr
 
 enum UnifiedNative {
     static func nativeAvailable() -> Bool {
-        let report = NativeNotesWriter().doctor()
-        return report.frameworkLoaded && report.error == nil && report.missing.isEmpty
+        NativeNotesWriter().doctor().usable
     }
     static func checklistAutoSort(_ o: GlobalOptions, _ w: WriteOptions, enabled: Bool) throws {
         let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)

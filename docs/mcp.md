@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 49 tools. Read-only mode exposes 26 read tools. `notescli mcp --allow-native` exposes 91 tools in total.
+The default server exposes 49 tools. Read-only mode exposes 26 read tools. `notescli mcp --allow-native` exposes 96 tools in total.
 
 ## Tools
 

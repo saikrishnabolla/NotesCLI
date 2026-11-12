@@ -3,7 +3,7 @@ class Notescli < Formula
   homepage "https://github.com/saikrishnabolla/NotesCLI"
   url "https://github.com/saikrishnabolla/NotesCLI/releases/download/v1.1.0/notescli-1.1.0-macos-universal.tar.gz"
   version "1.1.0"
-  sha256 "a7f1797e68feaaf27ed77ab3bd8e239f655de30b09c79eb2545246ff3bbb0f0c"
+  sha256 "f9a70733f551280f5f3646ec8279ff3f6a02bc0927ea4f105832feaa3a85db3f"
   license "MIT"
 
   depends_on macos: :sonoma

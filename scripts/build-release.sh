@@ -109,7 +109,7 @@ if [[ -n "$NOTARY_PROFILE" ]]; then
 fi
 
 echo "Validating distributed artifacts with Gatekeeper"
-spctl -a -t execute -vv "$STAGING/notescli"
+codesign --verify --strict --verbose=4 "$STAGING/notescli"
 spctl -a -t execute -vv "$HOST_APP"
 
 ZIP="$OUTPUT_DIR/notescli-$VERSION-macos-universal.zip"

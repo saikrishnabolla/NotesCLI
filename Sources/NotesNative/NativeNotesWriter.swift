@@ -1306,6 +1306,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         let attachment = try table(attachmentID, note: note, context: context), rows = try tableRows(attachment)
         let delimiter = separator == "tab" ? "\t" : ","
         let text = rows.map { $0.joined(separator: delimiter) }.joined(separator: "\n")
+        let before = try body(note).string
         guard let marker = attachmentMarkers(try body(note)).first(where: { $0.2 == attachmentID }) else { throw NotesError("table_marker_not_found", "The table marker is missing from the note body.") }
         do {
             let editor = try NCBodyEditor(note: note); try editor.begin(["delete", "insert"]); try editor.delete(marker.0)
@@ -1313,11 +1314,14 @@ public final class NativeNotesWriter: NotesNativeWriting {
             try NCNotesRuntime.markForDeletion(attachment); try editor.finish(); try save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
         let fresh = try self.note(id(note), in: context), nativeBody = try body(fresh)
-        let nativeOK = attachmentMarkers(nativeBody).allSatisfy { $0.2 != attachmentID } && nativeBody.string.contains(text)
-        return result(id(note), native: ["tableID": attachmentID, "text": text, "separator": separator], nativeVerified: nativeOK,
+        let nativeOK = attachmentMarkers(nativeBody).allSatisfy { $0.2 != attachmentID } &&
+            NativeVerificationRules.exactReplacement(before: before, after: nativeBody.string, range: marker.0, text: text)
+        return result(id(note), native: ["tableID": attachmentID, "text": text, "separator": separator,
+                                         "length": String((nativeBody.string as NSString).length)], nativeVerified: nativeOK,
                       sqlite: { decoded in
-            guard decoded.document?.tables?[attachmentID] == nil, decoded.document?.text.contains(text) == true else { return nil }
-            return ["tableID": attachmentID, "text": text]
+            guard decoded.document?.tables?[attachmentID] == nil, let body = decoded.document?.text,
+                  NativeVerificationRules.exactReplacement(before: before, after: body, range: marker.0, text: text) else { return nil }
+            return ["tableID": attachmentID, "text": text, "length": String((body as NSString).length)]
         }, mismatch: "Table \(attachmentID) was not replaced with text exactly once.")
         }
     }
@@ -1398,6 +1402,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 guard value(folder, "supportsCustomNoteSortType") as? Bool == true else { throw NotesError("folder_sort_unsupported", "This folder does not support a custom note sort.") }
                 let sort = try NCNotesRuntime.folderSortType(order: order.value, direction: direction.value)
                 try NCNotesRuntime.setValue(sort, forKey: "customNoteSortType", of: folder)
+                try NCNotesRuntime.updateChangeCount(of: folder, reason: "Changed folder sort")
                 try NCNotesRuntime.save(context); operation?.committed = true; operation?.folderID = folderID; context.refreshAllObjects()
             } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
             let setting = try folderSortSetting(folder)
@@ -1485,9 +1490,20 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func smartFolderQuery(_ ref: String) throws -> String {
+        try performRead { context in
+            let matches = try matchingSmartFolders(ref, in: context)
+            guard matches.count == 1, let query = value(matches[0], "smartFolderQueryJSON") as? String else {
+                throw NotesError(matches.isEmpty ? "smart_folder_not_found" : "ambiguous_folder", "Smart Folder must resolve uniquely with a readable query.")
+            }
+            try SmartFolderQueryGrammar.validate(query)
+            return query
+        }
+    }
+
     public func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult {
-        try performWrite { context in
-            guard let data = queryJSON.data(using: .utf8), (try? JSONSerialization.jsonObject(with: data)) != nil else { throw NotesError("invalid_smart_folder_query", "Smart Folder query must be valid JSON.") }
+        try SmartFolderQueryGrammar.validate(queryJSON)
+        return try performWriteWithFreshReadback(transaction: { context in
             let matches = try matchingSmartFolders(ref, in: context)
             guard matches.count == expectedCount else { throw NotesError("expected_count_mismatch", "Found \(matches.count) matching Smart Folders, not \(expectedCount).") }
             guard expectedCount == 1, let folder = matches.first else { throw NotesError("invalid_expected_count", "Smart Folder rule editing requires --expected-count 1.") }
@@ -1495,15 +1511,24 @@ public final class NativeNotesWriter: NotesNativeWriting {
             do {
                 try NCNotesRuntime.requireSelectors(["smartFolderQueryJSON", "setSmartFolderQueryJSON:", "updateChangeCountWithReason:"], of: folder)
                 try NCNotesRuntime.setValue(queryJSON, forKey: "smartFolderQueryJSON", of: folder)
-                try NCNotesRuntime.save(context); operation?.committed = true; operation?.folderID = folderID; context.refreshAllObjects()
+                try NCNotesRuntime.updateChangeCount(of: folder, reason: "Edited Smart Folder rules")
+                try NCNotesRuntime.save(context); operation?.committed = true; operation?.folderID = folderID
             } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            return folderID
+        }, readback: { context, folderID in
+            guard let folder = try matchingSmartFolders(folderID, in: context).first else {
+                return globalResult(native: ["folderID": folderID, "queryJSON": ""], nativeVerified: false, folderID: folderID,
+                                    message: "The Smart Folder was not found after refetch.")
+            }
             let nativeQuery = value(folder, "smartFolderQueryJSON") as? String
-            return globalResult(native: ["folderID": folderID, "queryJSON": nativeQuery ?? ""], nativeVerified: nativeQuery == queryJSON, folderID: folderID,
+            let nativeGrammarOK = nativeQuery.map { (try? SmartFolderQueryGrammar.validate($0)) != nil } ?? false
+            return globalResult(native: ["folderID": folderID, "queryJSON": nativeQuery ?? ""], nativeVerified: nativeQuery == queryJSON && nativeGrammarOK, folderID: folderID,
                                 sqlite: {
-                guard let row = try SQLiteNotesStore(refresh: true).folders(account: nil).first(where: { $0.id.caseInsensitiveCompare(folderID) == .orderedSame }), row.smartFolderQuery == queryJSON else { return nil }
+                guard let row = try SQLiteNotesStore(refresh: true).folders(account: nil).first(where: { $0.id.caseInsensitiveCompare(folderID) == .orderedSame }),
+                      row.smartFolderQuery == queryJSON, (try? SmartFolderQueryGrammar.validate(queryJSON)) != nil else { return nil }
                 return ["folderID": folderID, "queryJSON": queryJSON]
             })
-        }
+        })
     }
 
     public func deleteSmartFolder(_ ref: String, expectedCount: Int) throws -> NativeWriteResult {

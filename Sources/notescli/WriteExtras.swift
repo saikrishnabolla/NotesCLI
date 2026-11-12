@@ -201,10 +201,11 @@ struct SmartFolderEditRules: ParsableCommand {
         let backend = try options.writable(); _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
         let folder = try SafetyExecutor.folder(ref, reader: backend.reader)
         guard let folder, folder.isSmartFolder else { throw NotesError("smart_folder_not_found", "No Smart Folder matches the reference.") }
+        let writer = NativeNotesWriter(), previousQuery = try writer.smartFolderQuery(folder.id)
         let plan = DryRunPlan(operation: "smartFolderEditRules", target: folder.id, arguments: ["query_json": queryJSON, "expected_count": String(expectedCount)], resultingHTML: nil, engine: "native")
         var captured: NativeWriteResult?
-        let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditRules", arguments: ["ref": folder.id, "query_json": queryJSON, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
-            let value = try NativeNotesWriter().editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
+        let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditRules", arguments: ["ref": folder.id, "stable_id": folder.id, "query_json": queryJSON, "previous_query_json": previousQuery, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
+            let value = try writer.editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: options)
@@ -223,6 +224,7 @@ struct SmartFolderEditTyped: ParsableCommand {
         let backend = try options.writable(); _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
         let folder = try SafetyExecutor.folder(ref, reader: backend.reader)
         guard let folder, folder.isSmartFolder else { throw NotesError("smart_folder_not_found", "No Smart Folder matches the reference.") }
+        let writer = NativeNotesWriter(), previousQuery = try writer.smartFolderQuery(folder.id)
         let sections = try csvValues(attachments).map { value -> SmartFolderAttachmentSection in
             guard let section = SmartFolderAttachmentSection(name: value) else { throw ValidationError("Unknown attachment rule: \(value).") }
             return section
@@ -235,8 +237,8 @@ struct SmartFolderEditTyped: ParsableCommand {
         let queryJSON = try rules.json()
         let plan = DryRunPlan(operation: "smartFolderEditTyped", target: folder.id, arguments: ["query_json": queryJSON, "expected_count": String(expectedCount)], resultingHTML: nil, engine: "native")
         var captured: NativeWriteResult?
-        let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditTyped", arguments: ["ref": folder.id, "query_json": queryJSON, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
-            let value = try NativeNotesWriter().editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
+        let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditTyped", arguments: ["ref": folder.id, "stable_id": folder.id, "query_json": queryJSON, "previous_query_json": previousQuery, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
+            let value = try writer.editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: options)

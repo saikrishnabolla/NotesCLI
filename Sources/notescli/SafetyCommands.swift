@@ -2,6 +2,7 @@ import ArgumentParser
 import Foundation
 import NotesAutomation
 import NotesCore
+import NotesNative
 import NotesSafety
 import NotesStore
 
@@ -311,6 +312,11 @@ struct DiffCommand: ParsableCommand {
 }
 
 private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions, write: WriteOptions) throws {
+    if let entry = try WriteJournal().entry(id: ref), let action = try entry.restoreAction() {
+        guard snapshotID == nil else { throw NotesError("invalid_revert", "A journal operation ID cannot be combined with a snapshot ID.") }
+        try restore(entry: entry, action: action, options: options, write: write)
+        return
+    }
     let backend = try options.writable(), current = try backend.reader.note(ref)
     try SafetyExecutor.requireAttachmentSafety(current, allowLoss: write.allowAttachmentLoss)
     let snapshot = try SnapshotStore().loadRestorable(current.summary.id.uuid, snapshot: snapshotID)
@@ -361,6 +367,50 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
     }
 }
 
+private func restore(entry: JournalEntry, action: JournalRestoreAction, options: GlobalOptions, write: WriteOptions) throws {
+    let backend = try options.writable()
+    _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+    let writer = NativeNotesWriter()
+    let target: String
+    let paths: [[String]]
+    switch action {
+    case .checklistAutoSort:
+        target = "Notes settings"; paths = []
+    case .defaultAccount(let identifier):
+        target = identifier; paths = []
+    case .folderSort(let folderID, _, _), .smartFolderQuery(let folderID, _):
+        let folder = try SafetyExecutor.folder(folderID, reader: backend.reader)
+        guard let folder else { throw NotesError("folder_not_found", "The journal target folder was not found.") }
+        target = folder.id; paths = [folder.path]
+    }
+    let arguments = ["operation_id": entry.id, "restored_operation": entry.operation, "engine": "native"]
+    let plan = DryRunPlan(operation: "restoreJournalPreimage", target: target, arguments: arguments, resultingHTML: nil, engine: "native")
+    var captured: NativeWriteResult?
+    let result = try SafetyExecutor.run(options: write, operation: "restoreJournalPreimage", arguments: arguments,
+                                        allowedPaths: paths, plan: plan) {
+        let value: NativeWriteResult
+        switch action {
+        case .checklistAutoSort(let enabled):
+            value = try writer.setChecklistAutoSort(enabled)
+        case .folderSort(let folderID, let orderName, let directionName):
+            guard let order = NativeFolderSortOrder(rawValue: orderName), let direction = NativeFolderSortDirection(rawValue: directionName) else {
+                throw NotesError("invalid_journal", "The recorded folder sort preimage is invalid.")
+            }
+            value = try writer.setFolderSort(folderID, order: order, direction: direction)
+        case .defaultAccount(let identifier):
+            value = try writer.setDefaultAccount(identifier)
+        case .smartFolderQuery(let folderID, let queryJSON):
+            try SmartFolderQueryGrammar.validate(queryJSON)
+            value = try writer.editSmartFolderRules(folderID, queryJSON: queryJSON, expectedCount: 1)
+        }
+        captured = value
+        return value.writeResult
+    }
+    guard let result else { return }
+    try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID,
+                                              verification: captured?.verification), options: options)
+}
+
 struct UndoCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "undo")
     @OptionGroup var options: GlobalOptions
@@ -373,7 +423,7 @@ struct RevertCommand: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @OptionGroup var write: WriteOptions
     @Argument var ref: String
-    @Argument var snapshot: String
+    @Argument var snapshot: String?
     func run() throws { try restore(ref, snapshotID: snapshot, options: options, write: write) }
 }
 

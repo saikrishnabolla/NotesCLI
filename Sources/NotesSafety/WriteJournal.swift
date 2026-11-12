@@ -5,6 +5,13 @@ import SQLite3
 
 public enum JournalOutcome: String, Codable, Sendable { case started, verified, unverified, unknown, failed }
 
+public enum JournalRestoreAction: Sendable, Equatable {
+    case checklistAutoSort(enabled: Bool)
+    case folderSort(folderID: String, order: String, direction: String)
+    case defaultAccount(identifier: String)
+    case smartFolderQuery(folderID: String, queryJSON: String)
+}
+
 public struct JournalEntry: Codable, Sendable {
     public var id: String
     public var operation: String
@@ -21,6 +28,36 @@ public struct JournalEntry: Codable, Sendable {
         guard let object = try? JSONSerialization.jsonObject(with: arguments) as? [String: Any],
               let identity = object["stable_id"] as? String, !identity.isEmpty else { return nil }
         return identity
+    }
+
+    public func restoreAction() throws -> JournalRestoreAction? {
+        guard let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any] else {
+            throw NotesError("invalid_journal", "The journal arguments are unreadable.")
+        }
+        func string(_ key: String) -> String? { object[key] as? String }
+        func required(_ key: String) throws -> String {
+            guard let value = string(key), !value.isEmpty else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no \(key) preimage.")
+            }
+            return value
+        }
+        switch operation {
+        case "checklistAutoSort", "checklist_auto_sort":
+            let enabled: Bool?
+            if let value = object["previous_enabled"] as? Bool { enabled = value }
+            else if let value = string("previous_enabled") { enabled = Bool(value) }
+            else { enabled = nil }
+            guard let enabled else { throw NotesError("journal_preimage_missing", "Journal operation \(id) has no previous_enabled preimage.") }
+            return .checklistAutoSort(enabled: enabled)
+        case "folderSort", "set_folder_sort":
+            return .folderSort(folderID: try required("stable_id"), order: try required("previous_by"),
+                               direction: try required("previous_direction"))
+        case "setDefaultAccount", "set_default_account":
+            return .defaultAccount(identifier: try required("previous_account_id"))
+        case "smartFolderEditRules", "smartFolderEditTyped", "smart_folder_edit_rules", "smart_folder_edit_typed":
+            return .smartFolderQuery(folderID: try required("stable_id"), queryJSON: try required("previous_query_json"))
+        default: return nil
+        }
     }
 }
 
@@ -110,6 +147,16 @@ public final class WriteJournal: @unchecked Sendable {
     }
 
     public func unresolved() throws -> [JournalEntry] { try list(limit: Int(Int32.max)).filter { $0.outcome == .unknown || $0.outcome == .started } }
+
+    public func entry(id: String) throws -> JournalEntry? {
+        try lock.withLock {
+            var statement: OpaquePointer?
+            try prepare("SELECT id,operation,arguments_hash,arguments,idempotency_key,started,outcome,note_id,result,message FROM operations WHERE id=?", &statement)
+            defer { sqlite3_finalize(statement) }
+            bind(id, 1, statement)
+            return sqlite3_step(statement) == SQLITE_ROW ? try decode(statement) : nil
+        }
+    }
 
     private func entry(key: String) throws -> JournalEntry? {
         var statement: OpaquePointer?

@@ -58,6 +58,45 @@ final class CLITests: XCTestCase {
             XCTAssertTrue(r.2.contains("read_only"), "\(args): \(r.2)")
         }
     }
+
+    func testReadOnlyAnchorCommandsRefuseWritesAndDoNotCreateState() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-anchor-cli-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["CFFIXED_USER_HOME": home.path]
+        let database = home.appendingPathComponent("Library/Application Support/NotesCLI/anchors.sqlite")
+
+        for arguments in [["anchor", "add", "welcome", "--offset", "0"], ["anchor", "prune"]] {
+            let result = try run(["--backend", "fake", "--read-only", "--json"] + arguments, environment: environment)
+            XCTAssertEqual(result.0, 4, result.2)
+            XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(result.2.utf8)) as? [String: Any])?["code"] as? String, "read_only")
+        }
+
+        let listed = try run(["--backend", "fake", "--read-only", "--json", "anchor", "list"], environment: environment)
+        XCTAssertEqual(listed.0, 0, listed.2)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(listed.1.utf8)) as? [Any])?.count, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+
+        let resolved = try run(["--backend", "fake", "--read-only", "--json", "anchor", "resolve", "a-missing"], environment: environment)
+        XCTAssertEqual(resolved.0, 3, resolved.2)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(resolved.2.utf8)) as? [String: Any])?["code"] as? String, "anchor_not_found")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+    }
+
+    func testCLIFormattingRejectsUnknownAndConflictingValuesBeforeDispatch() throws {
+        let invalid = [
+            (["format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body", "--alignment", "diagonal"], "diagonal"),
+            (["format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body", "--writing-direction", "up"], "up"),
+            (["format", "inline", "welcome", "--start", "0", "--length", "1", "--highlight", "green"], "green"),
+            (["format", "inline", "welcome", "--start", "0", "--length", "1", "--superscript", "--subscript"], "Choose one of --superscript, --subscript, or --clear-script.")
+        ]
+        for (arguments, expected) in invalid {
+            let result = try run(["--backend", "fake", "--engine", "native"] + arguments)
+            XCTAssertEqual(result.0, 2, result.2)
+            XCTAssertTrue(result.2.contains(expected), result.2)
+            XCTAssertFalse(result.2.contains("native_unavailable"), result.2)
+        }
+    }
     func testFuzzyRankingAndDeterminism() throws {
         for query in ["cofee", "shoppng", "aples bread", "welcom", "NOTESCli"] {
             let args = ["--backend", "fake", "search", query, "--fuzzy", "--json"]

@@ -493,6 +493,10 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
 + (BOOL)requireSelectors:(NSArray<NSString *> *)selectors ofObject:(id)object error:(NSError **)error {
     return NCRequireObject(object, selectors, NSStringFromClass([object class]), error);
 }
++ (BOOL)updateChangeCountOfObject:(id)object reason:(NSString *)reason error:(NSError **)error {
+    if (!NCRequireObject(object, @[@"updateChangeCountWithReason:"], @"updating change count", error)) return NO;
+    return NCCatch(@"updating change count", error, ^{ [(id<NCSynced>)object updateChangeCountWithReason:reason]; });
+}
 + (BOOL)checklistAutoSortEnabled {
     id value = (__bridge_transfer id)CFPreferencesCopyAppValue(CFSTR("ICChecklistAutoSortEnabledDefaultsKey"), CFSTR("com.apple.Notes"));
     return [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;

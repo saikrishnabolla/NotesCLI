@@ -24,6 +24,88 @@ public enum SmartFolderAttachmentSection: Int, Codable, Sendable, CaseIterable {
     }
 }
 
+public enum SmartFolderQueryGrammar {
+    private static let flags = Set([
+        "deleted", "checklist", "checklistInProgress", "checklistCompleted", "attachment", "pinned", "systemPaper",
+        "passwordProtected", "shared", "mention", "tagged", "quickNote"
+    ])
+    private static let strings = Set(["tag", "folder", "sharedParticipant", "mentionParticipant"])
+
+    public static func validate(_ json: String) throws {
+        guard let data = json.data(using: .utf8) else { throw invalid("The query is not UTF-8.") }
+        let value: Any
+        do { value = try JSONSerialization.jsonObject(with: data) }
+        catch { throw invalid("The query is not valid JSON.") }
+        guard value is [String: Any] else { throw invalid("The top-level query must be an object.") }
+        try clause(value, path: "query")
+    }
+
+    private static func clause(_ value: Any, path: String) throws {
+        guard let object = value as? [String: Any], !object.isEmpty else { throw invalid("\(path) must be a nonempty rule object.") }
+        if object.count > 1 {
+            for key in object.keys.sorted() { try entry(key: key, value: object[key]!, path: "\(path).\(key)") }
+            return
+        }
+        let key = object.keys.first!
+        try entry(key: key, value: object[key]!, path: "\(path).\(key)")
+    }
+
+    private static func entry(key: String, value: Any, path: String) throws {
+        if key == "type" { try clause(value, path: path); return }
+        if key == "and" || key == "or" {
+            guard let values = value as? [Any], !values.isEmpty else { throw invalid("\(path) must be a nonempty array of rules.") }
+            for (index, item) in values.enumerated() { try clause(item, path: "\(path)[\(index)]") }
+            return
+        }
+        if key == "not" { try clause(value, path: path); return }
+        if flags.contains(key) {
+            guard value is Bool else { throw invalid("\(path) must be true or false.") }
+            return
+        }
+        if strings.contains(key) {
+            guard let text = value as? String, !text.isEmpty else { throw invalid("\(path) must be a nonempty string.") }
+            return
+        }
+        if key == "attachmentSection" {
+            guard let section = integer(value), (1...7).contains(section) else { throw invalid("\(path) must be an integer from 1 through 7.") }
+            return
+        }
+        if key == "creationDateRange" || key == "modificationDateRange" {
+            guard let range = value as? [String: Any], Set(range.keys) == Set(["fromDate", "toDate"]),
+                  let from = number(range["fromDate"]), let to = number(range["toDate"]), from <= to else {
+                throw invalid("\(path) must contain ordered numeric fromDate and toDate values.")
+            }
+            return
+        }
+        if key == "creationDateRelativeRange" || key == "modificationDateRelativeRange" {
+            guard let range = value as? [String: Any], !range.isEmpty,
+                  Set(range.keys).isSubset(of: Set(["type", "customAmount", "customUnit"])), integer(range["type"]) != nil,
+                  range["customAmount"].map({ integer($0) != nil }) ?? true,
+                  range["customUnit"].map({ integer($0) != nil }) ?? true else {
+                throw invalid("\(path) has an invalid relative-date rule.")
+            }
+            return
+        }
+        throw invalid("Unknown Smart Folder rule at \(path).")
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        guard let value, let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        return number.doubleValue.isFinite ? number.doubleValue : nil
+    }
+
+    private static func integer(_ value: Any?) -> Int? {
+        guard let number = number(value), number.rounded() == number,
+              number >= Double(Int.min), number <= Double(Int.max) else { return nil }
+        return Int(number)
+    }
+
+    private static func invalid(_ message: String) -> NotesError {
+        NotesError("invalid_smart_folder_query", message)
+    }
+}
+
 public struct SmartFolderRules: Sendable, Equatable {
     public var match: SmartFolderRuleMatch
     public var tags: [String]

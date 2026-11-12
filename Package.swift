@@ -49,7 +49,7 @@ let package = Package(
         .testTarget(name: "NotesAutomationTests", dependencies: ["NotesAutomation", "NotesCore"]),
         .testTarget(name: "NotesNativeTests", dependencies: ["NotesNative", "NotesAutomation", "NotesCore", "NotesStore"]),
         .testTarget(name: "NotesSafetyTests", dependencies: ["NotesSafety", "NotesCore"]),
-        .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore"]),
+        .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore", "NotesSafety"]),
         .testTarget(name: "NotesSyncTests", dependencies: ["NotesSync", "NotesCore"]),
     ]
 )

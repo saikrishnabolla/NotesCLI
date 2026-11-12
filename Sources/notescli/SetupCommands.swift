@@ -59,9 +59,22 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     func result(_ value: NativeWriteResult) throws -> MCPNativeResult {
         try MCPNativeResult(result: value.writeResult, operationID: value.operationID, value: value)
     }
+    func enumValue<T: RawRepresentable>(_ key: String, as type: T.Type, choices: String) throws -> T? where T.RawValue == String {
+        guard let raw = string(key) else { return nil }
+        guard let value = T(rawValue: raw) else { throw NotesError("invalid_arguments", "Invalid \(key); use \(choices).") }
+        return value
+    }
+    func scriptValue() throws -> Int? {
+        let selected = [("superscript", 1), ("subscript", -1), ("clear_script", 0)].filter { boolean($0.0) == true }
+        guard selected.count <= 1 else { throw NotesError("invalid_arguments", "Choose one of superscript, subscript, or clear_script.") }
+        return selected.first?.1
+    }
     let writer = NativeNotesWriter()
     let allowShared = boolean("allow_shared") ?? false
     switch tool {
+    case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: writer.checklistAutoSortEnabled())
+    case "journal_get_default_account": return try MCPNativeResult(value: writer.defaultAccountIdentifier())
+    case "journal_get_smart_folder_query": return try MCPNativeResult(value: writer.smartFolderQuery(ref()))
     case "create_note":
         let paths = arguments["attachments"] as? [String] ?? []
         let frozen = try paths.map { try FrozenAttachmentInput(file: URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)) }
@@ -128,16 +141,16 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "text_replace": return try result(writer.replaceRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), text: string("text")!, allowShared: (boolean("allow_shared") ?? false)))
     case "format_paragraph":
         guard let style = NativeParagraphStyle(rawValue: string("style") ?? "") else { throw NotesError("invalid_style", "Unknown paragraph style.") }
-        let alignment = string("alignment").flatMap(NativeParagraphAlignment.init(rawValue:))
-        let direction = string("writing_direction").flatMap(NativeWritingDirection.init(rawValue:))
+        let alignment = try enumValue("alignment", as: NativeParagraphAlignment.self, choices: "left, right, center, justified, or natural")
+        let direction = try enumValue("writing_direction", as: NativeWritingDirection.self, choices: "natural, left-to-right, or right-to-left")
         return try result(writer.setParagraphStyle(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), style: style, indent: integer("indent"),
                                                    alignment: alignment, writingDirection: direction, collapsed: boolean("collapsed"), allowShared: (boolean("allow_shared") ?? false)))
     case "format_inline":
-        let script = boolean("superscript") == true ? 1 : (boolean("subscript") == true ? -1 : (boolean("clear_script") == true ? 0 : nil))
+        let script = try scriptValue()
         let format = InlineFormat(bold: boolean("bold"), italic: boolean("italic"), underline: boolean("underline"), strike: boolean("strike"),
                                   link: string("link"), clearLink: boolean("clear_link") ?? false, color: string("color"), clearColor: boolean("clear_color") ?? false,
                                   superscript: script, fontName: string("font_name"), fontSize: (arguments["font_size"] as? NSNumber)?.doubleValue,
-                                  highlight: string("highlight").flatMap(HighlightColor.init(rawValue:)), clearHighlight: boolean("clear_highlight") ?? false)
+                                  highlight: try enumValue("highlight", as: HighlightColor.self, choices: "purple, pink, orange, mint, or blue"), clearHighlight: boolean("clear_highlight") ?? false)
         return try result(writer.setInlineFormat(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format, allowShared: (boolean("allow_shared") ?? false)))
     case "insert_divider": return try result(writer.insertDivider(ref(), position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "insert_math": return try result(writer.insertMathExpression(ref(), expression: string("expression")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
@@ -151,11 +164,11 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         return try result(writer.createTable(ref(), rows: rows, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "table_set": return try result(writer.editTable(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!, text: string("text")!, allowShared: (boolean("allow_shared") ?? false)))
     case "table_format_cell":
-        let script = boolean("superscript") == true ? 1 : (boolean("subscript") == true ? -1 : (boolean("clear_script") == true ? 0 : nil))
+        let script = try scriptValue()
         let format = InlineFormat(bold: boolean("bold"), italic: boolean("italic"), underline: boolean("underline"), strike: boolean("strike"),
                                   link: string("link"), clearLink: boolean("clear_link") ?? false, color: string("color"), clearColor: boolean("clear_color") ?? false,
                                   superscript: script, fontName: string("font_name"), fontSize: (arguments["font_size"] as? NSNumber)?.doubleValue,
-                                  highlight: string("highlight").flatMap(HighlightColor.init(rawValue:)), clearHighlight: boolean("clear_highlight") ?? false)
+                                  highlight: try enumValue("highlight", as: HighlightColor.self, choices: "purple, pink, orange, mint, or blue"), clearHighlight: boolean("clear_highlight") ?? false)
         return try result(writer.formatTableCell(ref(), attachmentID: string("attachment_id")!, row: integer("row")!, column: integer("column")!,
                                                  range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format,
                                                  allowShared: boolean("allow_shared") ?? false))

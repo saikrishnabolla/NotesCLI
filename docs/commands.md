@@ -140,6 +140,8 @@ notescli file push <path> [--dry-run]
 notescli file diff <path>
 ```
 
+`undo` and `revert` accept a note reference for snapshots or a journal operation ID for a recorded setting or Smart Folder rule preimage.
+
 ## Export
 
 ```text

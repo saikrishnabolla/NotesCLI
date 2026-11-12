@@ -1,5 +1,6 @@
 import XCTest
 import NotesCore
+import NotesSafety
 @testable import NotesMCP
 
 final class ProtocolTests: XCTestCase {
@@ -67,6 +68,36 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNotNil(createProperties?["wait_sync"])
         XCTAssertNotNil(createProperties?["allow_shared"])
         XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
+    }
+
+    func testNativeFormattingSchemasAndValidationRejectInvalidValuesBeforeDispatch() throws {
+        let fake = InMemoryNotes.sample()
+        var dispatchCount = 0
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { _, _ in
+            dispatchCount += 1
+            return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+        })
+        let tools = ((try request(server, method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]])
+        func property(_ tool: String, _ name: String) throws -> [String: Any] {
+            let schema = try XCTUnwrap(tools.first { $0["name"] as? String == tool }?["inputSchema"] as? [String: Any])
+            return try XCTUnwrap((schema["properties"] as? [String: Any])?[name] as? [String: Any])
+        }
+        XCTAssertEqual(try property("format_paragraph", "alignment")["enum"] as? [String], ["left", "right", "center", "justified", "natural"])
+        XCTAssertEqual(try property("format_paragraph", "writing_direction")["enum"] as? [String], ["natural", "left-to-right", "right-to-left"])
+        XCTAssertEqual(try property("format_inline", "highlight")["enum"] as? [String], ["purple", "pink", "orange", "mint", "blue"])
+        XCTAssertEqual(try property("table_format_cell", "highlight")["enum"] as? [String], ["purple", "pink", "orange", "mint", "blue"])
+
+        let invalid: [(String, [String: Any], String)] = [
+            ("format_paragraph", ["ref": "welcome", "start": 0, "length": 1, "style": "body", "alignment": "diagonal"], "Invalid alignment; use left, right, center, justified, or natural."),
+            ("format_paragraph", ["ref": "welcome", "start": 0, "length": 1, "style": "body", "writing_direction": "up"], "Invalid writing_direction; use natural, left-to-right, or right-to-left."),
+            ("format_inline", ["ref": "welcome", "start": 0, "length": 1, "highlight": "green"], "Invalid highlight; use purple, pink, orange, mint, or blue."),
+            ("format_inline", ["ref": "welcome", "start": 0, "length": 1, "superscript": true, "subscript": true], "Choose one of superscript, subscript, or clear_script.")
+        ]
+        for (name, arguments, message) in invalid {
+            let response = try request(server, method: "tools/call", params: ["name": name, "arguments": arguments])
+            XCTAssertEqual((response["error"] as? [String: Any])?["message"] as? String, message)
+        }
+        XCTAssertEqual(dispatchCount, 0)
     }
     func testAttachmentsAndNativeMarkdownRouteThroughNativeHandler() throws {
         let fake = InMemoryNotes.sample()
@@ -141,10 +172,17 @@ final class ProtocolTests: XCTestCase {
     func testNativeFolderAndSmartFolderWritesUseFolderIdentity() throws {
         let account = Account(id: "account", name: "Demo", kind: "local", isDefault: true)
         let regular = Folder(id: "regular-id", name: "Regular", accountID: account.id, parentID: nil, path: ["Regular"], isSmartFolder: false, isRecentlyDeleted: false, noteCount: 0)
-        let smart = Folder(id: "smart-id", name: "Smart", accountID: account.id, parentID: nil, path: ["Smart"], isSmartFolder: true, isRecentlyDeleted: false, noteCount: 0)
+        let smart = Folder(id: "smart-id", name: "Smart", accountID: account.id, parentID: nil, path: ["Smart"], isSmartFolder: true, isRecentlyDeleted: false, noteCount: 0,
+                           smartFolderQuery: #"{"tag":"old"}"#)
         let fake = InMemoryNotes(accounts: [account], folders: [regular, smart])
         var calls: [(String, String)] = []
         let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            if tool == "journal_get_smart_folder_query" {
+                return try MCPNativeResult(value: #"{"tag":"old"}"#)
+            }
+            if tool == "get_folder_sort" {
+                return try MCPNativeResult(value: ["folderID": arguments["ref"] as! String, "order": "title", "direction": "ascending"])
+            }
             let ref = arguments["ref"] as! String
             calls.append((tool, ref))
             return try MCPNativeResult(result: WriteResult(outcome: .verified, folderID: ref), value: ["ok": true])
@@ -153,6 +191,38 @@ final class ProtocolTests: XCTestCase {
         _ = try call(server, "smart_folder_edit_typed", ["ref": "Smart", "expected_count": 1, "tags": ["work"]])
         XCTAssertEqual(calls.map(\.0), ["set_folder_sort", "smart_folder_edit_typed"])
         XCTAssertEqual(calls.map(\.1), ["regular-id", "smart-id"])
+    }
+
+    func testNativeSettingAndSmartFolderWritesJournalLiteralPreimages() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-native-preimages-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let account = Account(id: "account-new", name: "Demo", kind: "local", isDefault: true)
+        let regular = Folder(id: "regular-id", name: "Regular", accountID: account.id, parentID: nil, path: ["Regular"], isSmartFolder: false, isRecentlyDeleted: false, noteCount: 0)
+        let smart = Folder(id: "smart-id", name: "Smart", accountID: account.id, parentID: nil, path: ["Smart"], isSmartFolder: true, isRecentlyDeleted: false, noteCount: 0,
+                           smartFolderQuery: #"{"tag":"old"}"#)
+        let fake = InMemoryNotes(accounts: [account], folders: [regular, smart])
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            switch tool {
+            case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: false)
+            case "journal_get_default_account": return try MCPNativeResult(value: "account-old")
+            case "journal_get_smart_folder_query": return try MCPNativeResult(value: #"{"tag":"old"}"#)
+            case "get_folder_sort": return try MCPNativeResult(value: ["folderID": "regular-id", "order": "created", "direction": "oldest"])
+            default:
+                return try MCPNativeResult(result: WriteResult(outcome: .verified, folderID: arguments["ref"] as? String), value: ["ok": true])
+            }
+        }, stateRoot: root)
+
+        _ = try call(server, "checklist_auto_sort", ["enabled": true])
+        _ = try call(server, "set_default_account", ["account_id": "account-new"])
+        _ = try call(server, "set_folder_sort", ["ref": "Regular", "by": "title", "direction": "ascending"])
+        _ = try call(server, "smart_folder_edit_rules", ["ref": "Smart", "query_json": #"{"tag":"new"}"#, "expected_count": 1])
+
+        let entries = try WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 10)
+        let actions = try entries.compactMap { try $0.restoreAction() }
+        XCTAssertTrue(actions.contains(.checklistAutoSort(enabled: false)))
+        XCTAssertTrue(actions.contains(.defaultAccount(identifier: "account-old")))
+        XCTAssertTrue(actions.contains(.folderSort(folderID: "regular-id", order: "created", direction: "oldest")))
+        XCTAssertTrue(actions.contains(.smartFolderQuery(folderID: "smart-id", queryJSON: #"{"tag":"old"}"#)))
     }
     func testReadAndPaging() throws {
         let server = MCPServer(reader: InMemoryNotes.sample())

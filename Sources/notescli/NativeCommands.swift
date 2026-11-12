@@ -59,10 +59,11 @@ enum UnifiedNative {
     }
     static func checklistAutoSort(_ o: GlobalOptions, _ w: WriteOptions, enabled: Bool) throws {
         let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let writer = NativeNotesWriter(), previous = writer.checklistAutoSortEnabled()
         let plan = DryRunPlan(operation: "checklistAutoSort", target: "Notes settings", arguments: ["enabled": String(enabled)], resultingHTML: nil, engine: "native")
         var captured: NativeWriteResult?
-        let result = try SafetyExecutor.run(options: w, operation: "checklistAutoSort", arguments: ["enabled": String(enabled), "engine": "native"], allowedPaths: [], plan: plan) {
-            let value = try NativeNotesWriter().setChecklistAutoSort(enabled); captured = value; return value.writeResult
+        let result = try SafetyExecutor.run(options: w, operation: "checklistAutoSort", arguments: ["enabled": String(enabled), "previous_enabled": String(previous), "engine": "native"], allowedPaths: [], plan: plan) {
+            let value = try writer.setChecklistAutoSort(enabled); captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)
@@ -71,11 +72,13 @@ enum UnifiedNative {
         let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
         let folder = try SafetyExecutor.folder(ref, reader: backend.reader)
         guard let folder, !folder.isSmartFolder, !folder.isRecentlyDeleted else { throw NotesError("folder_not_found", "No writable folder matches the reference.") }
-        let arguments = ["ref": folder.id, "by": order.rawValue, "direction": direction.rawValue, "engine": "native"]
+        let writer = NativeNotesWriter(), previous = try writer.folderSort(folder.id)
+        let arguments = ["ref": folder.id, "stable_id": folder.id, "by": order.rawValue, "direction": direction.rawValue,
+                         "previous_by": previous.order.rawValue, "previous_direction": previous.direction.rawValue, "engine": "native"]
         let plan = DryRunPlan(operation: "folderSort", target: folder.id, arguments: arguments, resultingHTML: nil, engine: "native")
         var captured: NativeWriteResult?
         let result = try SafetyExecutor.run(options: w, operation: "folderSort", arguments: arguments, allowedPaths: [folder.path], plan: plan) {
-            let value = try NativeNotesWriter().setFolderSort(folder.id, order: order, direction: direction); captured = value; return value.writeResult
+            let value = try writer.setFolderSort(folder.id, order: order, direction: direction); captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)
@@ -84,11 +87,12 @@ enum UnifiedNative {
         let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
         let matches = try backend.reader.accounts().filter { $0.id.caseInsensitiveCompare(ref) == .orderedSame || $0.name == ref }
         guard matches.count == 1, let account = matches.first else { throw NotesError(matches.isEmpty ? "account_not_found" : "ambiguous_account", "Account must resolve uniquely.") }
-        let arguments = ["account_id": account.id, "engine": "native"]
+        let writer = NativeNotesWriter(), previous = try writer.defaultAccountIdentifier()
+        let arguments = ["account_id": account.id, "previous_account_id": previous, "engine": "native"]
         let plan = DryRunPlan(operation: "setDefaultAccount", target: account.id, arguments: arguments, resultingHTML: nil, engine: "native")
         var captured: NativeWriteResult?
         let result = try SafetyExecutor.run(options: w, operation: "setDefaultAccount", arguments: arguments, allowedPaths: [], plan: plan) {
-            let value = try NativeNotesWriter().setDefaultAccount(account.id); captured = value; return value.writeResult
+            let value = try writer.setDefaultAccount(account.id); captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)

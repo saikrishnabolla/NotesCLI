@@ -4,6 +4,7 @@ import XCTest
 import NotesAutomation
 import NotesCore
 @testable import NotesNative
+import NotesNativeObjC
 import NotesStore
 
 private final class FakePrivateTable: NSObject {
@@ -12,6 +13,11 @@ private final class FakePrivateTable: NSObject {
 
 private final class QueueTurnFlag: @unchecked Sendable {
     var observed = false
+}
+
+private final class FakeChangeTracked: NSObject {
+    var reason: String?
+    @objc(updateChangeCountWithReason:) dynamic func updateChangeCount(reason: String) { self.reason = reason }
 }
 
 final class NativeTests: XCTestCase {
@@ -99,6 +105,15 @@ final class NativeTests: XCTestCase {
         }
     }
 
+    func testChangeCountUsesTheCheckedSelector() throws {
+        let object = FakeChangeTracked()
+        try NCNotesRuntime.updateChangeCount(of: object, reason: "Edited Smart Folder rules")
+        XCTAssertEqual(object.reason, "Edited Smart Folder rules")
+        XCTAssertThrowsError(try NCNotesRuntime.updateChangeCount(of: NSObject(), reason: "missing")) {
+            XCTAssertTrue($0.localizedDescription.contains("updateChangeCountWithReason:"))
+        }
+    }
+
     func testExactVerificationRejectsNonSpecificEvidence() {
         XCTAssertTrue(NativeVerificationRules.exactText("a😀insertedz", text: "inserted", location: 3))
         XCTAssertFalse(NativeVerificationRules.exactText("inserted elsewhere", text: "inserted", location: 3))
@@ -109,6 +124,11 @@ final class NativeTests: XCTestCase {
 
         XCTAssertTrue(NativeVerificationRules.exactTable([["a", "b"]], expected: [["a", "b"]]))
         XCTAssertFalse(NativeVerificationRules.exactTable([["a", "wrong"]], expected: [["a", "b"]]))
+
+        let marker = NSRange(location: 3, length: 1)
+        XCTAssertTrue(NativeVerificationRules.exactReplacement(before: "pre\u{fffc}post", after: "prea,b\nc,dpost", range: marker, text: "a,b\nc,d"))
+        XCTAssertFalse(NativeVerificationRules.exactReplacement(before: "pre\u{fffc}post a,b\nc,d", after: "prepost a,b\nc,d", range: marker, text: "a,b\nc,d"))
+        XCTAssertFalse(NativeVerificationRules.exactReplacement(before: "pre\u{fffc}post", after: "prea,b\nc,dpost!", range: marker, text: "a,b\nc,d"))
 
         let item = ChecklistItem(index: 4, text: "task", done: true, range: UTF16Range(location: 0, length: 4))
         XCTAssertTrue(NativeVerificationRules.checklistItem([item], expected: item, done: true))

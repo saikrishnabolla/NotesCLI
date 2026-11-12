@@ -96,6 +96,6 @@ Verified on macOS 27.2.1 on 2026-11-11. Apple documents the user-facing features
 | Note links and Share-sheet capture | Done | Partial | Deep links and inserted content work; invoking another app's Share sheet is outside the CLI. |
 | Open notes, folders, accounts, and attachments | Done | Done | NotesCLI can ask Notes or Finder to reveal the selected object. |
 | Sync and upload state | Done | Done | State is readable; writes can request upload and wait for bounded acknowledgement. |
-| Version history, diff, undo, and revert | Done | Done | Local snapshots and revision guards support recovery and comparison. |
+| Version history, diff, undo, and revert | Partial | Partial | Attachment-free note snapshots can be restored. Setting and Smart Folder rule writes can restore recorded preimages by journal operation ID. Snapshots containing attachments remain read-only to avoid attachment loss. |
 | Multiple iCloud, local, and IMAP accounts | Done | Done | Reads and supported writes resolve the account and folder explicitly. |
 

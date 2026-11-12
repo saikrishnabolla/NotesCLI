@@ -67,6 +67,8 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(requireInstanceSelectors(_:className:));
 + (BOOL)requireSelectors:(NSArray<NSString *> *)selectors ofObject:(id)object error:(NSError **)error
     NS_SWIFT_NAME(requireSelectors(_:of:));
++ (BOOL)updateChangeCountOfObject:(id)object reason:(NSString *)reason error:(NSError **)error
+    NS_SWIFT_NAME(updateChangeCount(of:reason:));
 + (BOOL)checklistAutoSortEnabled;
 + (BOOL)setChecklistAutoSortEnabled:(BOOL)enabled error:(NSError **)error NS_SWIFT_NAME(setChecklistAutoSort(_:));
 + (nullable id)folderSortTypeWithOrder:(NSInteger)order direction:(NSInteger)direction error:(NSError **)error

@@ -26,6 +26,15 @@ enum NativeVerificationRules {
         actual == expected
     }
 
+    static func exactReplacement(before: String, after: String, range: NSRange, text: String) -> Bool {
+        let source = before as NSString
+        guard range.location >= 0, range.length >= 0, range.location <= source.length,
+              range.length <= source.length - range.location else { return false }
+        let expected = source.replacingCharacters(in: range, with: text)
+        let expectedLength = source.length - range.length + (text as NSString).length
+        return (after as NSString).length == expectedLength && after == expected
+    }
+
     static func checklistItem(_ items: [ChecklistItem], expected: ChecklistItem, done: Bool) -> Bool {
         items.filter {
             $0.index == expected.index && $0.text == expected.text && $0.range == expected.range && $0.done == done

@@ -195,6 +195,7 @@ public protocol NotesNativeWriting {
     func setDefaultAccount(_ identifier: String) throws -> NativeWriteResult
     func createSmartFolder(name: String, tags: [String], matchAll: Bool) throws -> NativeWriteResult
     func renameSmartFolder(_ ref: String, name: String, expectedCount: Int) throws -> NativeWriteResult
+    func smartFolderQuery(_ ref: String) throws -> String
     func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult
     func deleteSmartFolder(_ ref: String, expectedCount: Int) throws -> NativeWriteResult
     func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult

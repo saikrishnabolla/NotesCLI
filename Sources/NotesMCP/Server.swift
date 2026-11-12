@@ -65,6 +65,9 @@ public final class MCPServer {
         let integer: [String: Any] = ["type": "integer", "minimum": 0]
         let strings: [String: Any] = ["type": "array", "items": string]
         let rows: [String: Any] = ["type": "array", "items": ["type": "array", "items": string]]
+        let alignment: [String: Any] = ["type": "string", "enum": ["left", "right", "center", "justified", "natural"]]
+        let writingDirection: [String: Any] = ["type": "string", "enum": ["natural", "left-to-right", "right-to-left"]]
+        let highlight: [String: Any] = ["type": "string", "enum": ["purple", "pink", "orange", "mint", "blue"]]
         let page = ["offset": integer, "limit": integer]
         let cursorPage = ["cursor": string, "limit": integer]
         let writeCommon = ["dry_run": bool, "idempotency_key": string, "if_modified": string,
@@ -166,12 +169,12 @@ public final class MCPServer {
                 t("text_delete", "Delete a UTF-16 range.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer], write: true, native: true, destructive: true),
                 t("text_replace", "Replace a UTF-16 range.", ["ref", "start", "length", "text"], ["ref": string, "start": integer, "length": integer, "text": string], write: true, native: true, destructive: true),
                 // MARK: w4-format begin
-                t("format_paragraph", "Apply native paragraph formatting.", ["ref", "start", "length", "style"], ["ref": string, "start": integer, "length": integer, "style": string, "indent": integer, "alignment": string, "writing_direction": string, "collapsed": bool], write: true, native: true),
-                t("format_inline", "Apply native inline formatting.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "clear_link": bool, "clear_color": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number"], "highlight": string, "clear_highlight": bool], write: true, native: true),
+                t("format_paragraph", "Apply native paragraph formatting.", ["ref", "start", "length", "style"], ["ref": string, "start": integer, "length": integer, "style": string, "indent": integer, "alignment": alignment, "writing_direction": writingDirection, "collapsed": bool], write: true, native: true),
+                t("format_inline", "Apply native inline formatting.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "clear_link": bool, "clear_color": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number"], "highlight": highlight, "clear_highlight": bool], write: true, native: true),
                 t("insert_divider", "Insert a native divider line.", ["ref"], ["ref": string, "position": integer], write: true, native: true),
                 t("insert_math", "Insert a native math graph expression.", ["ref", "expression"], ["ref": string, "expression": string, "position": integer], write: true, native: true),
                 t("insert_mention", "Insert a participant mention in a shared note.", ["ref", "text", "user_record_name"], ["ref": string, "text": string, "user_record_name": string, "position": integer], write: true, native: true),
-                t("table_format_cell", "Apply native inline formatting inside a table cell.", ["ref", "attachment_id", "row", "column", "start", "length"], ["ref": string, "attachment_id": string, "row": integer, "column": integer, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "highlight": string, "clear_link": bool, "clear_color": bool, "clear_highlight": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number", "exclusiveMinimum": 0]], write: true, native: true),
+                t("table_format_cell", "Apply native inline formatting inside a table cell.", ["ref", "attachment_id", "row", "column", "start", "length"], ["ref": string, "attachment_id": string, "row": integer, "column": integer, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "highlight": highlight, "clear_link": bool, "clear_color": bool, "clear_highlight": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number", "exclusiveMinimum": 0]], write: true, native: true),
                 t("table_convert_to_text", "Replace a native table with tab- or comma-separated text.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string, "separator": ["type": "string", "enum": ["tab", "comma"]]], write: true, native: true, destructive: true),
                 t("get_folder_sort", "Read a folder's native custom sort.", ["ref"], ["ref": string], native: true),
                 t("set_folder_sort", "Set a folder's native custom sort.", ["ref", "by", "direction"], ["ref": string, "by": string, "direction": string], write: true, native: true),
@@ -287,7 +290,15 @@ public final class MCPServer {
             case "array": if !(value is [Any]) { return "\(key) must be an array" }
             default: break
             }
-            if let values = spec["enum"] as? [String], !values.contains(value as? String ?? "") { return "Invalid \(key)" }
+            if let values = spec["enum"] as? [String], !values.contains(value as? String ?? "") {
+                let last = values.last ?? ""
+                let choices = values.dropLast().joined(separator: ", ") + (values.count > 1 ? ", or " : "") + last
+                return "Invalid \(key); use \(choices)."
+            }
+        }
+        if ["format_inline", "table_format_cell"].contains(tool.name) {
+            let scripts = ["superscript", "subscript", "clear_script"].filter { args[$0] as? Bool == true }
+            if scripts.count > 1 { return "Choose one of superscript, subscript, or clear_script." }
         }
         return nil
     }
@@ -703,6 +714,32 @@ public final class MCPServer {
             let value = try nativeHandler(tool.name, arguments)
             return try content(["engine": "native", "value": try JSONSerialization.jsonObject(with: value.value)])
         }
+        if tool.name == "checklist_auto_sort" {
+            let current = try nativeHandler("journal_get_checklist_auto_sort", [:])
+            guard let previous = try JSONSerialization.jsonObject(with: current.value, options: .fragmentsAllowed) as? Bool else {
+                throw NotesError("invalid_native_result", "The native engine did not return the checklist auto-sort preimage.")
+            }
+            var recorded = arguments
+            recorded["previous_enabled"] = previous
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
+                let value = try nativeHandler(tool.name, arguments)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        if tool.name == "set_default_account" {
+            let current = try nativeHandler("journal_get_default_account", [:])
+            guard let previous = try JSONSerialization.jsonObject(with: current.value, options: .fragmentsAllowed) as? String else {
+                throw NotesError("invalid_native_result", "The native engine did not return the default-account preimage.")
+            }
+            var recorded = arguments
+            recorded["previous_account_id"] = previous
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
+                let value = try nativeHandler(tool.name, arguments)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
         if tool.name == "move_folder" {
             let source = try folder(arguments["ref"] as! String)
             let destination = try (arguments["parent"] as? String).map(folder)
@@ -721,14 +758,23 @@ public final class MCPServer {
         // MARK: w4-format begin
         if ["smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_edit_typed", "smart_folder_delete"].contains(tool.name) {
             var dispatch = arguments
+            var recorded = arguments
             var paths: [[String]] = []
             if tool.name == "smart_folder_create" { paths = [[arguments["name"] as! String]] }
             else {
                 let target = try folder(arguments["ref"] as! String)
                 guard target.isSmartFolder else { throw NotesError("smart_folder_not_found", "No Smart Folder matches the reference.") }
                 dispatch["ref"] = target.id; paths = [target.path]
+                recorded["stable_id"] = target.id
+                if ["smart_folder_edit_rules", "smart_folder_edit_typed"].contains(tool.name) {
+                    let current = try nativeHandler("journal_get_smart_folder_query", ["ref": target.id])
+                    guard let query = try JSONSerialization.jsonObject(with: current.value, options: .fragmentsAllowed) as? String else {
+                        throw NotesError("invalid_native_result", "The native engine did not return the Smart Folder query preimage.")
+                    }
+                    recorded["previous_query_json"] = query
+                }
             }
-            return try safeWrite(tool: tool, arguments: arguments, note: nil, paths: paths, engine: "native") {
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: paths, engine: "native") {
                 let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
@@ -739,7 +785,16 @@ public final class MCPServer {
             guard !target.isSmartFolder, !target.isRecentlyDeleted else { throw NotesError("folder_not_found", "No writable folder matches the reference.") }
             var dispatch = arguments
             dispatch["ref"] = target.id
-            return try safeWrite(tool: tool, arguments: arguments, note: nil, paths: [target.path], engine: "native") {
+            let current = try nativeHandler("get_folder_sort", ["ref": target.id])
+            guard let setting = try JSONSerialization.jsonObject(with: current.value) as? [String: Any],
+                  let previousOrder = setting["order"] as? String, let previousDirection = setting["direction"] as? String else {
+                throw NotesError("invalid_native_result", "The native engine did not return the folder-sort preimage.")
+            }
+            var recorded = arguments
+            recorded["stable_id"] = target.id
+            recorded["previous_by"] = previousOrder
+            recorded["previous_direction"] = previousDirection
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [target.path], engine: "native") {
                 let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)

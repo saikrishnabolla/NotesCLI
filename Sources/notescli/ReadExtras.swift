@@ -119,7 +119,7 @@ struct AnchorAdd: ParsableCommand {
     @Option var offset: Int?
     func validate() throws { guard (heading != nil) != (offset != nil) else { throw ValidationError("Choose one of --heading or --offset.") } }
     func run() throws {
-        let reader = try options.backends().reader
+        let reader = try options.writable().reader
         let value = try ParagraphAnchorStore().add(note: reader.note(note), heading: heading, offset: offset)
         if options.json { try Output.json(value) } else { Output.table(["ID", "NOTE", "OFFSET"], [[value.id, value.noteShortID ?? value.noteID, String(value.originalOffset)]]) }
     }
@@ -129,7 +129,7 @@ struct AnchorList: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Argument var note: String?
     func run() throws {
-        let values = try ParagraphAnchorStore().list(noteRef: note)
+        let values = try ParagraphAnchorStore(readOnly: options.readOnly).list(noteRef: note)
         if options.json { try Output.json(values) }
         else { Output.table(["ID", "NOTE", "OFFSET", "HEADING"], values.map { [$0.id, $0.noteShortID ?? $0.noteID, String($0.currentOffset ?? $0.originalOffset), $0.heading ?? ""] }) }
     }
@@ -139,7 +139,7 @@ struct AnchorResolve: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Argument var id: String
     func run() throws {
-        let value = try ParagraphAnchorStore().resolve(id, reader: options.backends().reader)
+        let value = try ParagraphAnchorStore(readOnly: options.readOnly).resolve(id, reader: options.backends().reader)
         if options.json { try Output.json(value) }
         else { Output.table(["ID", "NOTE", "OFFSET", "LENGTH", "RELOCATED"], [[value.anchor.id, value.anchor.noteShortID ?? value.anchor.noteID, String(value.offset), String(value.length), String(value.relocated)]]) }
     }
@@ -148,7 +148,7 @@ struct AnchorPrune: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "prune")
     @OptionGroup var options: GlobalOptions
     func run() throws {
-        let count = try ParagraphAnchorStore().prune(reader: options.backends().reader)
+        let count = try ParagraphAnchorStore().prune(reader: options.writable().reader)
         if options.json { try Output.json(["pruned": count]) } else { Output.table(["PRUNED"], [[String(count)]]) }
     }
 }

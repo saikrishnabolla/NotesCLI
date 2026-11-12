@@ -5,11 +5,11 @@ NotesCLI requires macOS 14 or later.
 ## Homebrew
 
 ```bash
-brew install --formula https://raw.githubusercontent.com/saikrishnabolla/NotesCLI/main/packaging/homebrew/notescli.rb
+brew install saikrishnabolla/notescli/notescli
 notescli setup
 ```
 
-The formula installs the universal release binary. It does not build Swift source.
+The formula lives in the [saikrishnabolla/homebrew-notescli](https://github.com/saikrishnabolla/homebrew-notescli) tap. It installs the notarized universal release binary and does not build Swift source.
 
 ## Release archive
 
@@ -35,7 +35,7 @@ install -m 755 .build/release/notescli "$HOME/.local/bin/notescli"
 notescli setup
 ```
 
-A local source build is not notarized. macOS may reject a downloaded, unnotarized binary. Release maintainers should sign the universal binary with Developer ID and notarize the zip before publishing it.
+A local source build is not notarized. Release archives are signed with Developer ID and notarized by Apple.
 
 ## Grant permissions
 

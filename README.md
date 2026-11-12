@@ -9,7 +9,7 @@ You need macOS 14 or later. Reading Notes requires Full Disk Access. Creating or
 With Homebrew:
 
 ```bash
-brew install --formula https://raw.githubusercontent.com/saikrishnabolla/NotesCLI/main/packaging/homebrew/notescli.rb
+brew install saikrishnabolla/notescli/notescli
 notescli setup
 ```
 

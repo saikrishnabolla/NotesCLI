@@ -245,7 +245,7 @@ public enum CapabilityReporter {
     }
 
     private static func speech() -> String {
-        switch SFSpeechRecognizer.authorizationStatus() {
+        switch AudioTranscriber.authorizationStatus {
         case .authorized: return "authorized"
         case .denied: return "denied"
         case .restricted: return "restricted"

@@ -39,11 +39,15 @@ public enum AudioTranscriber {
         }
     }
 
+    /// The Speech Recognition status recorded for notescli itself, read in a helper process when needed.
     public static var authorizationStatus: SFSpeechRecognizerAuthorizationStatus {
-        SFSpeechRecognizer.authorizationStatus()
+        if let helper = SpeechHelper.executable,
+           let raw = try? SpeechHelper.run(helper, ["--status"], as: Int.self),
+           let status = SFSpeechRecognizerAuthorizationStatus(rawValue: raw) { return status }
+        return SFSpeechRecognizer.authorizationStatus()
     }
 
-    public static func requestAuthorization() async throws -> SFSpeechRecognizerAuthorizationStatus {
+    static func requestAuthorization() async throws -> SFSpeechRecognizerAuthorizationStatus {
         try requireSpeechUsageDescription()
         return await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
@@ -106,7 +110,7 @@ public enum AudioTranscriber {
         }
     }
 
-    public static func transcribe(_ file: URL, locale identifier: String? = nil) async throws -> [TranscriptWord] {
+    static func transcribe(_ file: URL, locale identifier: String? = nil) async throws -> [TranscriptWord] {
         try requireSpeechUsageDescription()
         var status = authorizationStatus
         if status == .notDetermined { status = try await requestAuthorization() }
@@ -132,6 +136,16 @@ public enum AudioTranscriber {
     }
 
     public static func transcribeBlocking(_ file: URL, locale: String? = nil) throws -> [TranscriptWord] {
+        guard let helper = SpeechHelper.executable else { return try transcribeInProcess(file, locale: locale) }
+        let copy = try SpeechHelper.privateCopy(of: file)
+        defer { try? FileManager.default.removeItem(at: copy.deletingLastPathComponent()) }
+        var arguments = ["--file", copy.path]
+        if let locale { arguments += ["--locale", locale] }
+        return try SpeechHelper.run(helper, arguments, as: [TranscriptWord].self)
+    }
+
+    /// Transcribes in this process. Only the speech helper calls this, after it disclaims its parent app.
+    public static func transcribeInProcess(_ file: URL, locale: String? = nil) throws -> [TranscriptWord] {
         let box = BlockingResult<[TranscriptWord]>()
         Task {
             do { box.set(.success(try await transcribe(file, locale: locale))) }
@@ -150,6 +164,13 @@ public enum AudioTranscriber {
     }
 
     public static func requestAuthorizationBlocking() throws -> SFSpeechRecognizerAuthorizationStatus {
+        guard let helper = SpeechHelper.executable else { return try requestAuthorizationInProcess() }
+        let raw = try SpeechHelper.run(helper, ["--authorize"], as: Int.self)
+        return SFSpeechRecognizerAuthorizationStatus(rawValue: raw) ?? .notDetermined
+    }
+
+    public static func requestAuthorizationInProcess() throws -> SFSpeechRecognizerAuthorizationStatus {
+        if SFSpeechRecognizer.authorizationStatus() != .notDetermined { return SFSpeechRecognizer.authorizationStatus() }
         let box = BlockingResult<SFSpeechRecognizerAuthorizationStatus>()
         Task {
             do { box.set(.success(try await requestAuthorization())) }

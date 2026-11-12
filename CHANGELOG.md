@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3
+
+### Fixed
+
+- On-device transcription no longer crashes when notescli runs from Terminal or an MCP host. macOS checked the launching app for a Speech Recognition usage description and killed notescli. Speech Recognition now runs in a helper process that macOS treats as notescli itself.
+
 ## 1.0.2
 
 ### Fixed

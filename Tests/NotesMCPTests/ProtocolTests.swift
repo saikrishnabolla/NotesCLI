@@ -630,6 +630,6 @@ final class ServerVersionTests: XCTestCase {
         let server = MCPServer(reader: fake, writer: fake)
         let response = try XCTUnwrap(server.handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-06-18", "capabilities": [String: Any](), "clientInfo": ["name": "t", "version": "1"]]]))
         let info = try XCTUnwrap((response["result"] as? [String: Any])?["serverInfo"] as? [String: Any])
-        XCTAssertEqual(info["version"] as? String, "1.0.2")
+        XCTAssertEqual(info["version"] as? String, "1.0.3")
     }
 }

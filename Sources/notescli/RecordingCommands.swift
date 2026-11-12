@@ -185,3 +185,31 @@ private func recordingTranscriptSegments(transcribe: Bool, transcriptFile: Strin
     guard transcribe, let audio else { return [] }
     return try AudioTranscriber.transcribeBlocking(audio, locale: locale)
 }
+
+/// Internal: runs Speech Recognition for notescli in a process that is responsible for itself.
+struct SpeechHelperCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: SpeechHelper.subcommand, shouldDisplay: false)
+    @Flag var status = false
+    @Flag var authorize = false
+    @Option var file: String?
+    @Option var locale: String?
+    @Option var reply: String
+
+    func run() throws {
+        do {
+            if status {
+                try SpeechHelper.writeReply(AudioTranscriber.authorizationStatus.rawValue, error: nil, to: reply)
+            } else if authorize {
+                try SpeechHelper.writeReply(try AudioTranscriber.requestAuthorizationInProcess().rawValue, error: nil, to: reply)
+            } else if let file {
+                let words = try AudioTranscriber.transcribeInProcess(URL(fileURLWithPath: file), locale: locale)
+                try SpeechHelper.writeReply(words, error: nil, to: reply)
+            } else {
+                throw NotesError("usage", "speech-helper needs --status, --authorize, or --file.")
+            }
+        } catch {
+            let notesError = (error as? NotesError) ?? NotesError("speech_helper_failed", error.localizedDescription)
+            try SpeechHelper.writeReply(Optional<Int>.none, error: notesError, to: reply)
+        }
+    }
+}

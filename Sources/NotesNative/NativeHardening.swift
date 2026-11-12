@@ -35,6 +35,33 @@ enum NativeVerificationRules {
     static func attachment(_ attachmentIDs: [String], id: String) -> Bool {
         attachmentIDs.filter { $0 == id }.count == 1
     }
+
+    static func sameMarkerMultiset(_ lhs: [(String, String)], _ rhs: [(String, String)]) -> Bool {
+        func counts(_ values: [(String, String)]) -> [String: Int] {
+            values.reduce(into: [:]) { $0[$1.0 + "\u{0}" + $1.1, default: 0] += 1 }
+        }
+        return counts(lhs) == counts(rhs)
+    }
+}
+
+enum NativeSharedWriteGuard {
+    static func require(isShared: Bool, allowShared: Bool, isReadOnly: Bool?) throws {
+        guard isShared else { return }
+        guard allowShared else { throw NotesError("shared_write_refused", "The item is shared. Pass --allow-shared to confirm the write.") }
+        guard let isReadOnly else {
+            throw NotesError("shared_permission_unknown", "Notes did not expose the current participant's write role; nothing was changed.")
+        }
+        if isReadOnly { throw NotesError("shared_read_only", "The current participant has read-only access to this shared item.") }
+    }
+}
+
+enum NativeDestinationResolver {
+    static func folderID(_ location: DefaultNotesLocation?) throws -> String {
+        guard let folderID = location?.folderID, !folderID.isEmpty else {
+            throw NotesError("folder_not_found", "The default Notes folder could not be resolved.")
+        }
+        return folderID
+    }
 }
 
 enum NativeStaleGuard {

@@ -192,7 +192,7 @@ final class ReaderRendererTests: XCTestCase {
         var doc = NoteDocument(text:String(repeating:"\u{fffc}\n",count:refs.count),runs:refs.map { .init(length:2,attachment:$0) })
         doc.tables = ["table":[["Name","Value"],["A|B","C\nD"]]]
         let attachments = [Attachment(id:"photo",typeUTI:"public.jpeg",filename:"image.png",filePath:"/private/image.png")]
-        XCTAssertEqual(doc.markdown(attachments:attachments),"![image.png](/private/image.png)\n[attachment: public.data](notescli-attachment:file)\n#work\n@Pat\n[Other note](applenotes://showNote?identifier=ABC)\n| Name | Value |\n| --- | --- |\n| A\\|B | C<br>D |\n")
+        XCTAssertEqual(doc.markdown(attachments:attachments),"![image.png](/private/image.png)\n[attachment: public.data](notescli-attachment:file)\n[#work](notescli-attachment:tag)\n[@Pat](notescli-attachment:person)\n[Other note](applenotes://showNote?identifier=ABC)\n| Name | Value |\n| --- | --- |\n| A\\|B | C<br>D |\n")
         XCTAssertEqual(doc.plainText(attachments:attachments),"image.png\nattachment: public.data\n#work\n@Pat\nOther note\nName\tValue\nA|B\tC\nD\n")
         XCTAssertTrue(doc.html().contains("<table><tr><td>Name</td><td>Value</td></tr><tr><td>A|B</td><td>C<br>D</td></tr></table>"))
     }

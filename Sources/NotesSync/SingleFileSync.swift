@@ -24,6 +24,7 @@ private struct FileSyncState: Codable {
     var base: String
     var hash: String
     var pendingHash: String?
+    var pendingBody: String?
     var conflicted: Bool?
 }
 
@@ -41,7 +42,7 @@ public final class SingleFileSync {
         guard !note.summary.isLocked, note.document != nil else { throw NotesSyncError.invalidState("The note body is unavailable.") }
         let noteID = note.summary.id.uuid
         let remote = markdown(note), remoteHash = StableHash.hex(remote)
-        let sidecar = sidecarURL(for: path)
+        let sidecar = try sidecarURL(for: path)
         let state = try loadState(sidecar)
         if let state, state.noteID != noteID { throw NotesSyncError.invalidState("The file sidecar belongs to another note.") }
 
@@ -67,7 +68,7 @@ public final class SingleFileSync {
             if merge.hadConflicts {
                 if !dryRun {
                     try write(MarkdownFile(noteID: noteID, title: localFile.title, modified: note.summary.modified, body: output), to: path)
-                    try save(FileSyncState(noteID: noteID, base: remote, hash: remoteHash), to: sidecar)
+                    try save(FileSyncState(noteID: noteID, base: remote, hash: remoteHash, conflicted: true), to: sidecar)
                 }
                 return report(.conflict, noteID, path, changed: true, conflicts: 1,
                               "Both copies changed the same lines; conflict markers were written locally.")
@@ -81,18 +82,24 @@ public final class SingleFileSync {
     }
 
     public func push(from path: URL, dryRun: Bool = false) throws -> FileSyncReport {
-        let localFile = try localFile(at: path)
+        var localFile = try localFile(at: path)
         guard let noteID = localFile.noteID else { throw NotesSyncError.invalidState("The Markdown file must contain notes-id front matter.") }
         let note = try reader.note(noteID)
         guard !note.summary.isLocked, note.document != nil else { throw NotesSyncError.invalidState("The note body is unavailable.") }
-        let sidecar = sidecarURL(for: path)
+        let sidecar = try sidecarURL(for: path)
         var state = try loadState(sidecar) ?? FileSyncState(noteID: noteID, base: markdown(note), hash: StableHash.hex(markdown(note)))
         guard state.noteID == noteID else { throw NotesSyncError.invalidState("The file sidecar belongs to another note.") }
         let remote = markdown(note), remoteHash = StableHash.hex(remote)
 
         if let pending = state.pendingHash {
             if pending == remoteHash {
+                let confirmedBody = state.pendingBody ?? remote
+                if confirmedBody != localFile.body, !dryRun {
+                    try write(MarkdownFile(noteID: noteID, title: localFile.title, modified: note.summary.modified, body: confirmedBody), to: path)
+                    localFile.body = confirmedBody
+                }
                 state.pendingHash = nil; state.base = remote; state.hash = remoteHash
+                state.pendingBody = nil
                 if !dryRun { try save(state, to: sidecar) }
             } else {
                 throw NotesSyncError.writeUnknown("A prior file push still has an unknown outcome. No write was retried.")
@@ -100,7 +107,7 @@ public final class SingleFileSync {
         }
         let localHash = StableHash.hex(localFile.body)
         let localChanged = localHash != state.hash, remoteChanged = remoteHash != state.hash
-        if state.conflicted == true && localFile.body.contains("<<<<<<< LOCAL") {
+        if hasConflictMarkers(localFile.body) {
             return report(.conflict, noteID, path, changed: false, conflicts: 1,
                           remoteChanged ? "The conflict is unresolved and Notes changed again." : "Resolve the existing conflict markers before pushing.")
         }
@@ -140,6 +147,7 @@ public final class SingleFileSync {
         let result = try writer.replaceBody(noteID, markdown: merged)
         if result.outcome == .unknown {
             state.pendingHash = StableHash.hex(merged)
+            state.pendingBody = merged
             try save(state, to: sidecar)
             throw NotesSyncError.writeUnknown("The outcome of file push is unknown. Read both sides before retrying.")
         }
@@ -159,7 +167,7 @@ public final class SingleFileSync {
         guard let state = try loadState(sidecarURL(for: path)) else {
             return report(.pending, noteID, path, changed: local.body != remote, "No merge base exists; pull or push once to create it.")
         }
-        if state.conflicted == true && local.body.contains("<<<<<<< LOCAL") {
+        if hasConflictMarkers(local.body) {
             return report(.conflict, noteID, path, changed: false, conflicts: 1,
                           "Resolve the existing conflict markers before pushing.")
         }
@@ -190,9 +198,16 @@ public final class SingleFileSync {
         return MarkdownFile.parse(try String(contentsOf: path, encoding: .utf8), fallbackTitle: path.deletingPathExtension().lastPathComponent)
     }
 
-    private func sidecarURL(for path: URL) -> URL {
-        path.deletingLastPathComponent().appendingPathComponent(".notescli", isDirectory: true)
-            .appendingPathComponent(SafePath.component(path.lastPathComponent) + ".json")
+    private func sidecarURL(for path: URL) throws -> URL {
+        let relative = ".notescli/" + SafePath.component(path.lastPathComponent) + ".json"
+        return try SafePath.child(relative, of: path.deletingLastPathComponent())
+    }
+
+    private func hasConflictMarkers(_ body: String) -> Bool {
+        let lines = body.components(separatedBy: "\n")
+        return lines.contains { $0.hasPrefix("<<<<<<< ") }
+            && lines.contains("=======")
+            && lines.contains { $0.hasPrefix(">>>>>>> ") }
     }
 
     private func loadState(_ url: URL) throws -> FileSyncState? {

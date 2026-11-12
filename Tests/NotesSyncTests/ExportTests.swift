@@ -199,6 +199,50 @@ final class ExportTests: XCTestCase {
         }
     }
 
+    func testBearAndQuiverRejectSymlinkedExportDirectories() throws {
+        let root = try temporaryDirectory(), outside = try temporaryDirectory()
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("Welcome--welcome.textbundle"),
+                                                   withDestinationURL: outside)
+        XCTAssertThrowsError(try ImportFormatExport.writeBear([try InMemoryNotes.sample().note("welcome")], root: root)) {
+            XCTAssertEqual($0 as? NotesSyncError, .invalidPath("Welcome--welcome.textbundle"))
+        }
+
+        let quiverRoot = try temporaryDirectory(), quiverOutside = try temporaryDirectory()
+        try FileManager.default.createSymbolicLink(at: quiverRoot.appendingPathComponent("Notes.qvlibrary"),
+                                                   withDestinationURL: quiverOutside)
+        XCTAssertThrowsError(try ImportFormatExport.writeQuiver([try InMemoryNotes.sample().note("welcome")], root: quiverRoot)) {
+            XCTAssertEqual($0 as? NotesSyncError, .invalidPath("Notes.qvlibrary"))
+        }
+    }
+
+    func testBearAndQuiverKeepDuplicateAttachmentFilenamesDistinct() throws {
+        let root = try temporaryDirectory(), first = root.appendingPathComponent("first.txt"), second = root.appendingPathComponent("second.txt")
+        try Data("first".utf8).write(to: first); try Data("second".utf8).write(to: second)
+        let sample = InMemoryNotes.sample(), base = try sample.note("welcome")
+        var note = base
+        note.attachments = [
+            Attachment(id: "asset-a", typeUTI: "public.plain-text", filename: "same.txt", filePath: first.path),
+            Attachment(id: "asset-b", typeUTI: "public.plain-text", filename: "same.txt", filePath: second.path),
+        ]
+        note.document = NoteDocument(text: "\u{fffc}\n\u{fffc}", runs: [
+            AttributeRun(length: 2, attachment: InlineRef(id: "asset-a", typeUTI: "public.plain-text")),
+            AttributeRun(length: 1, attachment: InlineRef(id: "asset-b", typeUTI: "public.plain-text")),
+        ])
+
+        let bearRoot = root.appendingPathComponent("bear")
+        let bear = URL(fileURLWithPath: try XCTUnwrap(try ImportFormatExport.writeBear([note], root: bearRoot).first))
+        let bearAssets = try FileManager.default.contentsOfDirectory(atPath: bear.appendingPathComponent("assets").path).sorted()
+        XCTAssertEqual(bearAssets, ["same--asset-a-769b206a3f.txt", "same--asset-b-7b4875f447.txt"])
+        XCTAssertEqual(Set(try bearAssets.map { try String(contentsOf: bear.appendingPathComponent("assets/" + $0)) }), Set(["first", "second"]))
+
+        let quiverRoot = root.appendingPathComponent("quiver")
+        let library = URL(fileURLWithPath: try XCTUnwrap(try ImportFormatExport.writeQuiver([note], root: quiverRoot).first))
+        let resources = try XCTUnwrap(FileManager.default.enumerator(at: library, includingPropertiesForKeys: nil)?.allObjects
+            .compactMap { $0 as? URL }.first { $0.lastPathComponent == "resources" })
+        let quiverAssets = try FileManager.default.contentsOfDirectory(atPath: resources.path).sorted()
+        XCTAssertEqual(quiverAssets, ["same--asset-a-769b206a3f.txt", "same--asset-b-7b4875f447.txt"])
+    }
+
     func testCombinedPDFAndEPUBKeepAccountsAndFullFolderPathsSeparate() throws {
         let accounts = [Account(id: "a1", name: "One", kind: "local"), Account(id: "a2", name: "Two", kind: "local")]
         let folders = [

@@ -14,8 +14,11 @@ final class NoteSyncWaiterTests: XCTestCase {
         let changed = Date(timeIntervalSinceReferenceDate: 500)
         let synced = NoteSyncState(needsInitialFetch: false, needsFetch: false, needsFetchAssets: false,
                                    needsSave: false, hasChanges: false, versionOutOfDate: false,
-                                   cloudState: 1, lastSyncDate: changed.addingTimeInterval(1))
+                                   cloudState: 1, lastSyncDate: changed.addingTimeInterval(1),
+                                   currentLocalVersion: 3, latestVersionSyncedToCloud: 3, isInCloud: true)
         XCTAssertTrue(NoteSyncWaiter.isSynced(summary: summary(modified: changed, state: synced), modifiedAfter: changed.addingTimeInterval(-1)))
+        XCTAssertFalse(NoteSyncWaiter.isSynced(summary: summary(modified: changed, state: synced),
+                                               modifiedAfter: changed.addingTimeInterval(-1), postWriteVersion: 4))
         XCTAssertFalse(NoteSyncWaiter.isSynced(summary: summary(modified: changed.addingTimeInterval(-5), state: synced), modifiedAfter: changed))
         var pending = synced
         pending.needsSave = true
@@ -23,5 +26,10 @@ final class NoteSyncWaiterTests: XCTestCase {
         var staleSync = synced
         staleSync.lastSyncDate = changed.addingTimeInterval(-1)
         XCTAssertFalse(NoteSyncWaiter.isSynced(summary: summary(modified: changed, state: staleSync), modifiedAfter: changed.addingTimeInterval(-1)))
+        var staleVersion = synced
+        staleVersion.currentLocalVersion = 8
+        staleVersion.latestVersionSyncedToCloud = 7
+        staleVersion.isInCloud = true
+        XCTAssertFalse(NoteSyncWaiter.isSynced(summary: summary(modified: changed, state: staleVersion), modifiedAfter: changed.addingTimeInterval(-1)))
     }
 }

@@ -27,11 +27,13 @@ public final class ParagraphAnchorStore: @unchecked Sendable {
             .appendingPathComponent("Library/Application Support/NotesCLI/anchors.sqlite")
     }
     private let url: URL
+    private let readOnly: Bool
     private let lock = NSLock()
 
-    public init(url: URL = ParagraphAnchorStore.defaultURL) { self.url = url }
+    public init(url: URL = ParagraphAnchorStore.defaultURL, readOnly: Bool = false) { self.url = url; self.readOnly = readOnly }
 
     public func add(note: Note, heading: String? = nil, offset: Int? = nil) throws -> ParagraphAnchor {
+        guard !readOnly else { throw NotesError("read_only", "Writing is disabled.") }
         guard (heading != nil) != (offset != nil) else { throw NotesError("invalid_anchor", "Choose one of heading or offset.") }
         guard let document = note.document else { throw NotesError("note_locked", "The note body is unavailable.") }
         let selectedOffset: Int
@@ -57,6 +59,7 @@ public final class ParagraphAnchorStore: @unchecked Sendable {
     }
 
     public func list(noteRef: String? = nil) throws -> [ParagraphAnchor] {
+        if readOnly && !FileManager.default.fileExists(atPath: url.path) { return [] }
         lock.lock(); defer { lock.unlock() }
         let db = try open(); defer { sqlite3_close(db) }
         let rows = try query(db, "SELECT id,note_id,note_short_id,heading,original_offset,current_offset,created_at FROM anchors ORDER BY created_at,id", [])
@@ -68,6 +71,7 @@ public final class ParagraphAnchorStore: @unchecked Sendable {
     }
 
     public func resolve(_ id: String, reader: any NotesReading) throws -> AnchorResolution {
+        if readOnly && !FileManager.default.fileExists(atPath: url.path) { throw NotesError("anchor_not_found", "No anchor matches the reference.") }
         lock.lock(); defer { lock.unlock() }
         let db = try open(); defer { sqlite3_close(db) }
         guard let row = try query(db, "SELECT * FROM anchors WHERE id=?", [id]).first,
@@ -90,13 +94,14 @@ public final class ParagraphAnchorStore: @unchecked Sendable {
         }.first?.paragraph
         let match = exactMatch ?? fuzzyMatch
         guard let match else { throw NotesError("anchor_unresolved", "The anchored paragraph could not be found after the note changed.") }
-        try run(db, "UPDATE anchors SET current_offset=? WHERE id=?", [String(match.offset), id])
+        if !readOnly { try run(db, "UPDATE anchors SET current_offset=? WHERE id=?", [String(match.offset), id]) }
         var updated = anchor; updated.currentOffset = match.offset
         return AnchorResolution(anchor: updated, offset: match.offset, length: match.length, relocated: match.offset != anchor.originalOffset)
     }
 
     @discardableResult
     public func prune(reader: any NotesReading) throws -> Int {
+        guard !readOnly else { throw NotesError("read_only", "Writing is disabled.") }
         let anchors = try list()
         var removed = 0
         for anchor in anchors {
@@ -111,12 +116,15 @@ public final class ParagraphAnchorStore: @unchecked Sendable {
     }
 
     private func open() throws -> OpaquePointer {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
+        if !readOnly {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
         var db: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+        let flags = readOnly ? SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        guard sqlite3_open_v2(url.path, &db, flags, nil) == SQLITE_OK,
               let db else { throw NotesError("anchor_store_failed", "Cannot open the anchor database.") }
-        guard sqlite3_exec(db, "PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS anchors(id TEXT PRIMARY KEY,note_id TEXT NOT NULL,note_short_id TEXT,heading TEXT,original_offset INTEGER NOT NULL,current_offset INTEGER,fingerprint TEXT NOT NULL,text TEXT NOT NULL,created_at REAL NOT NULL);", nil, nil, nil) == SQLITE_OK else {
+        if !readOnly && sqlite3_exec(db, "PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS anchors(id TEXT PRIMARY KEY,note_id TEXT NOT NULL,note_short_id TEXT,heading TEXT,original_offset INTEGER NOT NULL,current_offset INTEGER,fingerprint TEXT NOT NULL,text TEXT NOT NULL,created_at REAL NOT NULL);", nil, nil, nil) != SQLITE_OK {
             sqlite3_close(db); throw NotesError("anchor_store_failed", "Cannot prepare the anchor database.")
         }
         return db

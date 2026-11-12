@@ -21,6 +21,12 @@ public struct NoteQuery: Sendable {
     }
 }
 
+public enum NoteTitleOrder {
+    public static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        lhs.localizedStandardCompare(rhs)
+    }
+}
+
 /// Read side. Implemented by NotesStore (NoteStore.sqlite, read-only).
 public protocol NotesReading: Sendable {
     func accounts() throws -> [Account]
@@ -60,7 +66,7 @@ public extension NotesReading {
             case .created: return (lhs.created ?? .distantPast, lhs.id.uuid) > (rhs.created ?? .distantPast, rhs.id.uuid)
             case .opened: return (lhs.lastOpened ?? .distantPast, lhs.modified ?? .distantPast, lhs.id.uuid) > (rhs.lastOpened ?? .distantPast, rhs.modified ?? .distantPast, rhs.id.uuid)
             case .title:
-                let order = lhs.title.localizedStandardCompare(rhs.title)
+                let order = NoteTitleOrder.compare(lhs.title, rhs.title)
                 return order == .orderedSame ? lhs.id.uuid < rhs.id.uuid : order == .orderedAscending
             case .display: return (lhs.displayOrder ?? .greatestFiniteMagnitude, lhs.id.uuid) < (rhs.displayOrder ?? .greatestFiniteMagnitude, rhs.id.uuid)
             }

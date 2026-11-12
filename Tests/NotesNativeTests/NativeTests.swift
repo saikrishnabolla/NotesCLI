@@ -120,6 +120,32 @@ final class NativeTests: XCTestCase {
         XCTAssertFalse(NativeVerificationRules.attachment(["new-attachment", "new-attachment"], id: "new-attachment"))
     }
 
+    func testWholeBodyVerificationRequiresTheFullMarkerMultiset() {
+        let before = [("mention", "mention"), ("tag", "hashtag"), ("tag", "hashtag")]
+        XCTAssertTrue(NativeVerificationRules.sameMarkerMultiset(before, before))
+        XCTAssertFalse(NativeVerificationRules.sameMarkerMultiset(before, [("mention", "mention"), ("tag", "hashtag")]))
+        XCTAssertFalse(NativeVerificationRules.sameMarkerMultiset(before, [("mention", "mention"), ("tag", "other"), ("tag", "hashtag")]))
+    }
+
+    func testSharedWriteGuardRejectsUnknownAndReadOnlyRoles() {
+        XCTAssertThrowsError(try NativeSharedWriteGuard.require(isShared: true, allowShared: true, isReadOnly: nil)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "shared_permission_unknown")
+        }
+        XCTAssertThrowsError(try NativeSharedWriteGuard.require(isShared: true, allowShared: true, isReadOnly: true)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "shared_read_only")
+        }
+        XCTAssertNoThrow(try NativeSharedWriteGuard.require(isShared: true, allowShared: true, isReadOnly: false))
+    }
+
+    func testDefaultNativeDestinationUsesStoreFolderID() throws {
+        let location = DefaultNotesLocation(accountID: "account-a", accountName: "iCloud", folderID: "stable-folder-id",
+                                            folderName: "Notes", folderPath: ["Notes"])
+        XCTAssertEqual(try NativeDestinationResolver.folderID(location), "stable-folder-id")
+        XCTAssertThrowsError(try NativeDestinationResolver.folderID(nil)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "folder_not_found")
+        }
+    }
+
     func testStaleGuardRejectsChangedTargetText() {
         let loaded = Date(timeIntervalSinceReferenceDate: 1)
         let snapshot = Date(timeIntervalSinceReferenceDate: 2)

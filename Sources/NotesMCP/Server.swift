@@ -178,10 +178,10 @@ public final class MCPServer {
         values += [
             t("index_status", "Get search index and background job progress."),
             t("get_attachment", "Return an attachment as an image/audio content block or resource link.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string]),
-            t("anchor_add", "Create a persistent paragraph anchor.", ["ref"], ["ref": string, "heading": string, "offset": integer]),
+            t("anchor_add", "Create a persistent paragraph anchor.", ["ref"], ["ref": string, "heading": string, "offset": integer], write: true),
             t("anchor_list", "List persistent paragraph anchors.", [], ["ref": string]),
             t("anchor_resolve", "Resolve a persistent paragraph anchor after edits.", ["id"], ["id": string]),
-            t("anchor_prune", "Remove anchors whose note or paragraph no longer exists."),
+            t("anchor_prune", "Remove anchors whose note or paragraph no longer exists.", write: true),
             t("table_get", "Read decoded native tables.", ["ref"], ["ref": string, "attachment_id": string, "format": ["type": "string", "enum": ["markdown", "json", "csv"]]])
         ]
         // MARK: w3-read end
@@ -285,7 +285,13 @@ public final class MCPServer {
             while String(data: prefix, encoding: .utf8) == nil { prefix.removeLast() }
             text = String(decoding: prefix, as: UTF8.self) + "\n[Result truncated; use offset and limit.]"
         }
-        return ["content": [["type": "text", "text": text]], "structuredContent": structured, "isError": isError]
+        let bounded: [String: Any]
+        if data.count <= Self.textLimit {
+            bounded = structured
+        } else {
+            bounded = ["truncated": true, "message": "Structured result exceeded the 48 KB budget; use paging or narrower arguments."]
+        }
+        return ["content": [["type": "text", "text": text]], "structuredContent": bounded, "isError": isError]
     }
 
     private func page<T>(_ values: [T], offset: Int, limit: Int, encode: ([T]) throws -> Any) throws -> [String: Any] {
@@ -315,7 +321,7 @@ public final class MCPServer {
         case .modified: return StableCursorPayload(sort: sort.rawValue, key: String(note.modified?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), id: note.id.uuid)
         case .created: return StableCursorPayload(sort: sort.rawValue, key: String(note.created?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), id: note.id.uuid)
         case .opened: return StableCursorPayload(sort: sort.rawValue, key: String(note.lastOpened?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), secondary: String(note.modified?.timeIntervalSince1970 ?? -Double.greatestFiniteMagnitude), id: note.id.uuid)
-        case .title: return StableCursorPayload(sort: sort.rawValue, key: note.title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")), id: note.id.uuid)
+        case .title: return StableCursorPayload(sort: sort.rawValue, key: note.title, id: note.id.uuid)
         case .display: return StableCursorPayload(sort: sort.rawValue, key: String(note.displayOrder ?? Double.greatestFiniteMagnitude), id: note.id.uuid)
         }
     }
@@ -329,7 +335,9 @@ public final class MCPServer {
             let left = Double(candidate.key) ?? 0, right = Double(cursor.key) ?? 0
             let left2 = Double(candidate.secondary ?? "") ?? 0, right2 = Double(cursor.secondary ?? "") ?? 0
             return left < right || (left == right && (left2 < right2 || (left2 == right2 && candidate.id < cursor.id)))
-        case .title: return candidate.key > cursor.key || (candidate.key == cursor.key && candidate.id > cursor.id)
+        case .title:
+            let order = NoteTitleOrder.compare(candidate.key, cursor.key)
+            return order == .orderedDescending || (order == .orderedSame && candidate.id > cursor.id)
         case .display:
             let left = Double(candidate.key) ?? 0, right = Double(cursor.key) ?? 0
             return left > right || (left == right && candidate.id > cursor.id)
@@ -387,7 +395,11 @@ public final class MCPServer {
         guard matches.count == 1 else { throw NotesError("attachment_not_found", "No attachment matches the id.") }
         let attachment = matches[0]
         guard let path = attachment.filePath ?? attachment.fallbackRasterPath else { throw NotesError("attachment_unavailable", "The attachment file is not downloaded.") }
-        let url = URL(fileURLWithPath: path), data = try Data(contentsOf: url, options: .mappedIfSafe)
+        let url = URL(fileURLWithPath: path)
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard let size = (attributes[.size] as? NSNumber)?.intValue else {
+            throw NotesError("attachment_unavailable", "The attachment size is unavailable.")
+        }
         let budget = 34 * 1024
         var blocks: [[String: Any]] = []
         var mime = mimeType(attachment, url: url)
@@ -395,15 +407,16 @@ public final class MCPServer {
             if let resized = resizedImage(url, maximumDimension: 1600, maximumBytes: budget) {
                 blocks.append(["type": "image", "data": resized.base64EncodedString(), "mimeType": "image/jpeg"]); mime = "image/jpeg"
             }
-        } else if attachment.kind == "audio", data.count <= budget {
+        } else if attachment.kind == "audio", size <= budget {
+            let data = try Data(contentsOf: url)
             blocks.append(["type": "audio", "data": data.base64EncodedString(), "mimeType": mime])
         }
         if blocks.isEmpty {
             blocks.append(["type": "resource_link", "name": attachment.filename ?? attachment.id, "uri": url.absoluteString,
-                           "description": "Attachment exceeds the inline 48 KB budget.", "mimeType": mime, "size": data.count])
+                           "description": "Attachment exceeds the inline 48 KB budget.", "mimeType": mime, "size": size])
         }
         let structured: [String: Any] = ["id": attachment.id, "kind": attachment.kind, "filename": attachment.filename ?? NSNull(),
-                                         "inline": blocks.first?["type"] as? String != "resource_link", "mime_type": mime, "size": data.count]
+                                         "inline": blocks.first?["type"] as? String != "resource_link", "mime_type": mime, "size": size]
         return ["content": blocks, "structuredContent": structured, "isError": false]
     }
 
@@ -570,8 +583,12 @@ public final class MCPServer {
             guard let noteID = markdown.noteID else { throw NotesError("invalid_file", "The Markdown file must contain notes-id front matter.") }
             let note = try reader.note(noteID), paths = [note.summary.folderPath]
             return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting", snapshotNotes: [note]) {
-                let report = try SingleFileSync(reader: reader, writer: writer).push(from: path)
-                return (WriteResult(outcome: .verified, noteID: note.summary.id, message: report.message), try NotePresentation.object(report), nil)
+                do {
+                    let report = try SingleFileSync(reader: reader, writer: writer).push(from: path)
+                    return (WriteResult(outcome: .verified, noteID: note.summary.id, message: report.message), try NotePresentation.object(report), nil)
+                } catch NotesSyncError.writeUnknown(let message) {
+                    return (WriteResult(outcome: .unknown, noteID: note.summary.id, message: message), nil, nil)
+                }
             }
         // MARK: w3-export end
         case "sync_notes":
@@ -594,10 +611,10 @@ public final class MCPServer {
                 .add(note: reader.note(s("ref")!), heading: s("heading"), offset: a["offset"].map { _ in i("offset") })
             return try content(["anchor": NotePresentation.object(anchor)])
         case "anchor_list":
-            let anchors = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite")).list(noteRef: s("ref"))
+            let anchors = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite"), readOnly: readOnly).list(noteRef: s("ref"))
             return try content(["anchors": NotePresentation.object(anchors)])
         case "anchor_resolve":
-            let resolved = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite")).resolve(s("id")!, reader: reader)
+            let resolved = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite"), readOnly: readOnly).resolve(s("id")!, reader: reader)
             return try content(["resolution": NotePresentation.object(resolved)])
         case "anchor_prune":
             let count = try ParagraphAnchorStore(url: stateRoot.appendingPathComponent("anchors.sqlite")).prune(reader: reader)

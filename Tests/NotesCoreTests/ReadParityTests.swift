@@ -37,7 +37,12 @@ final class ReadParityTests: XCTestCase {
         let attachment = Attachment(id: "mention", typeUTI: ref.typeUTI, participantName: "Pat",
                                     participantEmail: "pat@example.test", participantUserID: "user-1")
         let markdown = document.markdown(attachments: [attachment])
-        XCTAssertTrue(markdown.contains("Pat")); XCTAssertTrue(markdown.contains("pat@example.test")); XCTAssertTrue(markdown.contains("user-1"))
+        XCTAssertEqual(markdown, "[@Pat · pat@example.test · user-1](notescli-attachment:mention)")
+
+        var hashtag = InlineRef(id: "tag", typeUTI: "com.apple.notes.inlinetextattachment.hashtag")
+        hashtag.displayText = "swift"
+        XCTAssertEqual(NoteDocument(text: "\u{fffc}", runs: [AttributeRun(length: 1, attachment: hashtag)]).markdown(),
+                       "[#swift](notescli-attachment:tag)")
     }
 
     func testShortAndNumericReferencesAndAttachmentKinds() throws {

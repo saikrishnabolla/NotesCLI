@@ -171,7 +171,9 @@ public enum NoteRenderer {
             let prefix = uti.contains("hashtag") ? "#" : "@"
             let identity = [a?.participantName, a?.participantEmail, a?.participantUserID].compactMap { $0 }.joined(separator: " · ")
             let label = identity.isEmpty ? (ref.displayText ?? a?.title ?? ref.id) : identity
-            return escaped(label.hasPrefix(prefix) ? label : prefix + label, format)
+            let display = label.hasPrefix(prefix) ? label : prefix + label
+            if format == .markdown { return "[\(escaped(display, .markdown))](notescli-attachment:\(ref.id))" }
+            return escaped(display, format)
         }
         let title = ref.displayText ?? a?.title ?? a?.filename ?? "attachment: \(ref.typeUTI)"
         let url = ref.url ?? a?.url ?? a?.filePath ?? "notescli-attachment:\(ref.id)"

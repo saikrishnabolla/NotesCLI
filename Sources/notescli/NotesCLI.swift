@@ -63,14 +63,29 @@ struct NotesCLI: ParsableCommand {
         if route == .direct { return false }
         let arguments = Array(CommandLine.arguments.dropFirst())
         let localCommands = Set(["host", "onboard", "setup", "permissions", "doctor", "completion", "speech-helper"])
-        if arguments.contains(where: localCommands.contains) || arguments.contains("--help") || arguments.contains("-h") || arguments.contains("--version") {
+        if arguments.contains("--help") || arguments.contains("-h") || arguments.contains("--version") {
             return false
         }
-        if let index = arguments.firstIndex(of: "mcp"), arguments.indices.contains(index + 1),
-           ["install", "uninstall", "status", "config", "remove"].contains(arguments[index + 1]) {
+        let commandIndex = firstCommandIndex(in: arguments)
+        guard let commandIndex else { return route == .force || CapabilityHostClient.isAvailable() }
+        let command = arguments[commandIndex]
+        if localCommands.contains(command) { return false }
+        if command == "mcp",
+           !Set(arguments.dropFirst(commandIndex + 1)).isDisjoint(with: ["install", "uninstall", "status", "config", "remove"]) {
             return false
         }
         return route == .force || CapabilityHostClient.isAvailable()
+    }
+
+    private static func firstCommandIndex(in arguments: [String]) -> Int? {
+        var index = 0
+        while index < arguments.count {
+            let value = arguments[index]
+            if value == "--backend" || value == "--engine" { index += 2; continue }
+            if value.hasPrefix("-") { index += 1; continue }
+            return index
+        }
+        return nil
     }
     static func fail(_ e: NotesError, status: Int32? = nil) -> Never {
         if CommandLine.arguments.contains("--json"), let data = try? NotePresentation.json(e) { FileHandle.standardError.write(data + Data("\n".utf8)) }

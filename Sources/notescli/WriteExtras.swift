@@ -136,7 +136,7 @@ struct LinkAddURL: ParsableCommand {
 enum SmartFolderMatch: String, ExpressibleByArgument { case any, all }
 
 struct SmartFolderCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "smart-folder", subcommands: [SmartFolderCreate.self, SmartFolderRename.self, SmartFolderEditRules.self, SmartFolderDelete.self])
+    static let configuration = CommandConfiguration(commandName: "smart-folder", subcommands: [SmartFolderCreate.self, SmartFolderRename.self, SmartFolderEditRules.self, SmartFolderEditTyped.self, SmartFolderDelete.self])
 }
 
 struct SmartFolderCreate: ParsableCommand {
@@ -209,6 +209,39 @@ struct SmartFolderEditRules: ParsableCommand {
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: options)
     }
+}
+
+struct SmartFolderEditTyped: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "edit-typed")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Option var expectedCount: Int
+    @Option var match: SmartFolderMatch = .all; @Option var tags: String?; @Option var tagsMatch: SmartFolderMatch = .any
+    @Option var createdFrom: String?; @Option var createdTo: String?; @Option var modifiedFrom: String?; @Option var modifiedTo: String?
+    @Option var folders: String?; @Option var checklists: Bool?; @Option var attachments: String?
+    @Option var shared: Bool?; @Option var locked: Bool?; @Option var mentions: Bool?; @Option var quickNotes: Bool?
+    func run() throws {
+        let backend = try options.writable(); _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        let folder = try SafetyExecutor.folder(ref, reader: backend.reader)
+        guard let folder, folder.isSmartFolder else { throw NotesError("smart_folder_not_found", "No Smart Folder matches the reference.") }
+        let sections = try csvValues(attachments).map { value -> SmartFolderAttachmentSection in
+            guard let section = SmartFolderAttachmentSection(name: value) else { throw ValidationError("Unknown attachment rule: \(value).") }
+            return section
+        }
+        let rules = SmartFolderRules(match: match == .all ? .all : .any, tags: csvValues(tags), tagsMatch: tagsMatch == .all ? .all : .any,
+                                     createdFrom: try createdFrom.map { try NotePresentation.date($0) }, createdTo: try createdTo.map { try NotePresentation.date($0) },
+                                     modifiedFrom: try modifiedFrom.map { try NotePresentation.date($0) }, modifiedTo: try modifiedTo.map { try NotePresentation.date($0) },
+                                     folders: csvValues(folders), checklists: checklists, attachmentSections: sections,
+                                     shared: shared, locked: locked, mentions: mentions, quickNotes: quickNotes)
+        let queryJSON = try rules.json()
+        let plan = DryRunPlan(operation: "smartFolderEditTyped", target: folder.id, arguments: ["query_json": queryJSON, "expected_count": String(expectedCount)], resultingHTML: nil, engine: "native")
+        var captured: NativeWriteResult?
+        let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditTyped", arguments: ["ref": folder.id, "query_json": queryJSON, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
+            let value = try NativeNotesWriter().editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
+        }
+        guard let result else { return }
+        try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: options)
+    }
+    private func csvValues(_ text: String?) -> [String] { text?.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } ?? [] }
 }
 
 struct SmartFolderDelete: ParsableCommand {

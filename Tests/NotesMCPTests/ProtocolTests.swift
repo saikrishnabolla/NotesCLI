@@ -40,11 +40,15 @@ final class ProtocolTests: XCTestCase {
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
         XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "count_notes", "get_stats", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 91)
+        XCTAssertEqual(nativeTools.count, 96)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
         for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
                      "insert_divider", "insert_math", "insert_mention", "table_convert_to_text", "checklist_auto_sort"] {
+            XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
+        }
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "table_format_cell" })
+        for name in ["smart_folder_edit_typed", "get_folder_sort", "set_folder_sort", "set_default_account"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
         let create = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "create_note" })
@@ -123,6 +127,22 @@ final class ProtocolTests: XCTestCase {
         let unknownResult = try call(unknown, "pin_note", ["ref": "welcome"])
         XCTAssertEqual(unknownResult["isError"] as? Bool, true)
         XCTAssertEqual(try structured(unknownResult)["operationID"] as? String, "operation-unknown")
+    }
+    func testNativeFolderAndSmartFolderWritesUseFolderIdentity() throws {
+        let account = Account(id: "account", name: "Demo", kind: "local", isDefault: true)
+        let regular = Folder(id: "regular-id", name: "Regular", accountID: account.id, parentID: nil, path: ["Regular"], isSmartFolder: false, isRecentlyDeleted: false, noteCount: 0)
+        let smart = Folder(id: "smart-id", name: "Smart", accountID: account.id, parentID: nil, path: ["Smart"], isSmartFolder: true, isRecentlyDeleted: false, noteCount: 0)
+        let fake = InMemoryNotes(accounts: [account], folders: [regular, smart])
+        var calls: [(String, String)] = []
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            let ref = arguments["ref"] as! String
+            calls.append((tool, ref))
+            return try MCPNativeResult(result: WriteResult(outcome: .verified, folderID: ref), value: ["ok": true])
+        })
+        _ = try call(server, "set_folder_sort", ["ref": "Regular", "by": "modified", "direction": "newest"])
+        _ = try call(server, "smart_folder_edit_typed", ["ref": "Smart", "expected_count": 1, "tags": ["work"]])
+        XCTAssertEqual(calls.map(\.0), ["set_folder_sort", "smart_folder_edit_typed"])
+        XCTAssertEqual(calls.map(\.1), ["regular-id", "smart-id"])
     }
     func testReadAndPaging() throws {
         let server = MCPServer(reader: InMemoryNotes.sample())

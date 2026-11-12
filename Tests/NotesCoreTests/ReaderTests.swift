@@ -142,7 +142,26 @@ final class ReaderDecodeTests: XCTestCase {
         inlineObjects[10] = PB.bytes(10,PB.note("\u{fffc}",[PB.int(1,1) + inline]))
         let inlinePool = inlineObjects.reduce(Data()) { $0 + PB.bytes(3,$1) }
         XCTAssertEqual(try NotesTableDecoder.decode(PB.wrap(inlinePool + header),inlineText:{ _ in "work" }),[["B","D"],["#work","C"]])
+        var richObjects = objects
+        let richRun = PB.int(1, 4) + PB.int(5, 3) + PB.text(9, "https://example.com") + PB.int(14, 5)
+        richObjects[10] = PB.bytes(10, PB.note("rich", [richRun]))
+        let richPool = richObjects.reduce(Data()) { $0 + PB.bytes(3, $1) }
+        let rich = try NotesTableDecoder.decodeDocuments(PB.wrap(richPool + header))
+        XCTAssertEqual(rich[1][0].text, "rich")
+        XCTAssertEqual(rich[1][0].runs, [.init(length: 4, font: .init(bold: true, italic: true), link: "https://example.com", highlight: .blue)])
         XCTAssertThrowsError(try NotesTableDecoder.decode(PB.wrap(header)))
+    }
+
+    func testTypedSmartFolderRulesCompileToLiteralNotesJSON() throws {
+        let rules = SmartFolderRules(
+            match: .all,
+            tags: ["work", "urgent"], tagsMatch: .any,
+            createdFrom: Date(timeIntervalSinceReferenceDate: 100), createdTo: Date(timeIntervalSinceReferenceDate: 200),
+            modifiedFrom: nil, modifiedTo: nil,
+            folders: ["FOLDER-1"], checklists: true, attachmentSections: [.images, .scans],
+            shared: false, locked: true, mentions: true, quickNotes: false
+        )
+        XCTAssertEqual(try rules.json(), #"{"and":[{"or":[{"tag":"urgent"},{"tag":"work"}]},{"creationDateRange":{"fromDate":100,"toDate":200}},{"folder":"FOLDER-1"},{"checklist":true},{"attachmentSection":1},{"attachmentSection":7},{"shared":false},{"passwordProtected":true},{"mention":true},{"quickNote":false}]}"#)
     }
 }
 
@@ -191,10 +210,15 @@ final class ReaderRendererTests: XCTestCase {
         let refs = [InlineRef(id:"photo",typeUTI:"public.jpeg"),InlineRef(id:"file",typeUTI:"public.data"),tag,mention,link,InlineRef(id:"table",typeUTI:"com.apple.notes.table")]
         var doc = NoteDocument(text:String(repeating:"\u{fffc}\n",count:refs.count),runs:refs.map { .init(length:2,attachment:$0) })
         doc.tables = ["table":[["Name","Value"],["A|B","C\nD"]]]
+        doc.tableCells = ["table":[
+            [.init(text:"Name", runs:[.init(length:4,font:.init(bold:true),link:"https://example.com",highlight:.blue)]), .init(text:"Value",runs:[.init(length:5)])],
+            [.init(text:"A|B",runs:[.init(length:3)]), .init(text:"C\nD",runs:[.init(length:3)])]
+        ]]
         let attachments = [Attachment(id:"photo",typeUTI:"public.jpeg",filename:"image.png",filePath:"/private/image.png")]
-        XCTAssertEqual(doc.markdown(attachments:attachments),"![image.png](/private/image.png)\n[attachment: public.data](notescli-attachment:file)\n#work\n@Pat\n[Other note](applenotes://showNote?identifier=ABC)\n| Name | Value |\n| --- | --- |\n| A\\|B | C<br>D |\n")
+        XCTAssertEqual(doc.markdown(attachments:attachments),"![image.png](/private/image.png)\n[attachment: public.data](notescli-attachment:file)\n#work\n@Pat\n[Other note](applenotes://showNote?identifier=ABC)\n| [<mark data-apple-notes-highlight=\"blue\">**Name**</mark>](https://example.com) | Value |\n| --- | --- |\n| A\\|B | C<br>D |\n")
         XCTAssertEqual(doc.plainText(attachments:attachments),"image.png\nattachment: public.data\n#work\n@Pat\nOther note\nName\tValue\nA|B\tC\nD\n")
-        XCTAssertTrue(doc.html().contains("<table><tr><td>Name</td><td>Value</td></tr><tr><td>A|B</td><td>C<br>D</td></tr></table>"))
+        let html = doc.html()
+        XCTAssertTrue(html.contains("<table><tr><td><a href=\"https://example.com\"><mark data-apple-notes-highlight=\"blue\" style=\"background-color:#2196F3\"><strong>Name</strong></mark></a></td><td>Value</td></tr><tr><td>A|B</td><td>C<br>D</td></tr></table>"), html)
     }
 }
 

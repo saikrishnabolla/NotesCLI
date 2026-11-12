@@ -503,6 +503,32 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
     if ([self checklistAutoSortEnabled] != enabled) { if (error) *error = NCError(@"Notes checklist auto-sort preference did not match after save"); return NO; }
     return YES;
 }
++ (id)folderSortTypeWithOrder:(NSInteger)order direction:(NSInteger)direction error:(NSError **)error {
+    Class cls = NSClassFromString(@"ICFolderCustomNoteSortType");
+    NSString *selector = @"folderNoteSortTypeWithOrder:direction:";
+    if (!NCRequireClass(cls, @[selector], @"creating folder sort setting", error)) return nil;
+    __block id value = nil;
+    if (!NCCatch(@"creating folder sort setting", error, ^{
+        value = ((id (*)(id, SEL, NSInteger, NSInteger))objc_msgSend)(cls, NSSelectorFromString(selector), order, direction);
+    })) return nil;
+    return value;
+}
++ (NSString *)defaultAccountIdentifier:(NSError **)error {
+    Class cls = NSClassFromString(@"ICDefaultAccountUtilities");
+    if (!NCRequireClass(cls, @[@"defaultAccount"], @"reading default account", error)) return nil;
+    __block id account = nil;
+    if (!NCCatch(@"reading default account", error, ^{ account = ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"defaultAccount")); })) return nil;
+    if (!NCRequireObject(account, @[@"identifier"], @"reading default account identifier", error)) return nil;
+    return [account valueForKey:@"identifier"];
+}
++ (BOOL)setDefaultAccountIdentifier:(NSString *)identifier error:(NSError **)error {
+    Class cls = NSClassFromString(@"ICDefaultAccountUtilities");
+    NSString *selector = @"setDefaultAccountIdentifier:";
+    if (!NCRequireClass(cls, @[selector], @"setting default account", error)) return NO;
+    return NCCatch(@"setting default account", error, ^{
+        ((void (*)(id, SEL, id))objc_msgSend)(cls, NSSelectorFromString(selector), identifier);
+    });
+}
 @end
 
 @implementation NCBodyEditor { NSManagedObject *_note; id<NCMergeable> _mergeable; }
@@ -595,6 +621,15 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
     if (!NCCatch(@"reading table cell", error, ^{ text = NCPlain([self->_table stringForColumnIndex:(NSUInteger)column rowIndex:(NSUInteger)row]); })) return nil;
     return text;
 }
+- (NSAttributedString *)attributedTextAtColumn:(NSInteger)column row:(NSInteger)row error:(NSError **)error {
+    if (!NCRequireObject(_table, @[@"stringForColumnIndex:rowIndex:"], @"reading rich table cell", error)) return nil;
+    __block NSAttributedString *text = nil;
+    if (!NCCatch(@"reading rich table cell", error, ^{
+        id value = [self->_table stringForColumnIndex:(NSUInteger)column rowIndex:(NSUInteger)row];
+        text = [value isKindOfClass:NSAttributedString.class] ? value : [[NSAttributedString alloc] initWithString:NCPlain(value)];
+    })) return nil;
+    return text;
+}
 - (BOOL)insertRow:(NSInteger)index error:(NSError **)error { if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"insertRowAtIndex:"], @"inserting table row", error)) return NO; return NCCatch(@"inserting table row", error, ^{ [self->_table insertRowAtIndex:(NSUInteger)index]; }); }
 - (BOOL)removeRow:(NSInteger)index error:(NSError **)error { if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"removeRowAtIndex:"], @"removing table row", error)) return NO; return NCCatch(@"removing table row", error, ^{ [self->_table removeRowAtIndex:(NSUInteger)index]; }); }
 - (BOOL)insertColumn:(NSInteger)index error:(NSError **)error { if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"insertColumnAtIndex:"], @"inserting table column", error)) return NO; return NCCatch(@"inserting table column", error, ^{ [self->_table insertColumnAtIndex:(NSUInteger)index]; }); }
@@ -615,6 +650,12 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
     return NCCatch(@"editing table cell", error, ^{
         if (!cell || old.length == 0) { [self->_table setAttributedString:[[NSAttributedString alloc] initWithString:text attributes:@{@"TTStyle": style}] columnIndex:(NSUInteger)column rowIndex:(NSUInteger)row]; return; }
         [(id<NCMergeable>)cell beginEditing]; @try { if (old.length) [(id<NCMergeable>)cell deleteCharactersInRange:NSMakeRange(0, old.length)]; if (text.length) [(id<NCMergeable>)cell insertString:text atIndex:0]; } @finally { [(id<NCMergeable>)cell endEditing]; }
+    });
+}
+- (BOOL)setAttributedCellColumn:(NSInteger)column row:(NSInteger)row text:(NSAttributedString *)text error:(NSError **)error {
+    if (![self prepareToSave:error] || !NCRequireObject(_table, @[@"setAttributedString:columnIndex:rowIndex:"], @"formatting table cell", error)) return NO;
+    return NCCatch(@"formatting table cell", error, ^{
+        [self->_table setAttributedString:text columnIndex:(NSUInteger)column rowIndex:(NSUInteger)row];
     });
 }
 - (BOOL)save:(NSError **)error { if (![self prepareToSave:error]) return NO; return NCCatch(@"saving table", error, ^{ [self->_model setMergeableDataDirty:YES]; [self->_model writeMergeableData]; [(id<NCSynced>)self->_attachment updateChangeCountWithReason:@"Edited table"]; }); }

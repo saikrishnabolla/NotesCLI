@@ -7,6 +7,8 @@ import NotesSafety
 extension NativeParagraphStyle: ExpressibleByArgument {}
 extension NativeParagraphAlignment: ExpressibleByArgument {}
 extension NativeWritingDirection: ExpressibleByArgument {}
+extension NativeFolderSortOrder: ExpressibleByArgument {}
+extension NativeFolderSortDirection: ExpressibleByArgument {}
 extension HighlightColor: ExpressibleByArgument {}
 
 struct EngineWriteResponse: Encodable {
@@ -61,6 +63,32 @@ enum UnifiedNative {
         var captured: NativeWriteResult?
         let result = try SafetyExecutor.run(options: w, operation: "checklistAutoSort", arguments: ["enabled": String(enabled), "engine": "native"], allowedPaths: [], plan: plan) {
             let value = try NativeNotesWriter().setChecklistAutoSort(enabled); captured = value; return value.writeResult
+        }
+        guard let result else { return }
+        try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)
+    }
+    static func folderSort(_ o: GlobalOptions, _ w: WriteOptions, ref: String, order: NativeFolderSortOrder, direction: NativeFolderSortDirection) throws {
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let folder = try SafetyExecutor.folder(ref, reader: backend.reader)
+        guard let folder, !folder.isSmartFolder, !folder.isRecentlyDeleted else { throw NotesError("folder_not_found", "No writable folder matches the reference.") }
+        let arguments = ["ref": folder.id, "by": order.rawValue, "direction": direction.rawValue, "engine": "native"]
+        let plan = DryRunPlan(operation: "folderSort", target: folder.id, arguments: arguments, resultingHTML: nil, engine: "native")
+        var captured: NativeWriteResult?
+        let result = try SafetyExecutor.run(options: w, operation: "folderSort", arguments: arguments, allowedPaths: [folder.path], plan: plan) {
+            let value = try NativeNotesWriter().setFolderSort(folder.id, order: order, direction: direction); captured = value; return value.writeResult
+        }
+        guard let result else { return }
+        try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)
+    }
+    static func defaultAccount(_ o: GlobalOptions, _ w: WriteOptions, ref: String) throws {
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let matches = try backend.reader.accounts().filter { $0.id.caseInsensitiveCompare(ref) == .orderedSame || $0.name == ref }
+        guard matches.count == 1, let account = matches.first else { throw NotesError(matches.isEmpty ? "account_not_found" : "ambiguous_account", "Account must resolve uniquely.") }
+        let arguments = ["account_id": account.id, "engine": "native"]
+        let plan = DryRunPlan(operation: "setDefaultAccount", target: account.id, arguments: arguments, resultingHTML: nil, engine: "native")
+        var captured: NativeWriteResult?
+        let result = try SafetyExecutor.run(options: w, operation: "setDefaultAccount", arguments: arguments, allowedPaths: [], plan: plan) {
+            let value = try NativeNotesWriter().setDefaultAccount(account.id); captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)
@@ -255,6 +283,11 @@ enum UnifiedNative {
             NativeActionResult(try NativeNotesWriter().convertTableToText(stableRef, attachmentID: id, separator: separator, allowShared: w.allowShared))
         }
     }
+    static func tableFormat(_ o: GlobalOptions, _ w: WriteOptions, ref: String, id: String, row: Int, column: Int, range: UTF16Range, format: InlineFormat) throws {
+        try noteWrite(options: o, write: w, ref: ref, operation: "tableFormatCell", arguments: ["attachment_id": id, "row": String(row), "column": String(column), "start": String(range.location), "length": String(range.length)]) { stableRef in
+            NativeActionResult(try NativeNotesWriter().formatTableCell(stableRef, attachmentID: id, row: row, column: column, range: range, format: format, allowShared: w.allowShared))
+        }
+    }
     static func duplicate(_ o: GlobalOptions, _ w: WriteOptions, ref: String, title: String?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "duplicateNote", arguments: ["title": title ?? ""]) { stableRef in
             NativeActionResult(try NativeNotesWriter().duplicate(stableRef, title: title, allowShared: w.allowShared))
@@ -304,6 +337,21 @@ struct EngineDoctor: ParsableCommand {
 
 struct ChecklistCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "checklist", subcommands: [ChecklistAdd.self, ChecklistToggle.self, ChecklistCheckAll.self, ChecklistUncheckAll.self, ChecklistClearDone.self, ChecklistList.self, ChecklistAutoSort.self])
+}
+struct FolderSortCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "sort")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Option var by: NativeFolderSortOrder?; @Option var direction: NativeFolderSortDirection?
+    func run() throws {
+        guard let by else {
+            let value = try NativeNotesWriter().folderSort(ref)
+            if options.json { try Output.json(value) }
+            else { Output.table(["FOLDER", "BY", "DIRECTION", "VALUE", "GROUPS BY DATE"], [[value.folderID, value.order.rawValue, value.direction.rawValue, String(value.valueRepresentation), value.groupsByDate ? "yes" : "no"]]) }
+            return
+        }
+        let resolvedDirection = direction ?? (by == .title ? .ascending : .newest)
+        try UnifiedNative.folderSort(options, write, ref: ref, order: by, direction: resolvedDirection)
+    }
 }
 struct ChecklistAdd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "add")
@@ -474,7 +522,7 @@ struct AttachmentDelete: ParsableCommand {
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String
     func run() throws { try UnifiedNative.attachmentDelete(options, write, ref: ref, id: attachmentID) }
 }
-struct TableCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableCreate.self, TableSet.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self, TableConvertToText.self]) }
+struct TableCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableCreate.self, TableSet.self, TableFormatCell.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self, TableConvertToText.self]) }
 struct TableCreate: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var rows: String; @Option var position: Int?
@@ -498,6 +546,28 @@ struct TableConvertToText: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "convert-to-text")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String; @Option var separator: String = "tab"
     func run() throws { try UnifiedNative.tableConvert(options, write, ref: ref, id: attachmentID, separator: separator) }
+}
+struct TableFormatCell: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "format-cell")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Argument var attachmentID: String
+    @Option var row: Int; @Option var column: Int; @Option var start: Int; @Option var length: Int
+    @Flag var bold = false; @Flag var italic = false; @Flag var underline = false; @Flag var strike = false
+    @Option var link: String?; @Flag var clearLink = false; @Option var color: String?; @Flag var clearColor = false
+    @Flag var superscript = false; @Flag var `subscript` = false; @Flag var clearScript = false
+    @Option var fontName: String?; @Option var fontSize: Double?; @Option var highlight: HighlightColor?; @Flag var clearHighlight = false
+    func validate() throws {
+        guard row >= 0, column >= 0, start >= 0, length > 0 else { throw ValidationError("Row, column, and start must be nonnegative; length must be positive.") }
+        guard [superscript, `subscript`, clearScript].filter({ $0 }).count <= 1 else { throw ValidationError("Choose only one script option.") }
+    }
+    func run() throws {
+        let format = InlineFormat(bold: bold ? true : nil, italic: italic ? true : nil, underline: underline ? true : nil, strike: strike ? true : nil,
+                                  link: link, clearLink: clearLink, color: color, clearColor: clearColor,
+                                  superscript: superscript ? 1 : (`subscript` ? -1 : (clearScript ? 0 : nil)), fontName: fontName, fontSize: fontSize,
+                                  highlight: highlight, clearHighlight: clearHighlight)
+        try UnifiedNative.tableFormat(options, write, ref: ref, id: attachmentID, row: row, column: column,
+                                      range: UTF16Range(location: start, length: length), format: format)
+    }
 }
 struct DuplicateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "duplicate")

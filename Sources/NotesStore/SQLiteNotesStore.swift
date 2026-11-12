@@ -231,9 +231,12 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             if attachment.typeUTI == "com.apple.notes.table", let tableData = row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") {
                 do {
                     if document.tables == nil { document.tables = [:] }
-                    document.tables?[id] = try NotesTableDecoder.decode(tableData) { ref in
+                    if document.tableCells == nil { document.tableCells = [:] }
+                    let cells = try NotesTableDecoder.decodeDocuments(tableData) { ref in
                         self.objectsByID[ref.id.lowercased()]?.string("ZALTTEXT", "ZDISPLAYTEXT", "ZTITLE", "ZFALLBACKTITLE", "ZFILENAME")
                     }
+                    document.tableCells?[id] = cells
+                    document.tables?[id] = cells.map { $0.map { $0.document.plainText() } }
                 } catch let error as DecodeError { throw NotesError("table_\(error.rawValue)", "Cannot decode an embedded table.") }
             }
         }
@@ -456,7 +459,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
 
     private enum SmartFlag: String {
         case deleted, checklist, checklistInProgress, checklistCompleted, attachment, pinned, systemPaper
-        case passwordProtected, shared, mention, tagged
+        case passwordProtected, shared, mention, tagged, quickNote
     }
     private enum SmartDateField { case created, modified }
     private indirect enum SmartRule {
@@ -562,6 +565,9 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             case .shared: actual = note.summary.isShared == true
             case .mention: actual = note.attachments.contains { $0.kind == "mention" }
             case .tagged: actual = !note.summary.tags.isEmpty
+            case .quickNote:
+                actual = note.summary.folderID?.localizedCaseInsensitiveContains("quick") == true ||
+                    note.summary.folderPath.last?.localizedCaseInsensitiveContains("quick note") == true
             }
             return actual == expected
         case .tag(let tag): return note.summary.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }

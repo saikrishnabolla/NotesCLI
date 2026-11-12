@@ -1225,6 +1225,53 @@ public final class NativeNotesWriter: NotesNativeWriting {
                       mismatch: "Table \(attachmentID) cells did not match after editing \(row),\(column).")
         }
     }
+    public func formatTableCell(_ ref: String, attachmentID: String, row: Int, column: Int, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+        if let superscript = format.superscript, !(-1...1).contains(superscript) { throw NotesError("invalid_superscript", "Superscript must be -1, 0, or 1.") }
+        if let size = format.fontSize, !size.isFinite || size <= 0 { throw NotesError("invalid_font_size", "Font size must be a positive number.") }
+        let requestedColor = try format.color.map(Self.color)
+        let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
+        let attachment = try table(attachmentID, note: note, context: context), editor = try NCTableEditor(attachment: attachment)
+        let rows = try editor.rowCount().intValue, columns = try editor.columnCount().intValue
+        guard row >= 0, row < rows, column >= 0, column < columns else { throw NotesError("invalid_table_cell", "Cell is outside the table.") }
+        let original = try editor.attributedText(column: column, row: row), target = try valid(range, length: original.length, allowEmpty: false)
+        let updated = NSMutableAttributedString(attributedString: original)
+        var writes: [(NSRange, [NSAttributedString.Key: Any])] = []
+        original.enumerateAttributes(in: target) { attrs, run, _ in writes.append((run, attrs)) }
+        for (run, attrs) in writes {
+            var copy = attrs, hints = copy[.init("TTHints")] as? Int ?? 0
+            if let bold = format.bold { hints = bold ? hints | 1 : hints & ~1 }
+            if let italic = format.italic { hints = italic ? hints | 2 : hints & ~2 }
+            copy[.init("TTHints")] = hints == 0 ? nil : hints
+            if let underline = format.underline { copy[.init("TTUnderline")] = underline ? 1 : nil }
+            if let strike = format.strike { copy[.init("TTStrikethrough")] = strike ? 1 : nil }
+            if format.clearLink { copy[.init("NSLink")] = nil } else if let link = format.link { copy[.init("NSLink")] = URL(string: link) ?? link }
+            if format.clearColor { copy[.init("TTColor")] = nil } else if let requestedColor { copy[.init("TTColor")] = requestedColor }
+            if let superscript = format.superscript { copy[.init("NSSuperScript")] = superscript == 0 ? nil : superscript }
+            if format.clearHighlight { copy[.init("TTEmphasis")] = nil } else if let highlight = format.highlight { copy[.init("TTEmphasis")] = highlight.notesValue }
+            let oldFont = copy[.init("ICTTFont")] as AnyObject?
+            if format.fontName != nil || format.fontSize != nil || (oldFont != nil && (format.bold != nil || format.italic != nil)) {
+                if let oldFont { try require(["fontName", "pointSize", "fontHints"], of: oldFont) }
+                copy[.init("ICTTFont")] = try NCNotesRuntime.font(name: format.fontName, size: format.fontSize.map(NSNumber.init(value:)), hints: hints, basedOn: oldFont)
+            }
+            updated.setAttributes(copy, range: run)
+        }
+        do { try editor.setAttributedCell(column: column, row: row, text: updated); try editor.save(); try save(context, notes: [note]) }
+        catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+        let freshEditor = try NCTableEditor(attachment: try table(attachmentID, note: try self.note(id(note), in: context), context: context))
+        let readback = try freshEditor.attributedText(column: column, row: row)
+        var nativeRows: [[NSAttributedString.Key: Any]] = []
+        readback.enumerateAttributes(in: target) { attrs, _, _ in nativeRows.append(attrs) }
+        let nativeOK = try !nativeRows.isEmpty && nativeRows.allSatisfy { try Self.matches($0, format: format) }
+        return result(id(note), native: ["tableID": attachmentID, "cell": "\(row),\(column)", "location": "\(range.location)", "length": "\(range.length)"], nativeVerified: nativeOK,
+                      sqlite: { decoded in
+            guard let cell = decoded.document?.tableCells?[attachmentID]?[safe: row]?[safe: column] else { return nil }
+            let runs = Self.documentRuns(cell.document, in: range)
+            guard !runs.isEmpty, runs.allSatisfy({ Self.matches($0, format: format) }) else { return nil }
+            return ["tableID": attachmentID, "cell": "\(row),\(column)"]
+        }, mismatch: "Table cell formatting did not match after editing \(row),\(column).")
+        }
+    }
     public func resizeTable(_ ref: String, attachmentID: String, axis: String, index: Int, add: Bool, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         guard ["row", "column"].contains(axis), index >= 0 else { throw NotesError("invalid_table_resize", "Axis must be row or column and index nonnegative.") }; let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note); let attachment = try table(attachmentID, note: note, context: context)
@@ -1319,6 +1366,63 @@ public final class NativeNotesWriter: NotesNativeWriting {
                   folder.parentID?.lowercased() == parentID?.lowercased() else { return nil }
             return ["folderID": folder.id, "parentID": folder.parentID ?? ""]
         })
+        }
+    }
+
+    public func folderSort(_ ref: String) throws -> NativeFolderSortSetting {
+        try performRead { context in try folderSortSetting(folder(ref, in: context)) }
+    }
+
+    fileprivate func folderSortSetting(_ folder: NSManagedObject) throws -> NativeFolderSortSetting {
+        try require(["customNoteSortType", "supportsCustomNoteSortType", "isShowingDateHeaders"], of: folder)
+        guard value(folder, "supportsCustomNoteSortType") as? Bool == true else { throw NotesError("folder_sort_unsupported", "This folder does not support a custom note sort.") }
+        let raw: AnyObject
+        if let current = value(folder, "customNoteSortType") as AnyObject? { raw = current }
+        else { raw = try NCNotesRuntime.folderSortType(order: 0, direction: 0) as AnyObject }
+        try require(["order", "direction", "valueRepresentation"], of: raw)
+        let orderValue = value(raw, "order") as? Int ?? 0, directionValue = value(raw, "direction") as? Int ?? 0
+        let order = [0: NativeFolderSortOrder.default, 1: .modified, 2: .created, 3: .title][orderValue] ?? .default
+        let direction: NativeFolderSortDirection = order == .title ? (directionValue == 0 ? .ascending : .descending) : (directionValue == 0 ? .newest : .oldest)
+        return NativeFolderSortSetting(folderID: id(folder), order: order, direction: direction,
+                                       valueRepresentation: value(raw, "valueRepresentation") as? Int ?? orderValue * 10 + directionValue,
+                                       groupsByDate: value(folder, "isShowingDateHeaders") as? Bool ?? false)
+    }
+
+    public func setFolderSort(_ ref: String, order: NativeFolderSortOrder, direction: NativeFolderSortDirection) throws -> NativeWriteResult {
+        try performWrite { context in
+            let folder = try folder(ref, in: context), folderID = id(folder)
+            guard !((order == .title) != (direction == .ascending || direction == .descending)) else {
+                throw NotesError("invalid_folder_sort", "Use ascending or descending for title, and newest or oldest for date sorts.")
+            }
+            do {
+                try require(["setCustomNoteSortType:", "customNoteSortType", "supportsCustomNoteSortType", "updateChangeCountWithReason:"], of: folder)
+                guard value(folder, "supportsCustomNoteSortType") as? Bool == true else { throw NotesError("folder_sort_unsupported", "This folder does not support a custom note sort.") }
+                let sort = try NCNotesRuntime.folderSortType(order: order.value, direction: direction.value)
+                try NCNotesRuntime.setValue(sort, forKey: "customNoteSortType", of: folder)
+                try NCNotesRuntime.save(context); operation?.committed = true; operation?.folderID = folderID; context.refreshAllObjects()
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            let setting = try folderSortSetting(folder)
+            return globalResult(native: ["folderID": folderID, "order": setting.order.rawValue, "direction": setting.direction.rawValue,
+                                         "valueRepresentation": String(setting.valueRepresentation)],
+                                nativeVerified: setting.order == order && setting.direction.value == direction.value, folderID: folderID)
+        }
+    }
+
+    public func defaultAccountIdentifier() throws -> String {
+        try performRead { _ in
+            do { return try NCNotesRuntime.defaultAccountIdentifier() }
+            catch { throw nativeError(error) }
+        }
+    }
+
+    public func setDefaultAccount(_ identifier: String) throws -> NativeWriteResult {
+        try performWrite { _ in
+            do { try NCNotesRuntime.setDefaultAccountIdentifier(identifier); operation?.committed = true }
+            catch { throw nativeError(error) }
+            let readback: String
+            do { readback = try NCNotesRuntime.defaultAccountIdentifier() }
+            catch { throw nativeError(error) }
+            return globalResult(native: ["accountID": readback], nativeVerified: readback.caseInsensitiveCompare(identifier) == .orderedSame)
         }
     }
 

@@ -169,7 +169,7 @@ struct WaitSyncCommand: ParsableCommand {
 
 enum TableReadFormat: String, ExpressibleByArgument { case markdown, json, csv }
 struct ReadTableCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableShow.self, TableCreate.self, TableSet.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self, TableConvertToText.self])
+    static let configuration = CommandConfiguration(commandName: "table", subcommands: [TableShow.self, TableCreate.self, TableSet.self, TableFormatCell.self, TableAddRow.self, TableAddColumn.self, TableRemoveRow.self, TableRemoveColumn.self, TableConvertToText.self])
 }
 struct TableShow: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "show")
@@ -177,9 +177,18 @@ struct TableShow: ParsableCommand {
     @Argument var note: String
     @Option var attachment: String?
     @Option var format: TableReadFormat = .markdown
+    @Flag(help: "Return decoded text and attribute runs for every cell as JSON.") var rich = false
     func run() throws {
         let value = try options.backends().reader.note(note)
         guard let tables = value.document?.tables, !tables.isEmpty else { throw NotesError("table_not_found", "The note has no decoded table.") }
+        if rich {
+            let cells = value.document?.tableCells ?? [:]
+            if let attachment {
+                guard let selected = cells[attachment] else { throw NotesError("table_not_found", "No rich table matches the attachment id.") }
+                try Output.json([attachment: selected])
+            } else { try Output.json(cells) }
+            return
+        }
         let selected: [(String, [[String]])]
         if let attachment {
             guard let rows = tables[attachment] else { throw NotesError("table_not_found", "No table matches the attachment id.") }

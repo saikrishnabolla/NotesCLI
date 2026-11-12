@@ -127,6 +127,22 @@ public struct NativeTable: Codable, Sendable, Equatable {
     public var rows: [[String]]
 }
 
+public enum NativeFolderSortOrder: String, Codable, Sendable, CaseIterable {
+    case `default`, modified, created, title
+    public var value: Int { switch self { case .default: 0; case .modified: 1; case .created: 2; case .title: 3 } }
+}
+public enum NativeFolderSortDirection: String, Codable, Sendable, CaseIterable {
+    case newest, oldest, ascending, descending
+    public var value: Int { switch self { case .newest, .ascending: 0; case .oldest, .descending: 1 } }
+}
+public struct NativeFolderSortSetting: Codable, Sendable, Equatable {
+    public var folderID: String
+    public var order: NativeFolderSortOrder
+    public var direction: NativeFolderSortDirection
+    public var valueRepresentation: Int
+    public var groupsByDate: Bool
+}
+
 public enum ChecklistSelection: Sendable {
     case index(Int)
     case text(String)
@@ -167,11 +183,16 @@ public protocol NotesNativeWriting {
     func deleteAttachment(_ ref: String, attachmentID: String, allowShared: Bool) throws -> NativeWriteResult
     func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func editTable(_ ref: String, attachmentID: String, row: Int, column: Int, text: String, allowShared: Bool) throws -> NativeWriteResult
+    func formatTableCell(_ ref: String, attachmentID: String, row: Int, column: Int, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult
     func resizeTable(_ ref: String, attachmentID: String, axis: String, index: Int, add: Bool, allowShared: Bool) throws -> NativeWriteResult
     func convertTableToText(_ ref: String, attachmentID: String, separator: String, allowShared: Bool) throws -> NativeWriteResult
     func duplicate(_ ref: String, title: String?, allowShared: Bool) throws -> NativeWriteResult
     func restore(_ ref: String, folder: String?, allowShared: Bool) throws -> NativeWriteResult
     func moveFolder(_ ref: String, parent: String?, allowShared: Bool) throws -> NativeWriteResult
+    func folderSort(_ ref: String) throws -> NativeFolderSortSetting
+    func setFolderSort(_ ref: String, order: NativeFolderSortOrder, direction: NativeFolderSortDirection) throws -> NativeWriteResult
+    func defaultAccountIdentifier() throws -> String
+    func setDefaultAccount(_ identifier: String) throws -> NativeWriteResult
     func createSmartFolder(name: String, tags: [String], matchAll: Bool) throws -> NativeWriteResult
     func renameSmartFolder(_ ref: String, name: String, expectedCount: Int) throws -> NativeWriteResult
     func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult

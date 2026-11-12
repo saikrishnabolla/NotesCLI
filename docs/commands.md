@@ -141,6 +141,7 @@ notescli file diff <path>
 ```
 
 `undo` and `revert` accept a note reference for snapshots or a journal operation ID for a recorded setting or Smart Folder rule preimage.
+Snapshots with native-only features require `--engine native`. Pass `--allow-downgrade` to permit scripting conversion. Native restore verifies the saved structure through a fresh database read.
 
 ## Export
 

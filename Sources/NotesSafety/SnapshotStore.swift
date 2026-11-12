@@ -48,7 +48,7 @@ public struct SnapshotStore: Sendable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let info = SnapshotInfo(id: id, noteID: note.summary.id.uuid, created: now, title: note.summary.title,
                                 folderPath: note.summary.folderPath, directory: directory,
-                                restorable: note.attachments.isEmpty && note.summary.attachmentCount == 0)
+                                restorable: true)
         let markdown = note.document?.markdown(attachments: note.attachments) ?? ""
         let snapshot = NoteSnapshot(info: info, note: note, markdown: markdown)
         let encoder = JSONEncoder()

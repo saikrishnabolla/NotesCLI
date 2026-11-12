@@ -2,6 +2,8 @@
 
 Verified on macOS 27.2.1 on 2026-11-11. Apple documents the user-facing features in the [Notes User Guide](https://support.apple.com/guide/notes/welcome/mac), including [formatting](https://support.apple.com/en-ca/guide/notes/apd1955d3b21/mac), [lists](https://support.apple.com/en-ca/guide/notes/apd93c815aa0/mac), [attachments](https://support.apple.com/en-ae/guide/notes/not95edd2813/mac), [sorting and pinning](https://support.apple.com/en-ie/guide/notes/apdb54e469b6/mac), [Smart Folders](https://support.apple.com/en-ph/guide/notes/apd58edc7964/mac), [sharing](https://support.apple.com/en-ie/guide/notes/apda5307056b/mac), and [settings](https://support.apple.com/en-ie/guide/notes/apd97da26aed/mac). Runtime inspection of Notes.app and NotesShared found `ICTTParagraphStyle`, `ICTTFont`, `TTEmphasis`, `NSSuperScript`, `TTColor`, `ICOutlineState`, and their checked setters. Protobuf probes confirmed paragraph fields 1, 2, 3, 4, 6, 7, and 9, plus highlight field 14. The field-14 result agrees with [apple_cloud_notes_parser's schema](https://github.com/threeplanetssoftware/apple_cloud_notes_parser/blob/master/proto/notestore.proto). “Read” and “Write” below describe NotesCLI, not Notes.app.
 
+Read status: 84 Done, 6 Partial, and 4 Not possible. Write status: 62 Done, 8 Partial, and 24 Not possible. The matrix has 94 rows and no Missing status.
+
 | Feature | Read | Write | Notes |
 | --- | --- | --- | --- |
 | Title style | Done | Done | Native paragraph style 0. Scripting imports `<h1>` as 24px bold body text; use `--engine native` for a native Title. |
@@ -96,6 +98,6 @@ Verified on macOS 27.2.1 on 2026-11-11. Apple documents the user-facing features
 | Note links and Share-sheet capture | Done | Partial | Deep links and inserted content work; invoking another app's Share sheet is outside the CLI. |
 | Open notes, folders, accounts, and attachments | Done | Done | NotesCLI can ask Notes or Finder to reveal the selected object. |
 | Sync and upload state | Done | Done | State is readable; writes can request upload and wait for bounded acknowledgement. |
-| Version history, diff, undo, and revert | Partial | Partial | Attachment-free note snapshots can be restored. Setting and Smart Folder rule writes can restore recorded preimages by journal operation ID. Snapshots containing attachments remain read-only to avoid attachment loss. |
+| Version history, diff, undo, and revert | Partial | Partial | Native-only snapshots return `native_required` on the scripting engine. `--engine native` restores saved runs, checklists, links, highlights, attachment markers, and rich table cells, then verifies a fresh SQLite decode. `--allow-downgrade` permits scripting conversion. Native attachment restore requires the original Notes attachment object. Setting and Smart Folder rule writes can restore recorded preimages by journal operation ID. |
 | Multiple iCloud, local, and IMAP accounts | Done | Done | Reads and supported writes resolve the account and folder explicitly. |
 

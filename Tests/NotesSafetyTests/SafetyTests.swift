@@ -92,7 +92,7 @@ final class SafetyTests: XCTestCase {
         }
     }
 
-    func testSnapshotsWithAttachmentsAreMarkedUnrestorable() throws {
+    func testSnapshotsWithAttachmentsRetainTheRichNoteForNativeRestore() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = SnapshotStore(rootURL: directory)
@@ -100,22 +100,89 @@ final class SafetyTests: XCTestCase {
         note.attachments = [Attachment(id: "attachment", typeUTI: "public.png")]
         note.summary.attachmentCount = 1
         let saved = try store.save(note)
-        XCTAssertFalse(saved.restorable)
-        XCTAssertFalse(try XCTUnwrap(store.history(note.summary.id.uuid).first).restorable)
-        XCTAssertThrowsError(try store.loadRestorable(note.summary.id.uuid, snapshot: saved.id)) { error in
-            XCTAssertEqual((error as? NotesError)?.code, "snapshot_has_attachments")
-        }
+        XCTAssertTrue(saved.restorable)
+        XCTAssertTrue(try XCTUnwrap(store.history(note.summary.id.uuid).first).restorable)
+        XCTAssertEqual(try store.loadRestorable(note.summary.id.uuid, snapshot: saved.id).note.attachments, note.attachments)
     }
 
-    func testParityDocsStateTheAttachmentRestoreLimitAndJournalPreimages() throws {
+    func testSnapshotRestorePolicyListsNativeOnlyFeatures() throws {
+        var note = try InMemoryNotes.sample().note("welcome")
+        var paragraph = ParagraphStyle(kind: .checklist, checked: true)
+        paragraph.alignment = 2
+        paragraph.writingDirection = 1
+        paragraph.collapsed = true
+        var font = FontStyle(bold: true, superscript: -1)
+        font.name = "Avenir Next"
+        font.pointSize = 17
+        note.document = NoteDocument(text: "item\u{fffc}", runs: [
+            AttributeRun(length: 4, paragraph: paragraph, font: font, link: "https://example.com",
+                         color: "#123456", highlight: .purple),
+            AttributeRun(length: 1, attachment: InlineRef(id: "table-1", typeUTI: "com.apple.notes.table")),
+        ])
+        note.document?.tables = ["table-1": [["cell"]]]
+        note.attachments = [Attachment(id: "table-1", typeUTI: "com.apple.notes.table")]
+
+        XCTAssertEqual(SnapshotRestorePolicy.nativeRequiredFeatures(note), [
+            "alignment", "checklists", "collapsible headings", "font family", "font size", "highlights",
+            "links", "subscript", "tables", "text color", "writing direction",
+        ])
+    }
+
+    func testSnapshotRestorePolicyRefusesScriptingUnlessDowngradeIsAllowed() throws {
+        var note = try InMemoryNotes.sample().note("welcome")
+        note.document = NoteDocument(text: "task", runs: [
+            AttributeRun(length: 4, paragraph: ParagraphStyle(kind: .checklist, checked: false)),
+        ])
+
+        XCTAssertThrowsError(try SnapshotRestorePolicy.requireScriptingRestoreAllowed(note, allowDowngrade: false)) { error in
+            let notesError = error as? NotesError
+            XCTAssertEqual(notesError?.code, "native_required")
+            XCTAssertEqual(notesError?.message, "This snapshot contains native-only features: checklists.")
+        }
+        XCTAssertNoThrow(try SnapshotRestorePolicy.requireScriptingRestoreAllowed(note, allowDowngrade: true))
+    }
+
+    func testParityDocsStateTheNativeRestoreGuardAndJournalPreimages() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let features = try String(contentsOf: root.appendingPathComponent("docs/APPLE-NOTES-FEATURES.md"), encoding: .utf8)
         let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)
         let commands = try String(contentsOf: root.appendingPathComponent("docs/commands.md"), encoding: .utf8)
         XCTAssertTrue(features.contains("| Version history, diff, undo, and revert | Partial | Partial |"))
-        XCTAssertTrue(features.contains("Snapshots containing attachments remain read-only to avoid attachment loss."))
+        XCTAssertTrue(features.contains("Native-only snapshots return `native_required` on the scripting engine."))
         XCTAssertTrue(parity.contains("| Version history / diff / revert |"))
-        XCTAssertTrue(parity.contains("| Partial — attachment-free note snapshots; setting and Smart Folder rule preimages by journal operation ID"))
+        XCTAssertTrue(parity.contains("| Partial — lossless native snapshot restore"))
         XCTAssertTrue(commands.contains("`undo` and `revert` accept a note reference for snapshots or a journal operation ID for a recorded setting or Smart Folder rule preimage."))
+        XCTAssertTrue(commands.contains("`--allow-downgrade`"))
     }
+
+    func testDocumentedMatrixCountsMatchTheRows() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let features = try String(contentsOf: root.appendingPathComponent("docs/APPLE-NOTES-FEATURES.md"), encoding: .utf8)
+        let featureRows = features.split(separator: "\n").filter {
+            $0.hasPrefix("|") && !$0.hasPrefix("| ---") && !$0.hasPrefix("| Feature")
+        }.map { $0.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
+        XCTAssertEqual(featureRows.count, 94)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 84)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 6)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 4)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 62)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 8)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 24)
+
+        let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)
+        let matrix = parity.components(separatedBy: "## 2. CLI commands")[0]
+        let statuses = matrix.split(separator: "\n").filter {
+            $0.hasPrefix("|") && !$0.hasPrefix("| ---") && !$0.hasPrefix("| Capability")
+        }.compactMap { line in
+            line.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }[safe: 6]
+        }
+        XCTAssertEqual(statuses.count, 139)
+        XCTAssertEqual(statuses.filter { $0.hasPrefix("Done") }.count, 127)
+        XCTAssertEqual(statuses.filter { $0.hasPrefix("Partial") }.count, 2)
+        XCTAssertEqual(statuses.filter { $0.hasPrefix("Not possible") || $0.hasPrefix("Not planned") }.count, 10)
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }

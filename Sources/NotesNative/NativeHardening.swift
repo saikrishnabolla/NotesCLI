@@ -64,6 +64,77 @@ enum NativeVerificationRules {
     }
 }
 
+enum SnapshotRestoreVerification {
+    static func matches(expected: Note, actual: Note) -> Bool {
+        guard expected.summary.title == actual.summary.title,
+              let expectedDocument = expected.document,
+              let actualDocument = actual.document,
+              matches(expectedDocument, actualDocument) else { return false }
+        return true
+    }
+
+    static func matches(_ expected: NoteDocument, _ actual: NoteDocument) -> Bool {
+        guard expected.text == actual.text,
+              signatures(expected.runs) == signatures(actual.runs),
+              expected.tables == actual.tables else { return false }
+        let expectedCells = expected.tableCells ?? [:]
+        let actualCells = actual.tableCells ?? [:]
+        guard expectedCells.keys == actualCells.keys else { return false }
+        for id in expectedCells.keys {
+            guard let left = expectedCells[id], let right = actualCells[id], left.count == right.count else { return false }
+            for row in left.indices {
+                guard left[row].count == right[row].count else { return false }
+                for column in left[row].indices {
+                    guard matches(left[row][column].document, right[row][column].document) else { return false }
+                }
+            }
+        }
+        return true
+    }
+
+    private struct RunSignature: Equatable {
+        var length: Int
+        var paragraph: ParagraphSignature?
+        var font: FontStyle
+        var link: String?
+        var color: String?
+        var highlight: HighlightColor?
+        var attachment: InlineRef?
+    }
+
+    private struct ParagraphSignature: Equatable {
+        var kind: ParagraphStyle.Kind
+        var alignment: Int?
+        var writingDirection: Int?
+        var blockQuoteLevel: Int?
+        var indent: Int
+        var checked: Bool?
+        var startNumber: Int?
+        var collapsed: Bool?
+    }
+
+    private static func signatures(_ runs: [AttributeRun]) -> [RunSignature] {
+        var result: [RunSignature] = []
+        for run in runs where run.length > 0 {
+            let paragraph = run.paragraph.map {
+                ParagraphSignature(kind: $0.kind, alignment: $0.alignment, writingDirection: $0.writingDirection,
+                                   blockQuoteLevel: $0.blockQuoteLevel, indent: $0.indent, checked: $0.checked,
+                                   startNumber: $0.startNumber, collapsed: $0.collapsed)
+            }
+            let next = RunSignature(length: run.length, paragraph: paragraph, font: run.font, link: run.link,
+                                    color: run.color, highlight: run.highlight, attachment: run.attachment)
+            if let last = result.last,
+               last.paragraph == next.paragraph, last.font == next.font, last.link == next.link,
+               last.color == next.color, last.highlight == next.highlight, last.attachment == next.attachment {
+                result[result.count - 1].length += next.length
+            } else {
+                result.append(next)
+            }
+        }
+        return result
+    }
+}
+
 enum NativeSharedWriteGuard {
     static func require(isShared: Bool, allowShared: Bool, isReadOnly: Bool?) throws {
         guard isShared else { return }

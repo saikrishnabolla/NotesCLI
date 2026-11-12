@@ -155,6 +155,30 @@ final class NativeTests: XCTestCase {
         XCTAssertFalse(NativeVerificationRules.sameMarkerMultiset(before, [("mention", "mention"), ("tag", "other"), ("tag", "hashtag")]))
     }
 
+    func testSnapshotVerificationMatchesStructureAcrossEquivalentRunSplits() throws {
+        var expected = try InMemoryNotes.sample().note("welcome")
+        var checklist = ParagraphStyle(kind: .checklist, checked: true, checklistID: "old-item")
+        checklist.id = "old-paragraph"
+        expected.document = NoteDocument(text: "task", runs: [
+            AttributeRun(length: 4, paragraph: checklist, font: FontStyle(bold: true),
+                         link: "https://example.com", highlight: .mint),
+        ])
+
+        var actual = expected
+        actual.document = NoteDocument(text: "task", runs: [
+            AttributeRun(length: 2, paragraph: ParagraphStyle(kind: .checklist, checked: true, checklistID: "new-item"),
+                         font: FontStyle(bold: true), link: "https://example.com", highlight: .mint),
+            AttributeRun(length: 2, paragraph: ParagraphStyle(kind: .checklist, checked: true, checklistID: "new-item"),
+                         font: FontStyle(bold: true), link: "https://example.com", highlight: .mint),
+        ])
+        actual.document?.runs[0].paragraph?.id = "new-paragraph"
+        actual.document?.runs[1].paragraph?.id = "new-paragraph"
+
+        XCTAssertTrue(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
+        actual.document?.runs[1].highlight = .purple
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
+    }
+
     func testSharedWriteGuardRejectsUnknownAndReadOnlyRoles() {
         XCTAssertThrowsError(try NativeSharedWriteGuard.require(isShared: true, allowShared: true, isReadOnly: nil)) {
             XCTAssertEqual(($0 as? NotesError)?.code, "shared_permission_unknown")

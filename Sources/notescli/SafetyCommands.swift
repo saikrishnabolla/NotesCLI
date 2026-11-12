@@ -13,6 +13,7 @@ struct WriteOptions: ParsableArguments {
     @Option(help: "Write only if the note's modified date equals this ISO 8601 value.") var ifModified: String?
     @Option(help: "Write only if the note revision equals this SHA-256 token.") var expectRevision: String?
     @Flag(help: "Permit an HTML body rewrite that can remove attachments.") var allowAttachmentLoss = false
+    @Flag(help: "Permit undo or revert to convert native-only note features.") var allowDowngrade = false
     @Flag(help: "Permit a native write after Notes confirms shared-note write access.") var allowShared = false
     @Flag(help: "Wait for the new local note version to reach iCloud.") var waitSync = false
     @Option(help: "Seconds to wait with --wait-sync.") var syncTimeout: Double = 30
@@ -318,13 +319,19 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
         return
     }
     let backend = try options.writable(), current = try backend.reader.note(ref)
-    try SafetyExecutor.requireAttachmentSafety(current, allowLoss: write.allowAttachmentLoss)
-    let snapshot = try SnapshotStore().loadRestorable(current.summary.id.uuid, snapshot: snapshotID)
-    let writer = try backend.writer(), target = current.summary.id.uuid
+    let snapshot = try SnapshotStore().load(current.summary.id.uuid, snapshot: snapshotID)
+    let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
+    if selected == .scripting {
+        try SnapshotRestorePolicy.requireScriptingRestoreAllowed(snapshot.note, allowDowngrade: write.allowDowngrade)
+        try SafetyExecutor.requireAttachmentSafety(current, allowLoss: write.allowAttachmentLoss || write.allowDowngrade)
+    }
+    let scriptingWriter = try backend.writer(), target = current.summary.id.uuid
     let paths = [current.summary.folderPath, snapshot.note.summary.folderPath]
-    let replacePlan = DryRunPlan(operation: "replaceBody", target: target, arguments: ["snapshot": snapshot.info.id],
-                                 resultingHTML: SafetyExecutor.bodyHTML(title: snapshot.note.summary.title, markdown: snapshot.markdown))
-    let renamePlan = current.summary.title == snapshot.note.summary.title ? nil :
+    let restoreOperation = selected == .native ? "restoreSnapshot" : "replaceBody"
+    let replacePlan = DryRunPlan(operation: restoreOperation, target: target, arguments: ["snapshot": snapshot.info.id],
+                                 resultingHTML: SafetyExecutor.bodyHTML(title: snapshot.note.summary.title, markdown: snapshot.markdown),
+                                 engine: selected.rawValue)
+    let renamePlan = selected == .native || current.summary.title == snapshot.note.summary.title ? nil :
         DryRunPlan(operation: "renameNote", target: target, arguments: ["title": snapshot.note.summary.title], resultingHTML: replacePlan.resultingHTML)
     let destination = snapshot.note.summary.folderPath.joined(separator: " > ")
     let movePlan = current.summary.folderPath == snapshot.note.summary.folderPath ? nil :
@@ -343,10 +350,27 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
     }
     var replaceWrite = write
     replaceWrite.idempotencyKey = write.idempotencyKey.map { "\($0):replace" }
-    if let result = try SafetyExecutor.run(options: replaceWrite, operation: "replaceBody", arguments: ["ref": target, "snapshot": snapshot.info.id],
+    var capturedNative: NativeWriteResult?
+    if let result = try SafetyExecutor.run(options: replaceWrite, operation: restoreOperation, arguments: ["ref": target, "snapshot": snapshot.info.id, "engine": selected.rawValue],
         note: current, allowedPaths: paths, destructive: true, plan: replacePlan,
-        action: { try writer.replaceBody(target, markdown: snapshot.markdown, allowAttachmentLoss: write.allowAttachmentLoss) }) {
-        try Output.write(result, json: options.json)
+        action: {
+            switch selected {
+            case .native:
+                let value = try NativeNotesWriter().restoreSnapshot(target, snapshot: snapshot.note, allowShared: write.allowShared)
+                capturedNative = value
+                return value.writeResult
+            case .scripting:
+                return try scriptingWriter.replaceBody(target, markdown: snapshot.markdown,
+                                                        allowAttachmentLoss: write.allowAttachmentLoss || write.allowDowngrade)
+            }
+        }) {
+        if selected == .native {
+            try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: capturedNative?.operationID,
+                                                      verification: capturedNative?.verification), options: options)
+        } else {
+            try Output.write(result, json: options.json)
+        }
+        guard result.outcome == .verified else { return }
     }
     var followupWrite = write
     followupWrite.ifModified = nil
@@ -356,14 +380,14 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
         _ = try SafetyExecutor.run(options: followupWrite, operation: "renameNote", arguments: ["ref": target, "title": snapshot.note.summary.title],
             note: try backend.reader.note(target), allowedPaths: paths, destructive: true,
             plan: renamePlan,
-            action: { try writer.renameNote(target, title: snapshot.note.summary.title) })
+            action: { try scriptingWriter.renameNote(target, title: snapshot.note.summary.title) })
     }
     if let movePlan {
         followupWrite.idempotencyKey = write.idempotencyKey.map { "\($0):move" }
         _ = try SafetyExecutor.run(options: followupWrite, operation: "moveNote", arguments: ["ref": target, "folder": destination],
             note: try backend.reader.note(target), allowedPaths: paths, destructive: true,
             plan: movePlan,
-            action: { try writer.moveNote(target, toFolder: destination) })
+            action: { try scriptingWriter.moveNote(target, toFolder: destination) })
     }
 }
 

@@ -1553,6 +1553,194 @@ public final class NativeNotesWriter: NotesNativeWriting {
             try MarkdownNativeWriter(owner: self).write(ref: ref, markdown: markdown, dryRun: dryRun, backup: backup, allowShared: allowShared, context: context)
         }
     }
+
+    public func restoreSnapshot(_ ref: String, snapshot: Note, allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            guard let document = snapshot.document else {
+                throw NotesError("snapshot_locked", "The snapshot has no readable note body.")
+            }
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            let expectedMarkers = Self.markerReferences(document)
+            var attachmentObjects: [String: NSManagedObject] = [:]
+            for marker in expectedMarkers {
+                let rows = try fetch("ICInlineAttachment", predicate: NSPredicate(format: "identifier == %@", marker.id), in: context) +
+                    fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", marker.id), in: context)
+                guard let attachment = rows.first else {
+                    throw NotesError("snapshot_attachment_unavailable", "Attachment \(marker.id) is no longer available for restore.")
+                }
+                attachmentObjects[marker.id] = attachment
+            }
+            do {
+                for attachment in attachmentObjects.values where value(attachment, "markedForDeletion") as? Bool == true {
+                    try NCNotesRuntime.unmarkForDeletion(attachment)
+                }
+                let built = try attributed(document)
+                let editor = try NCBodyEditor(note: note)
+                let oldMarkers = attachmentMarkers(editor.original)
+                try editor.begin(["delete", "insert"])
+                try editor.delete(NSRange(location: 0, length: editor.original.length))
+                try editor.insert(built.text, at: 0)
+                try editor.finish()
+
+                if let tables = document.tableCells {
+                    for (attachmentID, rows) in tables {
+                        guard let attachment = attachmentObjects[attachmentID] else {
+                            throw NotesError("snapshot_attachment_unavailable", "Table \(attachmentID) is no longer available for restore.")
+                        }
+                        try restoreTable(rows, attachment: attachment)
+                    }
+                }
+                if !built.collapsedParagraphIDs.isEmpty {
+                    try require(["setOutlineStateData:"], of: note)
+                    let data = try NCNotesRuntime.outlineStateData(collapsedUUIDStrings: built.collapsedParagraphIDs.sorted())
+                    try NCNotesRuntime.setValue(data, forKey: "outlineStateData", of: note)
+                } else if snapshot.document?.collapsedParagraphIDs?.isEmpty == false {
+                    throw NotesError("snapshot_restore_failed", "Collapsed headings could not be rebuilt from the snapshot.")
+                } else if value(note, "outlineStateData") != nil {
+                    let data = try NCNotesRuntime.outlineStateData(collapsedUUIDStrings: [])
+                    try NCNotesRuntime.setValue(data, forKey: "outlineStateData", of: note)
+                }
+                let kept = Set(expectedMarkers.map(\.id))
+                for old in oldMarkers where !kept.contains(old.2) {
+                    let inline = try fetch("ICInlineAttachment", predicate: NSPredicate(format: "identifier == %@", old.2), in: context, limit: 1).first
+                    let regular = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", old.2), in: context, limit: 1).first
+                    if let object = inline ?? regular {
+                        try NCNotesRuntime.markForDeletion(object)
+                    }
+                }
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            let fresh = try self.note(id(note), in: context)
+            let nativeBody = try body(fresh)
+            let nativeMarkers = attachmentMarkers(nativeBody).map { ($0.2, $0.3) }
+            let expectedMarkerPairs = expectedMarkers.map { ($0.id, $0.typeUTI) }
+            return result(
+                id(note),
+                native: ["utf16Length": "\(nativeBody.length)", "markerCount": "\(expectedMarkers.count)"],
+                nativeVerified: nativeBody.string == document.text && NativeVerificationRules.sameMarkerMultiset(expectedMarkerPairs, nativeMarkers),
+                sqlite: { restored in
+                    guard SnapshotRestoreVerification.matches(expected: snapshot, actual: restored) else { return nil }
+                    return ["utf16Length": "\(document.text.utf16.count)", "lossless": "true"]
+                },
+                mismatch: "Persisted snapshot readback did not match the saved note structure."
+            )
+        }
+    }
+
+    private struct BuiltSnapshotText {
+        var text: NSMutableAttributedString
+        var collapsedParagraphIDs: [String]
+    }
+
+    private static func markerReferences(_ document: NoteDocument) -> [InlineRef] {
+        var seen: Set<String> = []
+        return document.runs.compactMap(\.attachment).filter { seen.insert($0.id).inserted }
+    }
+
+    private func attributed(_ document: NoteDocument) throws -> BuiltSnapshotText {
+        let source = document.text as NSString
+        let output = NSMutableAttributedString()
+        var offset = 0
+        var collapsed: [String] = []
+        for run in document.runs {
+            guard run.length >= 0, offset + run.length <= source.length else {
+                throw NotesError("invalid_snapshot", "A snapshot attribute run is outside the note body.")
+            }
+            let string = source.substring(with: NSRange(location: offset, length: run.length))
+            var attributes: [NSAttributedString.Key: Any] = [:]
+            if let paragraph = run.paragraph {
+                let style = try NCNotesRuntime.paragraphStyle(
+                    Self.nativeStyle(paragraph.kind).number,
+                    indent: paragraph.indent,
+                    quote: paragraph.kind == .blockquote ? max(1, paragraph.blockQuoteLevel ?? 1) : (paragraph.blockQuoteLevel ?? 0),
+                    checked: paragraph.kind == .checklist ? (paragraph.checked == true ? 1 : 0) : -1,
+                    basedOn: nil
+                )
+                if let alignment = paragraph.alignment {
+                    try require(["setAlignment:"], of: style as AnyObject)
+                    try NCNotesRuntime.setValue(alignment, forKey: "alignment", of: style as AnyObject)
+                }
+                if let direction = paragraph.writingDirection {
+                    try require(["setWritingDirection:"], of: style as AnyObject)
+                    try NCNotesRuntime.setValue(direction, forKey: "writingDirection", of: style as AnyObject)
+                }
+                if paragraph.collapsed == true {
+                    try require(["uuid", "supportsSectionLinks"], of: style as AnyObject)
+                    guard value(style as AnyObject, "supportsSectionLinks") as? Bool == true,
+                          let uuid = value(style as AnyObject, "uuid") as? UUID else {
+                        throw NotesError("not_collapsible", "A saved collapsed paragraph is not a collapsible heading.")
+                    }
+                    collapsed.append(uuid.uuidString)
+                }
+                attributes[.init("TTStyle")] = style
+            }
+            let hints = (run.font.bold ? 1 : 0) | (run.font.italic ? 2 : 0)
+            if hints != 0 { attributes[.init("TTHints")] = hints }
+            if run.font.underline { attributes[.init("TTUnderline")] = 1 }
+            if run.font.strikethrough { attributes[.init("TTStrikethrough")] = 1 }
+            if run.font.superscript != 0 { attributes[.init("NSSuperScript")] = run.font.superscript }
+            if run.font.name != nil || run.font.pointSize != nil {
+                attributes[.init("ICTTFont")] = try NCNotesRuntime.font(
+                    name: run.font.name,
+                    size: run.font.pointSize.map { NSNumber(value: $0) },
+                    hints: hints,
+                    basedOn: nil
+                )
+            }
+            if let link = run.link { attributes[.init("NSLink")] = URL(string: link) ?? link }
+            if let color = run.color { attributes[.init("TTColor")] = try Self.color(color) }
+            if let highlight = run.highlight { attributes[.init("TTEmphasis")] = highlight.notesValue }
+            if let attachment = run.attachment {
+                attributes[.init("NSAttachment")] = try NCNotesRuntime.attachmentMarker(id: attachment.id, type: attachment.typeUTI)
+            }
+            output.append(NSAttributedString(string: string, attributes: attributes))
+            offset += run.length
+        }
+        guard offset == source.length else {
+            throw NotesError("invalid_snapshot", "Snapshot attribute runs do not cover the note body.")
+        }
+        return BuiltSnapshotText(text: output, collapsedParagraphIDs: collapsed)
+    }
+
+    private func restoreTable(_ rows: [[TableCellDocument]], attachment: NSManagedObject) throws {
+        guard !rows.isEmpty, let width = rows.map(\.count).max(), width > 0,
+              rows.allSatisfy({ $0.count == width }) else {
+            throw NotesError("invalid_snapshot", "A saved table has inconsistent dimensions.")
+        }
+        let editor = try NCTableEditor(attachment: attachment)
+        var rowCount = try editor.rowCount().intValue
+        var columnCount = try editor.columnCount().intValue
+        while rowCount < rows.count { try editor.insertRow(rowCount); rowCount += 1 }
+        while rowCount > rows.count { rowCount -= 1; try editor.removeRow(rowCount) }
+        while columnCount < width { try editor.insertColumn(columnCount); columnCount += 1 }
+        while columnCount > width { columnCount -= 1; try editor.removeColumn(columnCount) }
+        for row in rows.indices {
+            for column in rows[row].indices {
+                try editor.setAttributedCell(column: column, row: row, text: attributed(rows[row][column].document).text)
+            }
+        }
+        try editor.save()
+    }
+
+    private static func nativeStyle(_ kind: ParagraphStyle.Kind) -> NativeParagraphStyle {
+        switch kind {
+        case .body: .body
+        case .title: .title
+        case .heading: .heading
+        case .subheading: .subheading
+        case .monospaced: .monospaced
+        case .bulleted: .bulleted
+        case .dashed: .dashed
+        case .numbered: .numbered
+        case .checklist: .checklist
+        case .blockquote: .blockquote
+        }
+    }
 }
 
 private extension Array {

@@ -61,4 +61,13 @@ final class SVGDrawingTests: XCTestCase {
         XCTAssertEqual(parsed.strokes[1], SVGStroke(points: [.init(x: 0, y: 4), .init(x: 8, y: 4)],
                                                      color: .init(red: 0, green: 1, blue: 0), width: 1, closed: false))
     }
+
+    func testClosesFilledOpenPathOutline() throws {
+        let svg = Data(##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8"><path d="M0 0 L8 0 L8 8" fill="#ff0000" stroke="none"/></svg>"##.utf8)
+        let parsed = try SVGDrawingConverter.parse(svg)
+
+        XCTAssertEqual(parsed.strokes, [SVGStroke(points: [.init(x: 0, y: 0), .init(x: 8, y: 0),
+                                                                 .init(x: 8, y: 8), .init(x: 0, y: 0)],
+                                                        color: .init(red: 1, green: 0, blue: 0), width: 1, closed: true)])
+    }
 }

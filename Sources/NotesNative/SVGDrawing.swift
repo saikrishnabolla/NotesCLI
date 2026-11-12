@@ -378,7 +378,9 @@ private final class SVGParserDelegate: NSObject, XMLParserDelegate {
         guard fillAllowed, context.style.fillEnabled else { return }
         let color = Self.opacity(context.style.fill, context.style.opacity * context.style.fillOpacity)
         for path in transformed where path.points.count >= 3 {
-            strokes.append(SVGStroke(points: path.points, color: color, width: width, closed: path.closed))
+            var outline = path.points
+            if outline.first != outline.last, let first = outline.first { outline.append(first) }
+            strokes.append(SVGStroke(points: outline, color: color, width: width, closed: true))
             if options.fill == .hatch {
                 strokes += Self.hatching(path.points, color: color, width: width)
             }

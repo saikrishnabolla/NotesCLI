@@ -5,7 +5,7 @@ import XCTest
 
 final class CapabilityHostTests: XCTestCase {
     func testOwnerOnlySocketForwardsArgumentsAndStandardDescriptors() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-host-\(UUID().uuidString)")
+        let root = URL(fileURLWithPath: "/tmp/nch-\(UUID().uuidString.prefix(8))", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let socket = root.appendingPathComponent("host.sock")

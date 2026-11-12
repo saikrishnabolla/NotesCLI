@@ -53,7 +53,7 @@ func outputEngineWrite(_ input: EngineWriteResponse, options: GlobalOptions) thr
         throw NotesError("write_outcome_unknown", (response.result.message ?? "The write may have completed. Do not retry automatically.") + operation, hint: "Read the note before retrying.")
     }
     if options.json { try Output.json(response) }
-    else { Output.table(["ENGINE", "OUTCOME", "ID", "MESSAGE"], [[response.engine, response.result.outcome.rawValue,
+    else { Output.table(["ENGINE", "OUTCOME", "ID", "MESSAGE"], [[response.engine, Output.outcome(response.result.outcome),
         response.result.noteID?.uuid ?? response.result.folderID ?? "", response.result.message ?? ""]]) }
 }
 

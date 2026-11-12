@@ -8,7 +8,11 @@ import NotesStore
 extension NoteSort: ExpressibleByArgument {}
 
 struct ReadList: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "list")
+    static let configuration = CommandConfiguration(commandName: "list", discussion: """
+        EXAMPLES:
+          notescli list --limit 20
+          notescli list --folder "Projects" --tag research --json
+        """)
     @OptionGroup var options: GlobalOptions
     @Option var folder: String?
     @Option var account: String?
@@ -37,7 +41,11 @@ struct ReadList: ParsableCommand {
 }
 
 struct IndexedSearch: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "search")
+    static let configuration = CommandConfiguration(commandName: "search", discussion: """
+        EXAMPLES:
+          notescli search "quarterly results" --limit 10
+          notescli search "tag:research AND has:pdf" --index --json
+        """)
     @OptionGroup var options: GlobalOptions
     @Argument var query: String
     @Option var folder: String?
@@ -57,7 +65,7 @@ struct IndexedSearch: ParsableCommand {
             let page = try ReadCursorPaging.searchPage(local.search(effectiveQuery, folder: folder, limit: 5000), cursor: cursor, limit: limit ?? 50)
             if options.json { try Output.json(page) }
             else {
-                Output.table(["SHORT ID", "ID", "TITLE", "FOLDER", "SCORE", "SNIPPET"], page.hits.map { [$0.shortID ?? "", $0.noteID, $0.title, $0.folder, String(format: "%.0f", $0.score), $0.snippet] })
+                Output.table(["#ID", "ID", "TITLE", "FOLDER", "SCORE", "SNIPPET"], page.hits.map { [$0.number.map { "#\($0)" } ?? $0.shortID ?? "", $0.noteID, $0.title, $0.folder, String(format: "%.0f", $0.score), $0.snippet] })
                 if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
             }
             return

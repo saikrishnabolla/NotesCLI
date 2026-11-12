@@ -68,6 +68,18 @@ public final class MCPServer {
         let alignment: [String: Any] = ["type": "string", "enum": ["left", "right", "center", "justified", "natural"]]
         let writingDirection: [String: Any] = ["type": "string", "enum": ["natural", "left-to-right", "right-to-left"]]
         let highlight: [String: Any] = ["type": "string", "enum": ["purple", "pink", "orange", "mint", "blue"]]
+        // MARK: w9-paper begin
+        let drawingInput: [String: [String: Any]] = [
+            "svg": string,
+            "ink": ["type": "string", "enum": ["pen", "marker", "pencil", "monoline"]],
+            "width": ["type": "number", "exclusiveMinimum": 0],
+            "color": string,
+            "bw": bool,
+            "size": string,
+            "fit": ["type": "string", "enum": ["contain", "stretch"]],
+            "fill": ["type": "string", "enum": ["outline", "hatch"]],
+        ]
+        // MARK: w9-paper end
         let page = ["offset": integer, "limit": integer]
         let cursorPage = ["cursor": string, "limit": integer]
         let writeCommon = ["dry_run": bool, "idempotency_key": string, "if_modified": string,
@@ -99,8 +111,14 @@ public final class MCPServer {
             t("list_deleted", "List notes in Recently Deleted.", [], page),
             t("recent_notes", "List recently modified notes.", [], ["days": integer].merging(page) { old, _ in old }),
             t("today_notes", "List notes modified today.", [], page),
+            // MARK: w9-ux begin
+            t("pinned_notes", "List pinned notes.", [], ["limit": integer]),
+            // MARK: w9-ux end
             t("count_notes", "Count notes matching filters.", [], filters),
             t("get_stats", "Get note, folder, account, and attachment-kind counts."),
+            // MARK: w9-ux begin
+            t("get_capabilities", "Report Apple Notes feature, engine, permission, and native selector support."),
+            // MARK: w9-ux end
             t("get_raw_note", "Read decoded raw note protobuf data with paging.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
             t("related_notes", "Find notes related by links or tags.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
             t("get_write_policy", "Show read-only, native, and write-folder policy."),
@@ -186,6 +204,14 @@ public final class MCPServer {
                 t("set_folder_sort", "Set a folder's native custom sort.", ["ref", "by", "direction"], ["ref": string, "by": string, "direction": string], write: true, native: true),
                 t("set_default_account", "Set the account Notes uses for new notes.", ["account_id"], ["account_id": string], write: true, native: true),
                 // MARK: w4-format end
+                // MARK: w9-paper begin
+                t("drawing_add", "Convert an SVG to an editable Paper drawing and add it to a note.", ["ref", "svg"],
+                  drawingInput.merging(["ref": string, "position": integer]) { old, _ in old }, write: true, native: true),
+                t("drawing_create", "Create a note containing an editable Paper drawing.", ["folder", "title", "svg"],
+                  drawingInput.merging(["folder": string, "title": string]) { old, _ in old }, write: true, native: true),
+                t("drawing_export", "Export editable drawing strokes as SVG or base64-encoded PNG.", ["ref"],
+                  ["ref": string, "attachment_id": string, "format": ["type": "string", "enum": ["svg", "png"]]], native: true),
+                // MARK: w9-paper end
                 t("attach_file", "Insert a file or positioned image.", ["ref", "path"], ["ref": string, "path": string, "position": integer, "view": string], write: true, native: true),
                 t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),
                 t("table_create", "Create a native table.", ["ref", "rows"], ["ref": string, "rows": rows, "position": integer], write: true, native: true),
@@ -297,6 +323,15 @@ public final class MCPServer {
             case "integer":
                 guard let number = value as? NSNumber, String(cString: number.objCType) != "c", number.doubleValue >= 0,
                       number.doubleValue < Double(Int.max), number.doubleValue.rounded() == number.doubleValue else { return "\(key) must be a nonnegative integer" }
+            // MARK: w9-paper begin
+            case "number":
+                guard let number = value as? NSNumber, String(cString: number.objCType) != "c", number.doubleValue.isFinite else {
+                    return "\(key) must be a number"
+                }
+                if let minimum = spec["exclusiveMinimum"] as? NSNumber, number.doubleValue <= minimum.doubleValue {
+                    return "\(key) must be greater than \(minimum)"
+                }
+            // MARK: w9-paper end
             case "array": if !(value is [Any]) { return "\(key) must be an array" }
             default: break
             }
@@ -580,6 +615,12 @@ public final class MCPServer {
             let all = try reader.notes(NoteQuery(modifiedAfter: start), sort: .modified)
             var result = try page(all, offset: offset, limit: limit) { try NotePresentation.object($0) }; result["notes"] = result.removeValue(forKey: "items")
             return try content(result)
+        // MARK: w9-ux begin
+        case "pinned_notes":
+            let requested = a["limit"] == nil ? 100 : i("limit")
+            let notes = try reader.notes(NoteQuery(pinnedOnly: true, limit: requested), sort: .modified)
+            return try content(["notes": NotePresentation.object(notes), "limit": requested, "total": notes.count])
+        // MARK: w9-ux end
         case "count_notes":
             let query = NoteQuery(folder: s("folder"), account: s("account"), includeDeleted: b("include_deleted"), pinnedOnly: b("pinned"), tag: s("tag"), modifiedAfter: try s("since").map { try NotePresentation.date($0) }, modifiedBefore: try s("until").map { try NotePresentation.date($0) })
             return try content(["count": reader.notes(query).count])
@@ -588,6 +629,10 @@ public final class MCPServer {
             var folders: [String: Int] = [:], accounts: [String: Int] = [:]
             for note in notes { folders[note.folderPath.joined(separator: " > "), default: 0] += 1; accounts[note.accountID, default: 0] += 1 }
             return try content(["total": notes.count, "by_folder": folders, "by_account": accounts, "by_kind": reader.attachmentKindCounts()])
+        // MARK: w9-ux begin
+        case "get_capabilities":
+            return try content(try NotePresentation.object(CapabilityReporter.report()) as! [String: Any])
+        // MARK: w9-ux end
         case "get_raw_note":
             let raw = try String(decoding: NotePresentation.json(reader.rawNote(s("ref")!)), as: UTF8.self)
             let value = textPage(raw, offset: offset, limit: min(a["limit"] == nil ? 16_000 : limit, 16_000))
@@ -720,23 +765,26 @@ public final class MCPServer {
         return try safeWrite(tool: tool, arguments: a, note: note, paths: paths, engine: "scripting") {
             guard !readOnly, let writer else { throw NotesError("read_only", "Writing is disabled.") }
             let result: WriteResult
+            // MARK: w9-ux begin
+            let resolvedRef = note?.summary.id.uuid ?? s("ref")
             switch tool.name {
             case "create_note": result = try writer.createNote(title: s("title")!, markdown: s("body")!, folder: s("folder"))
-            case "append_to_note": result = try writer.appendToNote(s("ref")!, markdown: s("body")!)
-            case "prepend_to_note": result = try writer.prependToNote(s("ref")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "update_note", "write_markdown": result = try writer.replaceBody(s("ref")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "insert_under_heading": result = try writer.insertUnderHeading(s("ref")!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "replace_section": result = try writer.replaceSection(s("ref")!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "replace_text": result = try writer.replaceText(s("ref")!, find: s("find")!, replacement: s("replacement")!, allowAttachmentLoss: b("allow_attachment_loss"))
-            case "rename_note": result = try writer.renameNote(s("ref")!, title: s("title")!)
-            case "move_note": result = try writer.moveNote(s("ref")!, toFolder: s("folder")!)
-            case "delete_note": result = try writer.deleteNote(s("ref")!)
+            case "append_to_note": result = try writer.appendToNote(resolvedRef!, markdown: s("body")!)
+            case "prepend_to_note": result = try writer.prependToNote(resolvedRef!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "update_note", "write_markdown": result = try writer.replaceBody(resolvedRef!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "insert_under_heading": result = try writer.insertUnderHeading(resolvedRef!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "replace_section": result = try writer.replaceSection(resolvedRef!, heading: s("heading")!, markdown: s("body")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "replace_text": result = try writer.replaceText(resolvedRef!, find: s("find")!, replacement: s("replacement")!, allowAttachmentLoss: b("allow_attachment_loss"))
+            case "rename_note": result = try writer.renameNote(resolvedRef!, title: s("title")!)
+            case "move_note": result = try writer.moveNote(resolvedRef!, toFolder: s("folder")!)
+            case "delete_note": result = try writer.deleteNote(resolvedRef!)
             case "create_folder": result = try writer.createFolder(name: s("name")!, parent: s("parent"), account: s("account"))
             case "rename_folder": result = try writer.renameFolder(s("ref")!, name: s("name")!)
             case "move_folder": result = try writer.moveFolder(s("ref")!, toParent: s("parent"), account: s("account"))
             case "delete_folder": result = try writer.deleteFolder(s("ref")!)
             default: throw NotesError("unknown_tool", "Unknown tool.")
             }
+            // MARK: w9-ux end
             return (result, nil, nil)
         }
     }
@@ -851,6 +899,9 @@ public final class MCPServer {
         let note = targetNotes.first
         var paths = targetNotes.map(\.summary.folderPath)
         if tool.name == "create_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
+        // MARK: w9-paper begin
+        if tool.name == "drawing_create", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
+        // MARK: w9-paper end
         var dispatchArguments = arguments
         if let note { dispatchArguments["ref"] = note.summary.id.uuid }
         if tool.name == "link_add", let target = arguments["target"] as? String {

@@ -4,6 +4,7 @@ import Foundation
 import NotesCore
 import NotesNativeObjC
 import NotesStore
+import PencilKit
 
 fileprivate struct UnsafeSendableBox<Value>: @unchecked Sendable {
     let value: Value
@@ -216,10 +217,29 @@ public final class NativeNotesWriter: NotesNativeWriting {
         if ref.hasPrefix("x-coredata://"), let url = URL(string: ref),
            let objectID = context.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: url),
            let object = try? context.existingObject(with: objectID), object.entity.name == "ICNote" { return object }
+        func primaryKeyNote(_ number: Int) -> NSManagedObject? {
+            guard let coordinator = context.persistentStoreCoordinator else { return nil }
+            for store in coordinator.persistentStores {
+                guard let uuid = coordinator.metadata(for: store)[NSStoreUUIDKey] as? String,
+                      let url = URL(string: "x-coredata://\(uuid)/ICNote/p\(number)"),
+                      let objectID = coordinator.managedObjectID(forURIRepresentation: url),
+                      let object = try? context.existingObject(with: objectID), object.entity.name == "ICNote" else { continue }
+                return object
+            }
+            return nil
+        }
         var matches = try fetch("ICNote", predicate: NSPredicate(format: "identifier ==[c] %@", ref), in: context)
-        if matches.isEmpty { matches = try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context) }
+        if let number = NoteReference.explicitNumber(ref) {
+            if let object = primaryKeyNote(number), !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
+        } else if let number = NoteReference.bareNumber(ref) {
+            if let object = primaryKeyNote(number), !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
+            for object in try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context)
+                where !matches.contains(where: { $0.objectID == object.objectID }) { matches.append(object) }
+        } else if matches.isEmpty {
+            matches = try fetch("ICNote", predicate: NSPredicate(format: "title == %@ AND markedForDeletion == NO", ref), in: context)
+        }
         guard !matches.isEmpty else { throw NotesError("note_not_found", "No note matches the reference.") }
-        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note has this title. Use its UUID.") }
+        guard matches.count == 1 else { throw NotesError("ambiguous_note", "More than one note matches. Use #ID or a UUID.") }
         return matches[0]
     }
 
@@ -1062,6 +1082,56 @@ public final class NativeNotesWriter: NotesNativeWriting {
         try insertFrozenFile(ref, frozen: FrozenAttachmentInput(file: file), position: position, imageView: imageView, allowShared: allowShared)
     }
 
+    public func insertDrawing(_ ref: String, drawing: PKDrawing, position: Int?, allowShared: Bool) throws -> NativeAttachmentResult {
+        let expectedStrokeCount = drawing.strokes.count
+        guard expectedStrokeCount > 0 else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
+        return try performAttachmentWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            var attachmentID = "", kind: NSString?, at = 0
+            do {
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                at = position ?? editor.original.length
+                attachmentID = try NCNotesRuntime.addSystemPaperDrawing(drawing as AnyObject, to: note, type: &kind)
+                operation?.attachmentID = attachmentID
+                operation?.attachmentType = kind as String? ?? "com.apple.notes.paper"
+                operation?.attachmentPosition = at
+                try insertMarker(editor, original: editor.original, id: attachmentID,
+                                 type: kind as String? ?? "com.apple.notes.paper", position: position)
+                try editor.finish()
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            let fresh = try self.note(id(note), in: context)
+            let placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID }.count
+            let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", attachmentID), in: context, limit: 1).first
+            let decodedStrokeCount: Int
+            if let attachment {
+                decodedStrokeCount = try NCNotesRuntime.systemPaperDrawings(for: attachment).reduce(0) { count, value in
+                    guard let drawing = value as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
+                    return count + drawing.strokes.count
+                }
+            } else {
+                decodedStrokeCount = 0
+            }
+            let type = kind as String? ?? "com.apple.notes.paper"
+            let native = ["attachmentID": attachmentID, "typeUTI": type, "placements": String(placements),
+                          "strokeCount": String(decodedStrokeCount)]
+            let write = result(id(note), native: native,
+                               nativeVerified: placements == 1 && decodedStrokeCount == expectedStrokeCount,
+                               sqlite: { note in
+                guard note.attachments.filter({ $0.id == attachmentID && $0.typeUTI == type }).count == 1 else { return nil }
+                return ["attachmentID": attachmentID, "typeUTI": type, "placements": "1",
+                        "strokeCount": String(decodedStrokeCount)]
+            }, mismatch: "The Paper attachment or its editable strokes did not match the input drawing.")
+            return NativeAttachmentResult(attachmentID: attachmentID, typeUTI: type, position: at, write: write)
+        }
+    }
+
     fileprivate func storedAttachmentHash(noteID: String, attachmentID: String, expected: String) -> String? {
         for attempt in 0..<12 {
             if attempt > 0 { Thread.sleep(forTimeInterval: 0.5) }
@@ -1114,6 +1184,90 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
         let folderID = try NativeDestinationResolver.folderID(try SQLiteNotesStore(refresh: true).defaultLocation())
         return try folder(folderID, in: context)
+    }
+
+    public func createDrawingNote(title: String, folder folderRef: String?, drawing: PKDrawing,
+                                  allowShared: Bool) throws -> NativeCreateResult {
+        let expectedStrokeCount = drawing.strokes.count
+        guard expectedStrokeCount > 0 else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
+        var createdAttachmentID = ""
+        let write = try performWrite { context in
+            let destination = try destinationFolder(folderRef, in: context)
+            try guardWritableFolder(destination, allowShared: allowShared)
+            var noteID = "", attachmentID = "", type = "com.apple.notes.paper"
+            do {
+                let note = try NCNotesRuntime.newNote(in: destination)
+                try NCNotesRuntime.setValue(title, forKey: "title", of: note)
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                let built = try MarkdownNativeWriter(owner: self).attributed(markdown: "# " + title, note: note,
+                    context: context, editor: editor, existing: [:]).0
+                var kind: NSString?
+                attachmentID = try NCNotesRuntime.addSystemPaperDrawing(drawing as AnyObject, to: note, type: &kind)
+                createdAttachmentID = attachmentID
+                type = kind as String? ?? type
+                let marker = try NCNotesRuntime.attachmentMarker(id: attachmentID, type: type)
+                if built.length > 0 { built.append(NSAttributedString(string: "\n")) }
+                built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("NSAttachment"): marker]))
+                try editor.begin(["insert"])
+                try editor.insert(built, at: 0)
+                try editor.finish()
+                operation?.attachmentID = attachmentID
+                operation?.attachmentType = type
+                operation?.attachmentPosition = max(0, built.length - 1)
+                try save(context, notes: [note])
+                noteID = id(note)
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            let fresh = try self.note(noteID, in: context)
+            let placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID }.count
+            let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh), in: context, limit: 1).first
+            let decodedStrokeCount: Int
+            if let attachment {
+                decodedStrokeCount = try NCNotesRuntime.systemPaperDrawings(for: attachment).reduce(0) {
+                    guard let drawing = $1 as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
+                    return $0 + drawing.strokes.count
+                }
+            } else { decodedStrokeCount = 0 }
+            return result(noteID, native: ["title": title, "attachmentID": attachmentID, "typeUTI": type,
+                                           "placements": String(placements), "strokeCount": String(decodedStrokeCount)],
+                          nativeVerified: placements == 1 && decodedStrokeCount == expectedStrokeCount,
+                          sqlite: { note in
+                guard note.summary.title == title,
+                      note.attachments.filter({ $0.id == attachmentID && $0.typeUTI == type }).count == 1 else { return nil }
+                return ["title": title, "attachmentID": attachmentID, "typeUTI": type,
+                        "placements": "1", "strokeCount": String(decodedStrokeCount)]
+            }, mismatch: "The created note or its editable Paper drawing did not match.")
+        }
+        return NativeCreateResult(attachmentIDs: createdAttachmentID.isEmpty ? [] : [createdAttachmentID],
+                                  attachmentSHA256: [:], write: write)
+    }
+
+    public func paperDrawings(_ ref: String, attachmentID: String? = nil) throws -> [NativePaperAttachment] {
+        try performRead { context in
+            let note = try note(ref, in: context)
+            let markers = attachmentMarkers(try body(note)).filter { marker in
+                let lower = marker.3.lowercased()
+                return (attachmentID == nil || marker.2.caseInsensitiveCompare(attachmentID!) == .orderedSame) &&
+                    (lower.contains("paper") || lower.contains("drawing"))
+            }
+            guard !markers.isEmpty else { throw NotesError("drawing_not_found", "The note has no matching editable drawing.") }
+            var result: [NativePaperAttachment] = []
+            for marker in markers {
+                guard let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@ AND note == %@", marker.2, note), in: context, limit: 1).first else { continue }
+                let drawings = try NCNotesRuntime.systemPaperDrawings(for: attachment).map { value -> PKDrawing in
+                    guard let drawing = value as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
+                    return drawing
+                }
+                if !drawings.isEmpty {
+                    result.append(NativePaperAttachment(attachmentID: marker.2, typeUTI: marker.3, drawings: drawings))
+                }
+            }
+            guard !result.isEmpty else { throw NotesError("drawing_unavailable", "Notes returned no editable stroke data for the drawing.") }
+            return result
+        }
     }
 
     public func createNote(title: String, markdown: String, folder folderRef: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult {

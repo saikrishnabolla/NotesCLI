@@ -9,8 +9,26 @@ import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: "1.0.0", subcommands: [RecordingCommand.self, Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self])
+    static let version = "1.0.0"
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [RecordingCommand.self, Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self])
     @OptionGroup var options: GlobalOptions
+
+    func run() throws { try HomeScreen.run(options: options) }
+
+    static var namedSubcommands: [(String, ParsableCommand.Type)] {
+        configuration.subcommands.map { type in
+            (type.configuration.commandName ?? String(describing: type).lowercased(), type)
+        }
+    }
+
+    static func suggestion(for message: String) -> String? {
+        let prefix = "Unexpected argument '"
+        guard let start = message.range(of: prefix), let end = message[start.upperBound...].firstIndex(of: "'") else { return nil }
+        let value = String(message[start.upperBound..<end])
+        guard let suggestion = namedSubcommands.map(\.0).min(by: { FuzzySearch.distance(value, $0) < FuzzySearch.distance(value, $1) }),
+              FuzzySearch.distance(value, suggestion) <= 3 else { return nil }
+        return "Did you mean '\(suggestion)'?"
+    }
 
     static func main() {
         do { var command = try parseAsRoot(); try command.run() }
@@ -18,10 +36,13 @@ struct NotesCLI: ParsableCommand {
             if let e = error as? NotesError { fail(e) }
             let code = exitCode(for: error).rawValue
             if code == 0 { exit(withError: error) }
+            let shortMessage = message(for: error)
+            let hint = suggestion(for: shortMessage)
             if CommandLine.arguments.contains("--json") {
-                fail(NotesError(code == 64 ? "usage" : "error", message(for: error)), status: code == 64 ? 2 : 1)
+                fail(NotesError(code == 64 ? "usage" : "error", shortMessage, hint: hint), status: code == 64 ? 2 : 1)
             }
-            FileHandle.standardError.write(Data((fullMessage(for: error) + "\n").utf8))
+            let diagnostic = fullMessage(for: error) + (hint.map { "\n  \($0)" } ?? "")
+            FileHandle.standardError.write(Data((diagnostic + "\n").utf8))
             Darwin.exit(code == 64 ? 2 : 1)
         }
     }
@@ -73,6 +94,11 @@ struct List: ParsableCommand {
 }
 enum NoteFormat: String, ExpressibleByArgument { case markdown, text, html, json, outline }
 struct Show: ParsableCommand {
+    static let configuration = CommandConfiguration(discussion: """
+        EXAMPLES:
+          notescli show '#8800'
+          notescli show '#8800' --format json
+        """)
     @OptionGroup var options: GlobalOptions
     @Argument var ref: String
     @Option var format: NoteFormat = .markdown
@@ -109,12 +135,26 @@ struct Tags: ParsableCommand {
     }
 }
 struct Recent: ParsableCommand {
+    static let configuration = CommandConfiguration(discussion: """
+        EXAMPLES:
+          notescli recent 5
+          notescli recent 20 --json
+        """)
     @OptionGroup var options: GlobalOptions
-    @Argument var n: Int = 10
-    func validate() throws { try positive(n, name: "N") }
-    func run() throws { try Output.notes(options.backends().reader.notes(NoteQuery(limit: n)), json: options.json) }
+    @Argument var n: Int?
+    @Option var limit: Int?
+    func validate() throws {
+        if n != nil, limit != nil { throw ValidationError("Choose N or --limit, not both.") }
+        try positive(n ?? limit, name: "limit")
+    }
+    func run() throws { try Output.notes(options.backends().reader.notes(NoteQuery(limit: n ?? limit ?? 10)), json: options.json) }
 }
 struct Add: ParsableCommand {
+    static let configuration = CommandConfiguration(discussion: """
+        EXAMPLES:
+          notescli add "Research brief" --body "# Findings"
+          notescli add "Research brief" --file report.md
+        """)
     @OptionGroup var options: GlobalOptions
     @OptionGroup var write: WriteOptions
     @Argument var title: String = "Untitled"

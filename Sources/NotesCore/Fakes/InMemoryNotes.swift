@@ -44,12 +44,23 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
         return matches[0]
     }
     private func index(_ ref: String) throws -> Int {
-        let shortRef = ref.allSatisfy(\.isNumber) ? "n\(ref)" : ref
-        if let i = noteStore.firstIndex(where: {
-            $0.summary.id.uuid == ref ||
-            $0.summary.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
-            $0.summary.id.shortID?.caseInsensitiveCompare(shortRef) == .orderedSame
-        }) { return i }
+        let idMatches = noteStore.indices.filter {
+            noteStore[$0].summary.id.uuid == ref ||
+            noteStore[$0].summary.id.coreDataID?.caseInsensitiveCompare(ref) == .orderedSame ||
+            noteStore[$0].summary.id.shortID?.caseInsensitiveCompare(ref) == .orderedSame
+        }
+        if let number = NoteReference.explicitNumber(ref) {
+            let matches = Set(idMatches + noteStore.indices.filter { noteStore[$0].summary.number == number })
+            guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "note_not_found" : "ambiguous_note", "Note must resolve uniquely.") }
+            return matches.first!
+        }
+        if let number = NoteReference.bareNumber(ref) {
+            let matches = Set(idMatches + noteStore.indices.filter { noteStore[$0].summary.number == number || noteStore[$0].summary.title == ref })
+            guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "note_not_found" : "ambiguous_note", "Note must resolve uniquely.") }
+            return matches.first!
+        }
+        if idMatches.count == 1 { return idMatches[0] }
+        if idMatches.count > 1 { throw NotesError("ambiguous_note", "Note must resolve uniquely.") }
         let matches = noteStore.indices.filter { noteStore[$0].summary.title == ref }
         guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "note_not_found" : "ambiguous_note", "Note must resolve uniquely.") }
         return matches[0]

@@ -479,6 +479,39 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
     return identifier;
 }
 
++ (NSString *)addSystemPaperDrawing:(id)drawing toNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {
+    if (!NCLoad(error)) return nil;
+    __block NSString *identifier = nil;
+    BOOL ok = NCCatch(@"create system Paper attachment", error, ^{
+        Class helperClass = NSClassFromString(@"ICPaperAttachmentCreationHelper");
+        if (!NCRequireObject(drawing, @[@"dataRepresentation", @"strokes"], @"validate PencilKit drawing", error) ||
+            !NCRequireClass(helperClass, @[@"createSystemPaperAttachmentWithPKDrawing:inNote:"], @"create system Paper attachment", error)) return;
+        id attachment = ((id (*)(id, SEL, id, id))objc_msgSend)(helperClass,
+            NSSelectorFromString(@"createSystemPaperAttachmentWithPKDrawing:inNote:"), drawing, note);
+        if (!NCRequireObject(attachment, @[@"identifier", @"typeUTI"], @"read created Paper attachment", error)) return;
+        identifier = ((id (*)(id, SEL))objc_msgSend)(attachment, NSSelectorFromString(@"identifier"));
+        if (type) *type = ((id (*)(id, SEL))objc_msgSend)(attachment, NSSelectorFromString(@"typeUTI"));
+        if (!identifier.length && error) *error = NCError(@"Paper attachment has no identifier");
+    });
+    return ok ? identifier : nil;
+}
+
++ (NSArray *)systemPaperDrawingsForAttachment:(NSManagedObject *)attachment error:(NSError **)error {
+    if (!NCLoad(error)) return nil;
+    __block NSArray *result = nil;
+    BOOL ok = NCCatch(@"read system Paper drawings", error, ^{
+        Class helperClass = NSClassFromString(@"ICSystemPaperDrawingsHelper");
+        if (!NCRequireClass(helperClass, @[@"drawingsForAttachment:"], @"read system Paper drawings", error)) return;
+        id drawings = ((id (*)(id, SEL, id))objc_msgSend)(helperClass, NSSelectorFromString(@"drawingsForAttachment:"), attachment);
+        if (![drawings isKindOfClass:[NSArray class]]) {
+            if (error) *error = NCError(@"Paper drawing helper returned no drawing array");
+            return;
+        }
+        result = drawings;
+    });
+    return ok ? result : nil;
+}
+
 + (BOOL)setPreferredImageSize:(NSString *)size attachment:(NSManagedObject *)attachment error:(NSError **)error {
     SEL sel = NSSelectorFromString(@"setPreferredViewSize:");
     if (!NCRequireObject(attachment, @[@"setPreferredViewSize:"], @"setting image view size", error)) return NO;

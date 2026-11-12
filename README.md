@@ -46,13 +46,17 @@ notescli doctor
 
 ## Common commands
 
+Run `notescli` in a terminal for the command home screen and five recently edited notes. Scripts and agents should pass `--json`.
+
 ```bash
 notescli accounts --json
 notescli folders --tree
 notescli list --limit 20 --json
 notescli search "project plan" --json
-notescli show NOTE_ID --format markdown
+notescli show '#8800' --format markdown
 notescli recent 10 --json
+notescli pinned --limit 20
+notescli capabilities --json
 notescli add "Meeting notes" --body "# Notes"
 notescli append NOTE_ID --body "Follow up Friday"
 notescli checklist add NOTE_ID "Follow up Friday" --engine native
@@ -84,6 +88,8 @@ notescli mcp install --client all --read-only
 ```
 
 Supported clients are Claude Code, Claude Desktop, Codex, Cursor, and VS Code. Existing config files are backed up before a change. See [MCP setup](docs/mcp.md) for paths, removal, and plugin installation.
+
+The repository includes an agent skill at [`skills/notescli/SKILL.md`](skills/notescli/SKILL.md). `notescli mcp install` points to it after installing the server entry.
 
 ## How it compares
 

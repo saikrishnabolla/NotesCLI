@@ -50,6 +50,11 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note
                           type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
     NS_SWIFT_NAME(addURL(_:to:type:));
++ (nullable NSString *)addSystemPaperDrawing:(id)drawing toNote:(NSManagedObject *)note
+                                      type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
+    NS_SWIFT_NAME(addSystemPaperDrawing(_:to:type:));
++ (nullable NSArray *)systemPaperDrawingsForAttachment:(NSManagedObject *)attachment error:(NSError **)error
+    NS_SWIFT_NAME(systemPaperDrawings(for:));
 + (BOOL)setPreferredImageSize:(NSString *)size attachment:(NSManagedObject *)attachment error:(NSError **)error
     NS_SWIFT_NAME(setPreferredImageSize(_:attachment:));
 + (BOOL)renameTag:(NSManagedObject *)tag to:(NSString *)name error:(NSError **)error NS_SWIFT_NAME(renameTag(_:to:));

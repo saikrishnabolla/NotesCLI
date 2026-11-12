@@ -14,7 +14,9 @@ This reference follows `notescli --help` from version 1.0.0.
 -h, --help           Show help information.
 ```
 
-Use `--json` for scripts and agents. A note reference can be a UUID, Core Data ID, short ID such as `n123`, bare numeric ID such as `123`, or an unambiguous title. Short IDs come from Notes' stable `Z_PK` value and appear in note listings.
+Use `--json` for scripts and agents. A note reference can be `#123`, a UUID, Core Data ID, legacy short ID such as `n123`, bare numeric ID such as `123`, or an unambiguous title. Use `#123` in new commands. A bare number is ambiguous when another note has that exact title. Numbers come from Notes' stable `Z_PK` value and appear as `#ID` in human listings and `number` in JSON.
+
+With no command, a terminal shows the NotesCLI home screen and five recently edited notes. Redirected output shows plain help. `notescli --json` returns the home data as JSON.
 
 ## Read commands
 
@@ -33,7 +35,9 @@ notescli search <query> [--folder <folder>] [--limit <limit>]
                 [--has image|audio|pdf|scan|drawing|table|checklist|link|file]
                 [--cursor <cursor>] [--fuzzy | --index] [--rebuild]
 notescli tags
-notescli recent [<n>]
+notescli recent [<n>] [--limit <limit>]
+notescli pinned [--limit <limit>]
+notescli capabilities
 notescli fetch <ref> | --all [--wait <seconds>]
 notescli index [--rebuild] [--background | --status | --cancel]
 notescli stats
@@ -51,6 +55,7 @@ notescli wait-sync <ref> [--timeout <seconds>]
 notescli raw <ref>
 notescli deleted
 notescli smart-folders [--evaluate]
+notescli help [<command>]
 notescli open <ref>
 notescli open <account> --account
 notescli open <folder> --folder
@@ -116,13 +121,18 @@ notescli recording add <ref> --file <audio> [--transcribe] [--title <title>] [--
 notescli recording create --folder <folder> --title <title> --file <audio> [--transcribe] [--locale <locale>]
 notescli recording transcribe <ref> [--attachment <id>] [--locale <locale>]
 notescli recording transcript <ref> [--format text|srt|vtt|json]
+notescli drawing add <ref> --svg <file> [--ink pen|marker|pencil|monoline]
+                [--width <width>] [--color <hex>] [--bw] [--size <width>x<height>]
+                [--fit contain|stretch] [--fill outline|hatch]
+notescli drawing create --folder <folder> --title <title> --svg <file> [drawing options]
+notescli drawing export <ref> [--attachment <id>] [--format svg|png] [--output <file>]
 notescli table create|set|add-row|add-column|remove-row|remove-column ...
 notescli duplicate <ref> [--title <title>]
 notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. Transcription stays on device and is stored in Notes' native transcript data. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. Transcription stays on device and is stored in Notes' native transcript data. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
 All write commands accept `--dry-run`, `--idempotency-key`, `--write-folders`, `--if-modified`, `--expect-revision`, `--allow-shared`, `--wait-sync`, and `--sync-timeout`. Shared-note writes require native mode and Notes write permission. A sync timeout leaves the write verified and returns `syncPending: true`. Body rewrites also accept `--allow-attachment-loss`.
 
@@ -166,6 +176,7 @@ The default output directory is `notes-export`. `--combine` writes one PDF per f
 notescli setup
 notescli permissions
 notescli doctor
+notescli capabilities
 notescli completion [zsh|bash|fish]
 ```
 

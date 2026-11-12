@@ -3,6 +3,14 @@ import NotesCore
 import NotesMCP
 
 final class PresentationTests: XCTestCase {
+    func testRelativeDateUsesLiteralHumanLabels() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = Date(timeIntervalSince1970: 1_800_014_400)
+        XCTAssertEqual(NotePresentation.relativeDate(now.addingTimeInterval(-90), now: now, calendar: calendar), "1m ago")
+        XCTAssertEqual(NotePresentation.relativeDate(now.addingTimeInterval(-7_200), now: now, calendar: calendar), "2h ago")
+        XCTAssertEqual(NotePresentation.relativeDate(now.addingTimeInterval(-86_400), now: now, calendar: calendar), "yesterday 12:00")
+    }
     func testHighlightRendersWithoutSplittingSharedBoldFormatting() throws {
         var note = try InMemoryNotes.sample().note("welcome")
         note.document = NoteDocument(text: "notescli-test-smoke", runs: [

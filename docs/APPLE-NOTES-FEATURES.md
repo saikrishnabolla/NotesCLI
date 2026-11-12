@@ -2,7 +2,7 @@
 
 Verified on macOS 27.2.1 on 2026-11-12. Apple documents the user-facing features in the [Notes User Guide](https://support.apple.com/guide/notes/welcome/mac), including [formatting](https://support.apple.com/en-ca/guide/notes/apd1955d3b21/mac), [lists](https://support.apple.com/en-ca/guide/notes/apd93c815aa0/mac), [attachments](https://support.apple.com/en-ae/guide/notes/not95edd2813/mac), [sorting and pinning](https://support.apple.com/en-ie/guide/notes/apdb54e469b6/mac), [Smart Folders](https://support.apple.com/en-ph/guide/notes/apd58edc7964/mac), [sharing](https://support.apple.com/en-ie/guide/notes/apda5307056b/mac), and [settings](https://support.apple.com/en-ie/guide/notes/apd97da26aed/mac). Runtime inspection of Notes.app and NotesShared found `ICTTParagraphStyle`, `ICTTFont`, `TTEmphasis`, `NSSuperScript`, `TTColor`, `ICOutlineState`, and their checked setters. Protobuf probes confirmed paragraph fields 1, 2, 3, 4, 6, 7, and 9, plus highlight field 14. The field-14 result agrees with [apple_cloud_notes_parser's schema](https://github.com/threeplanetssoftware/apple_cloud_notes_parser/blob/master/proto/notestore.proto). “Read” and “Write” below describe NotesCLI, not Notes.app.
 
-Read status: 85 Done, 5 Partial, and 4 Not possible. Write status: 63 Done, 8 Partial, and 23 Not possible. The matrix has 94 rows and no Missing status. `notescli capabilities` and MCP `get_capabilities` use the same feature names and statuses; a literal parity test checks this table against the runtime catalog.
+Read status: 86 Done, 5 Partial, and 4 Not possible. Write status: 64 Done, 8 Partial, and 23 Not possible. The matrix has 95 rows and no Missing status. `notescli capabilities` and MCP `get_capabilities` use the same feature names and statuses; a literal parity test checks this table against the runtime catalog.
 
 | Feature | Read | Write | Notes |
 | --- | --- | --- | --- |
@@ -49,6 +49,7 @@ Read status: 85 Done, 5 Partial, and 4 Not possible. Write status: 63 Done, 8 Pa
 | Native tags | Done | Done | Tag identity, counts, add, replace, and remove are supported. |
 | Mentions | Done | Partial | `ICInlineAttachment.newMentionAttachmentWithIdentifier:mentionText:userRecordName:note:parentAttachment:` creates mentions in shared notes. NotesCLI requires `--allow-shared`; participant notification behavior was not verified in an isolated account. |
 | Photos and images | Done | Done | Metadata, originals, previews, insertion, and export. |
+| Editorial SVG and HTML diagrams | Done | Done | Image mode renders through WebKit to a cropped 2x or 3x PNG with recoverable source metadata. Drawing mode converts supported SVG shapes and paths to editable Paper strokes. |
 | Videos | Done | Done | Original media and preview frames are available; files can be inserted. |
 | PDFs | Done | Done | Original, preview, indexed text, insertion, and export. |
 | General file attachments | Done | Done | Original bytes and metadata are preserved. |

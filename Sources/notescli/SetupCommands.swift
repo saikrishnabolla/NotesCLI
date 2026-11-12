@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import NotesCore
+import NotesDiagrams
 import NotesMCP
 import NotesNative
 import NotesSafety
@@ -263,6 +264,23 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "attach_file":
         let value = try writer.insertFile(ref(), file: URL(fileURLWithPath: string("path")!), position: integer("position"), imageView: string("view"), allowShared: (boolean("allow_shared") ?? false))
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "diagram_add":
+        guard let mode = DiagramInsertionMode(rawValue: string("as") ?? "image") else {
+            throw NotesError("invalid_arguments", "Invalid as; use image or drawing.")
+        }
+        guard let background = DiagramBackground(rawValue: string("background") ?? "auto") else {
+            throw NotesError("invalid_arguments", "Invalid background; use white, transparent, or auto.")
+        }
+        let renderOptions: DiagramRenderOptions
+        do {
+            renderOptions = try DiagramRenderOptions(width: integer("width") ?? 700, scale: integer("scale") ?? 2,
+                                                     background: background, dark: boolean("dark") ?? false)
+        } catch let error as DiagramError {
+            throw NotesError("invalid_arguments", error.description)
+        }
+        let value = try DiagramWriteService().add(file: diagramFile(string("file")!), to: ref(), options: renderOptions,
+                                                  mode: mode, allowShared: allowShared)
+        return try MCPNativeResult(result: value.0.write.writeResult, operationID: value.0.write.operationID, value: value.0)
     case "delete_attachment": return try result(writer.deleteAttachment(ref(), attachmentID: string("attachment_id")!, allowShared: (boolean("allow_shared") ?? false)))
     case "table_create":
         guard let rows = arguments["rows"] as? [[String]] else { throw NotesError("invalid_arguments", "rows must be an array of string arrays.") }

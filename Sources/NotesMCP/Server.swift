@@ -208,6 +208,14 @@ public final class MCPServer {
                   ["ref": string, "attachment_id": string, "format": ["type": "string", "enum": ["svg", "png"]]], native: true),
                 // MARK: w9-paper end
                 t("attach_file", "Insert a file or positioned image.", ["ref", "path"], ["ref": string, "path": string, "position": integer, "view": string], write: true, native: true),
+                // MARK: w9-diagram begin
+                t("diagram_add", "Render SVG or HTML as an image, or convert SVG to an editable drawing.", ["ref", "file"],
+                  ["ref": string, "file": string, "as": ["type": "string", "enum": ["image", "drawing"]],
+                   "width": ["type": "integer", "minimum": 1, "maximum": 2400],
+                   "scale": ["type": "integer", "enum": [2, 3]],
+                   "background": ["type": "string", "enum": ["white", "transparent", "auto"]],
+                   "dark": bool], write: true, native: true),
+                // MARK: w9-diagram end
                 t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),
                 t("table_create", "Create a native table.", ["ref", "rows"], ["ref": string, "rows": rows, "position": integer], write: true, native: true),
                 t("table_set", "Set a native table cell.", ["ref", "attachment_id", "row", "column", "text"], ["ref": string, "attachment_id": string, "row": integer, "column": integer, "text": string], write: true, native: true),
@@ -336,6 +344,16 @@ public final class MCPServer {
             let scripts = ["superscript", "subscript", "clear_script"].filter { args[$0] as? Bool == true }
             if scripts.count > 1 { return "Choose one of superscript, subscript, or clear_script." }
         }
+        // MARK: w9-diagram begin
+        if tool.name == "diagram_add" {
+            if let width = (args["width"] as? NSNumber)?.intValue, !(1...2400).contains(width) {
+                return "width must be between 1 and 2400"
+            }
+            if let scale = (args["scale"] as? NSNumber)?.intValue, ![2, 3].contains(scale) {
+                return "Invalid scale; use 2 or 3."
+            }
+        }
+        // MARK: w9-diagram end
         return nil
     }
 

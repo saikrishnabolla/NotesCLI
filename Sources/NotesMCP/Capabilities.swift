@@ -78,6 +78,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Native tags", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Mentions", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Photos and images", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Editorial SVG and HTML diagrams", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Videos", read: "Done", write: "Done"),
         FeatureDefinition(feature: "PDFs", read: "Done", write: "Done"),
         FeatureDefinition(feature: "General file attachments", read: "Done", write: "Done"),
@@ -141,7 +142,7 @@ public enum CapabilityCatalog {
         "Numbered lists and starting number", "Nested lists", "Checklists", "Checklist sorting preference",
         "Native tables", "Add or remove table rows and columns", "Table cell text", "Table cell rich formatting",
         "Convert table to text", "Native note-to-note links", "URL preview cards", "Native tags", "Mentions",
-        "Photos and images", "Videos", "PDFs", "General file attachments", "Audio file attachments",
+        "Photos and images", "Editorial SVG and HTML diagrams", "Videos", "PDFs", "General file attachments", "Audio file attachments",
         "Math expressions, results, and graphs", "Divider lines", "Pin and unpin", "Edit an existing shared note",
         "Smart Folders and rules", "Folder sort options", "Notes settings", "Default account"
     ]

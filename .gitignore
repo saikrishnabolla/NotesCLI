@@ -2,3 +2,4 @@
 .swiftpm/
 *.xcodeproj
 Fixtures/private/
+dist/

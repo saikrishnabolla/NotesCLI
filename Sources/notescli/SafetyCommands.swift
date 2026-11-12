@@ -217,7 +217,7 @@ struct JournalList: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Option var limit = 100
     func run() throws {
-        let items = try WriteJournal().list(limit: limit)
+        let items = try WriteJournal.openReadOnlyIfExists()?.list(limit: limit) ?? []
         if options.json { try Output.json(items) }
         else { Output.table(["OPERATION ID", "OP", "STARTED", "OUTCOME", "NOTE"], items.map {
             [$0.id, $0.operation, ISO8601DateFormatter().string(from: $0.started), $0.outcome.rawValue, $0.noteID ?? ""]
@@ -229,6 +229,7 @@ struct JournalResolve: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Argument var operationIDs: [String] = []
     func run() throws {
+        _ = try options.writable()
         let journal = try WriteJournal(), reader = try options.backends().reader
         let candidates = try journal.unresolved().filter { operationIDs.isEmpty || operationIDs.contains($0.id) }
         var settled: [JournalEntry] = []
@@ -313,12 +314,13 @@ struct DiffCommand: ParsableCommand {
 }
 
 private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions, write: WriteOptions) throws {
-    if let entry = try WriteJournal().entry(id: ref), let action = try entry.restoreAction() {
+    let backend = try options.writable()
+    if let entry = try WriteJournal.openReadOnlyIfExists()?.entry(id: ref), let action = try entry.restoreAction() {
         guard snapshotID == nil else { throw NotesError("invalid_revert", "A journal operation ID cannot be combined with a snapshot ID.") }
         try restore(entry: entry, action: action, options: options, write: write)
         return
     }
-    let backend = try options.writable(), current = try backend.reader.note(ref)
+    let current = try backend.reader.note(ref)
     let snapshot = try SnapshotStore().load(current.summary.id.uuid, snapshot: snapshotID)
     let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
     if selected == .scripting {

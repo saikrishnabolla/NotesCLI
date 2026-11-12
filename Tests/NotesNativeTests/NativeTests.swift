@@ -179,6 +179,41 @@ final class NativeTests: XCTestCase {
         XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
     }
 
+    func testSnapshotVerificationRequiresNoteIdentityAndAttachmentTopology() throws {
+        var expected = try InMemoryNotes.sample().note("welcome")
+        expected.attachments = [
+            Attachment(id: "scan", typeUTI: "com.apple.notes.gallery", childAttachmentIDs: ["page"]),
+            Attachment(id: "page", typeUTI: "public.jpeg"),
+            Attachment(id: "cell-image", typeUTI: "public.png"),
+        ]
+
+        var wrongNote = expected
+        wrongNote.summary.id = NoteID(uuid: "other-note")
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: wrongNote))
+
+        var wrongType = expected
+        wrongType.attachments[1].typeUTI = "public.heic"
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: wrongType))
+
+        var wrongParent = expected
+        wrongParent.attachments[0].childAttachmentIDs = []
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: wrongParent))
+    }
+
+    func testSnapshotAttachmentScanIncludesTableCellMarkers() {
+        var document = NoteDocument(text: "\u{fffc}", runs: [
+            AttributeRun(length: 1, attachment: InlineRef(id: "table", typeUTI: "com.apple.notes.table")),
+        ])
+        document.tableCells = ["table": [[
+            TableCellDocument(text: "\u{fffc}", runs: [
+                AttributeRun(length: 1, attachment: InlineRef(id: "cell-image", typeUTI: "public.png")),
+            ]),
+        ]]]
+
+        XCTAssertEqual(NativeNotesWriter.markerReferences(document).map(\.id), ["table", "cell-image"])
+        XCTAssertEqual(NativeNotesWriter.markerReferences(document).map(\.typeUTI), ["com.apple.notes.table", "public.png"])
+    }
+
     func testSharedWriteGuardRejectsUnknownAndReadOnlyRoles() {
         XCTAssertThrowsError(try NativeSharedWriteGuard.require(isShared: true, allowShared: true, isReadOnly: nil)) {
             XCTAssertEqual(($0 as? NotesError)?.code, "shared_permission_unknown")

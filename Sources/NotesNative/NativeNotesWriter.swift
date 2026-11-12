@@ -1560,17 +1560,41 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 throw NotesError("snapshot_locked", "The snapshot has no readable note body.")
             }
             let note = try note(ref, in: context)
+            guard snapshot.summary.id.uuid.caseInsensitiveCompare(id(note)) == .orderedSame else {
+                throw NotesError("snapshot_note_mismatch", "The snapshot belongs to a different note.")
+            }
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note)
-            let expectedMarkers = Self.markerReferences(document)
+            let expectedMarkers = Self.topLevelMarkerReferences(document)
+            let expectedAttachments = try Self.attachmentReferences(snapshot)
             var attachmentObjects: [String: NSManagedObject] = [:]
-            for marker in expectedMarkers {
-                let rows = try fetch("ICInlineAttachment", predicate: NSPredicate(format: "identifier == %@", marker.id), in: context) +
-                    fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", marker.id), in: context)
-                guard let attachment = rows.first else {
-                    throw NotesError("snapshot_attachment_unavailable", "Attachment \(marker.id) is no longer available for restore.")
+            var unresolved = expectedAttachments
+            while !unresolved.isEmpty {
+                var next: [SnapshotAttachmentReference] = [], madeProgress = false
+                for reference in unresolved {
+                    if let parentID = reference.parentID, attachmentObjects[parentID] == nil {
+                        next.append(reference)
+                        continue
+                    }
+                    let predicate: NSPredicate
+                    if let parentID = reference.parentID, let parent = attachmentObjects[parentID] {
+                        predicate = NSPredicate(format: "identifier == %@ AND parentAttachment == %@", reference.id, parent)
+                    } else {
+                        predicate = NSPredicate(format: "identifier == %@ AND note == %@", reference.id, note)
+                    }
+                    let rows = try fetch("ICInlineAttachment", predicate: predicate, in: context) +
+                        fetch("ICAttachment", predicate: predicate, in: context)
+                    guard let attachment = rows.first(where: { NativeAttachmentOwnership.belongs($0, to: note) }),
+                          value(attachment, "typeUTI") as? String == reference.typeUTI else {
+                        throw NotesError("snapshot_attachment_unavailable", "Attachment \(reference.id) is not available on the target note with its saved type and parent.")
+                    }
+                    attachmentObjects[reference.id] = attachment
+                    madeProgress = true
                 }
-                attachmentObjects[marker.id] = attachment
+                guard madeProgress || next.isEmpty else {
+                    throw NotesError("invalid_snapshot", "The snapshot attachment parent graph is incomplete.")
+                }
+                unresolved = next
             }
             do {
                 for attachment in attachmentObjects.values where value(attachment, "markedForDeletion") as? Bool == true {
@@ -1604,8 +1628,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 }
                 let kept = Set(expectedMarkers.map(\.id))
                 for old in oldMarkers where !kept.contains(old.2) {
-                    let inline = try fetch("ICInlineAttachment", predicate: NSPredicate(format: "identifier == %@", old.2), in: context, limit: 1).first
-                    let regular = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", old.2), in: context, limit: 1).first
+                    let predicate = NSPredicate(format: "identifier == %@ AND note == %@", old.2, note)
+                    let inline = try fetch("ICInlineAttachment", predicate: predicate, in: context, limit: 1).first
+                    let regular = try fetch("ICAttachment", predicate: predicate, in: context, limit: 1).first
                     if let object = inline ?? regular {
                         try NCNotesRuntime.markForDeletion(object)
                     }
@@ -1625,7 +1650,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 nativeVerified: nativeBody.string == document.text && NativeVerificationRules.sameMarkerMultiset(expectedMarkerPairs, nativeMarkers),
                 sqlite: { restored in
                     guard SnapshotRestoreVerification.matches(expected: snapshot, actual: restored) else { return nil }
-                    return ["utf16Length": "\(document.text.utf16.count)", "lossless": "true"]
+                    return ["utf16Length": "\(document.text.utf16.count)", "attachmentTopology": "verified"]
                 },
                 mismatch: "Persisted snapshot readback did not match the saved note structure."
             )
@@ -1637,9 +1662,70 @@ public final class NativeNotesWriter: NotesNativeWriting {
         var collapsedParagraphIDs: [String]
     }
 
-    private static func markerReferences(_ document: NoteDocument) -> [InlineRef] {
+    static func markerReferences(_ document: NoteDocument) -> [InlineRef] {
+        var seen: Set<String> = []
+        var result: [InlineRef] = []
+        func collect(_ value: NoteDocument) {
+            for reference in value.runs.compactMap(\.attachment) where seen.insert(reference.id).inserted {
+                result.append(reference)
+            }
+            if let tables = value.tableCells {
+                for rows in tables.values { for row in rows { for cell in row { collect(cell.document) } } }
+            }
+        }
+        collect(document)
+        return result
+    }
+
+    private static func topLevelMarkerReferences(_ document: NoteDocument) -> [InlineRef] {
         var seen: Set<String> = []
         return document.runs.compactMap(\.attachment).filter { seen.insert($0.id).inserted }
+    }
+
+    private struct SnapshotAttachmentReference {
+        var id: String
+        var typeUTI: String
+        var parentID: String?
+    }
+
+    private static func attachmentReferences(_ snapshot: Note) throws -> [SnapshotAttachmentReference] {
+        var types: [String: String] = [:], parents: [String: String] = [:]
+        func record(id: String, typeUTI: String, parentID: String?) throws {
+            if let existing = types[id], existing != typeUTI {
+                throw NotesError("invalid_snapshot", "Attachment \(id) has conflicting saved types.")
+            }
+            types[id] = typeUTI
+            if let parentID {
+                if let existing = parents[id], existing != parentID {
+                    throw NotesError("invalid_snapshot", "Attachment \(id) has conflicting saved parents.")
+                }
+                parents[id] = parentID
+            }
+        }
+        func collect(_ attachment: Attachment, parentID: String?) throws {
+            try record(id: attachment.id, typeUTI: attachment.typeUTI, parentID: parentID)
+            for childID in attachment.childAttachmentIDs ?? [] {
+                if let existing = parents[childID], existing != attachment.id {
+                    throw NotesError("invalid_snapshot", "Attachment \(childID) has conflicting saved parents.")
+                }
+                parents[childID] = attachment.id
+            }
+            for child in attachment.childAttachments ?? [] { try collect(child, parentID: attachment.id) }
+        }
+        for attachment in snapshot.attachments { try collect(attachment, parentID: nil) }
+        func collect(_ document: NoteDocument, parentID: String?) throws {
+            for reference in document.runs.compactMap(\.attachment) {
+                try record(id: reference.id, typeUTI: reference.typeUTI, parentID: parentID)
+            }
+            for (tableID, rows) in document.tableCells ?? [:] {
+                for row in rows { for cell in row { try collect(cell.document, parentID: tableID) } }
+            }
+        }
+        try collect(snapshot.document!, parentID: nil)
+        guard parents.keys.allSatisfy({ types[$0] != nil && types[parents[$0]!] != nil }) else {
+            throw NotesError("invalid_snapshot", "The snapshot attachment parent graph is incomplete.")
+        }
+        return types.keys.sorted().map { SnapshotAttachmentReference(id: $0, typeUTI: types[$0]!, parentID: parents[$0]) }
     }
 
     private func attributed(_ document: NoteDocument) throws -> BuiltSnapshotText {

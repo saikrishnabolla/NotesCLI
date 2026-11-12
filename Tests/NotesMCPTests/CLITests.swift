@@ -83,6 +83,36 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
     }
 
+    func testReadOnlySafetyCommandsDoNotCreateJournalFiles() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-safety-cli-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["CFFIXED_USER_HOME": home.path]
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI")
+        let journalNames = ["journal.sqlite", "journal.sqlite-wal", "journal.sqlite-shm"]
+
+        let list = try run(["--backend", "fake", "--read-only", "--json", "journal", "list"], environment: environment)
+        XCTAssertEqual(list.0, 0, list.2)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(list.1.utf8)) as? [Any])?.count, 0)
+
+        for arguments in [["undo", "welcome"], ["revert", "welcome", "missing"], ["journal", "resolve"]] {
+            let result = try run(["--backend", "fake", "--read-only", "--json"] + arguments, environment: environment)
+            XCTAssertEqual(result.0, 4, "\(arguments): \(result.2)")
+            XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(result.2.utf8)) as? [String: Any])?["code"] as? String,
+                           "read_only")
+        }
+
+        let history = try run(["--backend", "fake", "--read-only", "--json", "history", "welcome"], environment: environment)
+        XCTAssertEqual(history.0, 0, history.2)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(history.1.utf8)) as? [Any])?.count, 0)
+
+        let diff = try run(["--backend", "fake", "--read-only", "--json", "diff", "welcome"], environment: environment)
+        XCTAssertEqual(diff.0, 3, diff.2)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(diff.2.utf8)) as? [String: Any])?["code"] as? String,
+                       "snapshot_not_found")
+        XCTAssertEqual(journalNames.filter { FileManager.default.fileExists(atPath: support.appendingPathComponent($0).path) }, [])
+    }
+
     func testCLIFormattingRejectsUnknownAndConflictingValuesBeforeDispatch() throws {
         let invalid = [
             (["format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body", "--alignment", "diagonal"], "diagonal"),

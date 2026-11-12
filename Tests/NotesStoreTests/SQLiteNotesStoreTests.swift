@@ -37,7 +37,7 @@ private final class SyntheticLibrary {
         CREATE TABLE ZICCLOUDSTATE (Z_PK INTEGER PRIMARY KEY,ZCURRENTLOCALVERSION INTEGER,ZLATESTVERSIONSYNCEDTOCLOUD INTEGER,ZINCLOUD INTEGER,ZCLOUDSYNCINGOBJECT INTEGER);
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNAME,ZACCOUNTTYPE) VALUES (1,203,'account','Cloud',1),(2,203,'local','On My Mac',2);
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE2,ZOWNER,ZPARENT,ZFOLDERTYPE,ZSMARTFOLDERQUERYJSON) VALUES
-          (10,202,'root','Work',1,NULL,0,NULL),(11,202,'child','Archive',1,10,0,NULL),(12,202,'trash','Deleted localized',1,NULL,1,NULL),(13,202,'smart','Tagged',1,NULL,2,'{"entity":"note","type":{"and":[{"deleted":false},{"tag":"work"}]}}');
+          (10,202,'root','Work',1,NULL,0,NULL),(11,202,'child','Archive',1,10,0,NULL),(12,202,'trash','Deleted localized',1,NULL,1,NULL),(13,202,'smart','Tagged',1,NULL,2,'{"type":{"and":[{"deleted":false},{"tag":"work"}]}}');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE1,ZSNIPPET,ZACCOUNT7,ZFOLDER,ZNOTEDATA,ZISPASSWORDPROTECTED,ZMARKEDFORDELETION,ZISPINNED,ZHASCHECKLIST,ZCREATIONDATE3,ZMODIFICATIONDATE1) VALUES
           (20,201,'N1','First','preview',1,11,120,0,0,1,1,100,200),
           (21,201,'N2','Second','preview',1,10,121,0,0,0,0,101,201),
@@ -95,6 +95,24 @@ private final class SyntheticLibrary {
 }
 
 final class SQLiteNotesStoreTests: XCTestCase {
+    func testAttachmentReadbackIncludesNestedIDsTypesAndParents() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("""
+        INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI)
+          VALUES (40,204,'scan',20,'com.apple.notes.gallery');
+        INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTYPEUTI,ZPARENTATTACHMENT)
+          VALUES (41,204,'scan-page', 'public.jpeg',40),
+                 (42,205,'cell-image','public.png',41);
+        """)
+
+        let scan = try XCTUnwrap(try fixture.store().note("N1").attachments.first { $0.id == "scan" })
+        XCTAssertEqual(scan.typeUTI, "com.apple.notes.gallery")
+        XCTAssertEqual(scan.childAttachments?.map(\.id), ["scan-page"])
+        XCTAssertEqual(scan.childAttachments?.map(\.typeUTI), ["public.jpeg"])
+        XCTAssertEqual(scan.childAttachments?.first?.childAttachments?.map(\.id), ["cell-image"])
+        XCTAssertEqual(scan.childAttachments?.first?.childAttachments?.map(\.typeUTI), ["public.png"])
+    }
+
     func testNotesInDeletedFolderStayDeleted() throws {
         let fixture = try SyntheticLibrary()
         try fixture.sql("""

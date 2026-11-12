@@ -1,4 +1,5 @@
 import Foundation
+import CoreData
 import NotesCore
 import NotesNativeObjC
 
@@ -66,10 +67,14 @@ enum NativeVerificationRules {
 
 enum SnapshotRestoreVerification {
     static func matches(expected: Note, actual: Note) -> Bool {
-        guard expected.summary.title == actual.summary.title,
+        guard expected.summary.id.uuid.caseInsensitiveCompare(actual.summary.id.uuid) == .orderedSame,
+              expected.summary.title == actual.summary.title,
               let expectedDocument = expected.document,
               let actualDocument = actual.document,
-              matches(expectedDocument, actualDocument) else { return false }
+              matches(expectedDocument, actualDocument),
+              let expectedAttachments = attachmentSignatures(expected.attachments),
+              let actualAttachments = attachmentSignatures(actual.attachments),
+              expectedAttachments == actualAttachments else { return false }
         return true
     }
 
@@ -102,6 +107,34 @@ enum SnapshotRestoreVerification {
         var attachment: InlineRef?
     }
 
+    private struct AttachmentSignature: Hashable {
+        var id: String
+        var typeUTI: String
+        var parentID: String?
+    }
+
+    private static func attachmentSignatures(_ attachments: [Attachment]) -> Set<AttachmentSignature>? {
+        var types: [String: String] = [:]
+        var parents: [String: String] = [:]
+        var valid = true
+        func record(_ attachment: Attachment, parentID: String?) {
+            if let existing = types[attachment.id], existing != attachment.typeUTI { valid = false }
+            types[attachment.id] = attachment.typeUTI
+            if let parentID {
+                if let existing = parents[attachment.id], existing != parentID { valid = false }
+                parents[attachment.id] = parentID
+            }
+            for childID in attachment.childAttachmentIDs ?? [] {
+                if let existing = parents[childID], existing != attachment.id { valid = false }
+                parents[childID] = attachment.id
+            }
+            for child in attachment.childAttachments ?? [] { record(child, parentID: attachment.id) }
+        }
+        for attachment in attachments { record(attachment, parentID: nil) }
+        guard valid, parents.keys.allSatisfy({ types[$0] != nil }) else { return nil }
+        return Set(types.map { AttachmentSignature(id: $0.key, typeUTI: $0.value, parentID: parents[$0.key]) })
+    }
+
     private struct ParagraphSignature: Equatable {
         var kind: ParagraphStyle.Kind
         var alignment: Int?
@@ -132,6 +165,23 @@ enum SnapshotRestoreVerification {
             }
         }
         return result
+    }
+}
+
+enum NativeAttachmentOwnership {
+    static func belongs(_ attachment: NSManagedObject, to note: NSManagedObject) -> Bool {
+        var current: NSManagedObject? = attachment
+        var visited: Set<NSManagedObjectID> = []
+        while let object = current, visited.insert(object.objectID).inserted {
+            if relationship("note", of: object)?.objectID == note.objectID { return true }
+            current = relationship("parentAttachment", of: object)
+        }
+        return false
+    }
+
+    private static func relationship(_ key: String, of object: NSManagedObject) -> NSManagedObject? {
+        guard object.entity.propertiesByName[key] != nil else { return nil }
+        return object.value(forKey: key) as? NSManagedObject
     }
 }
 

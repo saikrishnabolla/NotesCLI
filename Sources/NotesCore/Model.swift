@@ -205,6 +205,7 @@ public struct Attachment: Codable, Sendable, Hashable {
     public var recording: RecordingMetadata?
     public var duration: Double?
     public var childAttachmentIDs: [String]?
+    public var childAttachments: [Attachment]?
     public var pageImagePaths: [String]?
     public var fallbackRasterPath: String?
     public var displayText: String?
@@ -224,7 +225,8 @@ public struct Attachment: Codable, Sendable, Hashable {
                 imageClassification: String? = nil, imageSummary: String? = nil, pdfText: String? = nil,
                 transcriptText: String? = nil, transcriptWords: [TranscriptWord]? = nil,
                 recording: RecordingMetadata? = nil, duration: Double? = nil,
-                childAttachmentIDs: [String]? = nil, pageImagePaths: [String]? = nil,
+                childAttachmentIDs: [String]? = nil, childAttachments: [Attachment]? = nil,
+                pageImagePaths: [String]? = nil,
                 fallbackRasterPath: String? = nil, displayText: String? = nil,
                 participantID: String? = nil, participantName: String? = nil,
                 participantEmail: String? = nil, participantUserID: String? = nil, targetNoteID: String? = nil,
@@ -235,7 +237,8 @@ public struct Attachment: Codable, Sendable, Hashable {
         self.handwritingText = handwritingText; self.additionalIndexableText = additionalIndexableText
         self.imageClassification = imageClassification; self.imageSummary = imageSummary; self.pdfText = pdfText
         self.transcriptText = transcriptText; self.transcriptWords = transcriptWords; self.recording = recording
-        self.duration = duration; self.childAttachmentIDs = childAttachmentIDs; self.pageImagePaths = pageImagePaths
+        self.duration = duration; self.childAttachmentIDs = childAttachmentIDs; self.childAttachments = childAttachments
+        self.pageImagePaths = pageImagePaths
         self.fallbackRasterPath = fallbackRasterPath; self.displayText = displayText
         self.participantID = participantID; self.participantName = participantName
         self.participantEmail = participantEmail; self.participantUserID = participantUserID

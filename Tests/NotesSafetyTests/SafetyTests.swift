@@ -107,9 +107,10 @@ final class SafetyTests: XCTestCase {
 
     func testSnapshotRestorePolicyListsNativeOnlyFeatures() throws {
         var note = try InMemoryNotes.sample().note("welcome")
-        var paragraph = ParagraphStyle(kind: .checklist, checked: true)
+        var paragraph = ParagraphStyle(kind: .dashed, indent: 2, startNumber: 7)
         paragraph.alignment = 2
         paragraph.writingDirection = 1
+        paragraph.blockQuoteLevel = 3
         paragraph.collapsed = true
         var font = FontStyle(bold: true, superscript: -1)
         font.name = "Avenir Next"
@@ -123,8 +124,9 @@ final class SafetyTests: XCTestCase {
         note.attachments = [Attachment(id: "table-1", typeUTI: "com.apple.notes.table")]
 
         XCTAssertEqual(SnapshotRestorePolicy.nativeRequiredFeatures(note), [
-            "alignment", "checklists", "collapsible headings", "font family", "font size", "highlights",
-            "links", "subscript", "tables", "text color", "writing direction",
+            "alignment", "block quote levels", "collapsible headings", "dashed lists", "font family", "font size",
+            "highlights", "indentation", "links", "numbered list starts", "subscript", "tables", "text color",
+            "writing direction",
         ])
     }
 

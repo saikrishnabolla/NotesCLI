@@ -34,6 +34,10 @@ public enum SnapshotRestorePolicy {
         for run in runs {
             if let paragraph = run.paragraph {
                 if paragraph.kind == .checklist { features.insert("checklists") }
+                if paragraph.kind == .dashed { features.insert("dashed lists") }
+                if paragraph.startNumber != nil { features.insert("numbered list starts") }
+                if paragraph.blockQuoteLevel != nil { features.insert("block quote levels") }
+                if paragraph.indent != 0 { features.insert("indentation") }
                 if paragraph.alignment != nil { features.insert("alignment") }
                 if paragraph.writingDirection != nil { features.insert("writing direction") }
                 if paragraph.collapsed == true { features.insert("collapsible headings") }

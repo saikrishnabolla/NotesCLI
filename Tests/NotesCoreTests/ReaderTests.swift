@@ -164,7 +164,8 @@ final class ReaderDecodeTests: XCTestCase {
         XCTAssertEqual(try rules.json(), #"{"and":[{"or":[{"tag":"urgent"},{"tag":"work"}]},{"creationDateRange":{"fromDate":100,"toDate":200}},{"folder":"FOLDER-1"},{"checklist":true},{"attachmentSection":1},{"attachmentSection":7},{"shared":false},{"passwordProtected":true},{"mention":true},{"quickNote":false}]}"#)
         XCTAssertNoThrow(try SmartFolderQueryGrammar.validate(try rules.json()))
         XCTAssertNoThrow(try SmartFolderQueryGrammar.validate(#"{"type":{"not":{"or":[{"checklistInProgress":true},{"sharedParticipant":"person-1"},{"creationDateRelativeRange":{"type":4,"customAmount":2,"customUnit":3}}]}}}"#))
-        for invalid in [#"[]"#, #"{"mystery":true}"#, #"{"and":[{"tag":"work"},{"folder":{"id":"FOLDER-1"}}]}"#, #"{"or":[]}"#] {
+        for invalid in [#"[]"#, #"{"mystery":true}"#, #"{"and":[{"tag":"work"},{"folder":{"id":"FOLDER-1"}}]}"#, #"{"or":[]}"#,
+                        #"{"type":{"tag":"work"},"shared":true}"#] {
             XCTAssertThrowsError(try SmartFolderQueryGrammar.validate(invalid), invalid) {
                 XCTAssertEqual(($0 as? NotesError)?.code, "invalid_smart_folder_query")
             }

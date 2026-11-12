@@ -24,67 +24,96 @@ public enum SmartFolderAttachmentSection: Int, Codable, Sendable, CaseIterable {
     }
 }
 
-public enum SmartFolderQueryGrammar {
-    private static let flags = Set([
-        "deleted", "checklist", "checklistInProgress", "checklistCompleted", "attachment", "pinned", "systemPaper",
-        "passwordProtected", "shared", "mention", "tagged", "quickNote"
-    ])
-    private static let strings = Set(["tag", "folder", "sharedParticipant", "mentionParticipant"])
+public enum SmartFolderQueryFlag: String, Sendable, Equatable {
+    case deleted, checklist, checklistInProgress, checklistCompleted, attachment, pinned, systemPaper
+    case passwordProtected, shared, mention, tagged, quickNote
+}
 
-    public static func validate(_ json: String) throws {
+public enum SmartFolderDateField: Sendable, Equatable { case created, modified }
+
+public indirect enum SmartFolderQueryRule: Sendable, Equatable {
+    case all([SmartFolderQueryRule]), any([SmartFolderQueryRule]), not(SmartFolderQueryRule)
+    case flag(SmartFolderQueryFlag, Bool), tag(String), folder(String), attachmentSection(Int)
+    case sharedParticipant(String), mentionParticipant(String)
+    case relativeDate(SmartFolderDateField, type: Int, amount: Int?, unit: Int?)
+    case dateRange(SmartFolderDateField, from: Date, to: Date)
+}
+
+public enum SmartFolderQueryGrammar {
+    public static func validate(_ json: String) throws { _ = try parse(json) }
+
+    public static func parse(_ json: String) throws -> SmartFolderQueryRule {
         guard let data = json.data(using: .utf8) else { throw invalid("The query is not UTF-8.") }
         let value: Any
         do { value = try JSONSerialization.jsonObject(with: data) }
         catch { throw invalid("The query is not valid JSON.") }
         guard value is [String: Any] else { throw invalid("The top-level query must be an object.") }
-        try clause(value, path: "query")
+        return try clause(value, path: "query")
     }
 
-    private static func clause(_ value: Any, path: String) throws {
-        guard let object = value as? [String: Any], !object.isEmpty else { throw invalid("\(path) must be a nonempty rule object.") }
+    private static func clause(_ value: Any, path: String) throws -> SmartFolderQueryRule {
+        guard let object = value as? [String: Any], !object.isEmpty else {
+            throw invalid("\(path) must be a nonempty rule object.")
+        }
+        if object["type"] != nil, object.count != 1 { throw invalid("\(path).type cannot have sibling rules.") }
         if object.count > 1 {
-            for key in object.keys.sorted() { try entry(key: key, value: object[key]!, path: "\(path).\(key)") }
-            return
+            return .all(try object.keys.sorted().map { key in
+                try entry(key: key, value: object[key]!, path: "\(path).\(key)")
+            })
         }
         let key = object.keys.first!
-        try entry(key: key, value: object[key]!, path: "\(path).\(key)")
+        return try entry(key: key, value: object[key]!, path: "\(path).\(key)")
     }
 
-    private static func entry(key: String, value: Any, path: String) throws {
-        if key == "type" { try clause(value, path: path); return }
+    private static func entry(key: String, value: Any, path: String) throws -> SmartFolderQueryRule {
+        if key == "type" { return try clause(value, path: path) }
         if key == "and" || key == "or" {
-            guard let values = value as? [Any], !values.isEmpty else { throw invalid("\(path) must be a nonempty array of rules.") }
-            for (index, item) in values.enumerated() { try clause(item, path: "\(path)[\(index)]") }
-            return
+            guard let values = value as? [Any], !values.isEmpty else {
+                throw invalid("\(path) must be a nonempty array of rules.")
+            }
+            let rules = try values.enumerated().map { try clause($0.element, path: "\(path)[\($0.offset)]") }
+            return key == "and" ? .all(rules) : .any(rules)
         }
-        if key == "not" { try clause(value, path: path); return }
-        if flags.contains(key) {
-            guard value is Bool else { throw invalid("\(path) must be true or false.") }
-            return
+        if key == "not" { return .not(try clause(value, path: path)) }
+        if let flag = SmartFolderQueryFlag(rawValue: key) {
+            guard let expected = value as? Bool else { throw invalid("\(path) must be true or false.") }
+            return .flag(flag, expected)
         }
-        if strings.contains(key) {
+        if ["tag", "folder", "sharedParticipant", "mentionParticipant"].contains(key) {
             guard let text = value as? String, !text.isEmpty else { throw invalid("\(path) must be a nonempty string.") }
-            return
+            switch key {
+            case "tag": return .tag(text)
+            case "folder": return .folder(text)
+            case "sharedParticipant": return .sharedParticipant(text)
+            default: return .mentionParticipant(text)
+            }
         }
         if key == "attachmentSection" {
-            guard let section = integer(value), (1...7).contains(section) else { throw invalid("\(path) must be an integer from 1 through 7.") }
-            return
+            guard let section = integer(value), (1...7).contains(section) else {
+                throw invalid("\(path) must be an integer from 1 through 7.")
+            }
+            return .attachmentSection(section)
         }
         if key == "creationDateRange" || key == "modificationDateRange" {
             guard let range = value as? [String: Any], Set(range.keys) == Set(["fromDate", "toDate"]),
                   let from = number(range["fromDate"]), let to = number(range["toDate"]), from <= to else {
                 throw invalid("\(path) must contain ordered numeric fromDate and toDate values.")
             }
-            return
+            let field: SmartFolderDateField = key.hasPrefix("creation") ? .created : .modified
+            return .dateRange(field, from: Date(timeIntervalSinceReferenceDate: from),
+                              to: Date(timeIntervalSinceReferenceDate: to))
         }
         if key == "creationDateRelativeRange" || key == "modificationDateRelativeRange" {
             guard let range = value as? [String: Any], !range.isEmpty,
-                  Set(range.keys).isSubset(of: Set(["type", "customAmount", "customUnit"])), integer(range["type"]) != nil,
+                  Set(range.keys).isSubset(of: Set(["type", "customAmount", "customUnit"])),
+                  let type = integer(range["type"]),
                   range["customAmount"].map({ integer($0) != nil }) ?? true,
                   range["customUnit"].map({ integer($0) != nil }) ?? true else {
                 throw invalid("\(path) has an invalid relative-date rule.")
             }
-            return
+            let field: SmartFolderDateField = key.hasPrefix("creation") ? .created : .modified
+            return .relativeDate(field, type: type, amount: integer(range["customAmount"]),
+                                 unit: integer(range["customUnit"]))
         }
         throw invalid("Unknown Smart Folder rule at \(path).")
     }

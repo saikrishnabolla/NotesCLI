@@ -250,7 +250,13 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             document.runs[i].attachment = ref
         }
         let deep = try self.attachments(summary.id.uuid)
-        let deepIDs = Set(deep.map(\.id))
+        func attachmentIDs(_ values: [Attachment]) -> Set<String> {
+            values.reduce(into: Set<String>()) { result, attachment in
+                result.insert(attachment.id)
+                result.formUnion(attachmentIDs(attachment.childAttachments ?? []))
+            }
+        }
+        let deepIDs = attachmentIDs(deep)
         attachments = deep + attachments.filter { !deepIDs.contains($0.id) }
         return Note(summary: summary, document: document, attachments: attachments)
     }
@@ -277,35 +283,48 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     public func attachments(_ ref: String) throws -> [Attachment] {
         let summary = try resolve(ref)
         guard !summary.isLocked, let pk = notePKs[summary.id.uuid.lowercased()] else { return [] }
-        var rows = attachmentRows[pk] ?? []
-        let parentPKs = Set(rows.compactMap { $0.int("Z_PK") })
-        rows += library.objects.values.filter { row in
-            guard let parent = row.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") else { return false }
-            return parentPKs.contains(parent)
+        let attachmentEntities = (library.entities["ICAttachment"] ?? []).union(library.entities["ICInlineAttachment"] ?? [])
+        var rowsByPK = Dictionary(uniqueKeysWithValues: (attachmentRows[pk] ?? []).compactMap { row in
+            row.int("Z_PK").map { ($0, row) }
+        })
+        var changed = true
+        while changed {
+            changed = false
+            let known = Set(rowsByPK.keys)
+            for row in library.objects.values where row.int("ZMARKEDFORDELETION") != 1 {
+                guard let rowPK = row.int("Z_PK"), rowsByPK[rowPK] == nil,
+                      attachmentEntities.contains(row.int("Z_ENT") ?? -1),
+                      let parent = row.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1"), known.contains(parent) else { continue }
+                rowsByPK[rowPK] = row
+                changed = true
+            }
         }
-        var built: [Int64: Attachment] = [:]
-        for row in rows {
-            guard let rowPK = row.int("Z_PK") else { continue }
-            built[rowPK] = makeAttachment(row, accountID: summary.accountID)
+        let rootPKs = rowsByPK.compactMap { key, row -> Int64? in
+            guard let parent = row.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") else { return key }
+            return rowsByPK[parent] == nil ? key : nil
         }
-        for parentPK in parentPKs {
-            let childRows = rows.filter { $0.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") == parentPK }
-            guard var parent = built[parentPK], !childRows.isEmpty else { continue }
+        func build(_ parentPK: Int64, visited: Set<Int64>) -> Attachment? {
+            guard !visited.contains(parentPK), let row = rowsByPK[parentPK] else { return nil }
+            var parent = makeAttachment(row, accountID: summary.accountID)
+            let childRows = rowsByPK.values.filter { $0.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") == parentPK }
+            guard !childRows.isEmpty else { return parent }
             let childIDs = childRows.compactMap { $0.string("ZIDENTIFIER") }
             let ordered = galleryOrder(noteRows[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") ?? library.objects[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA"), available: childIDs)
             let byID = Dictionary(uniqueKeysWithValues: childRows.compactMap { row -> (String, StoreRow)? in row.string("ZIDENTIFIER").map { ($0, row) } })
             let orderedRows = ordered.compactMap { byID[$0] } + childRows.filter { row in
                 guard let id = row.string("ZIDENTIFIER") else { return true }; return !ordered.contains(id)
             }.sorted { ($0.double("ZSORTORDER", "ZCREATIONDATE") ?? 0) < ($1.double("ZSORTORDER", "ZCREATIONDATE") ?? 0) }
-            let childAttachments = orderedRows.compactMap { $0.int("Z_PK").flatMap { built[$0] } }
+            let nextVisited = visited.union([parentPK])
+            let childAttachments = orderedRows.compactMap { $0.int("Z_PK").flatMap { build($0, visited: nextVisited) } }
             parent.childAttachmentIDs = childAttachments.map(\.id)
+            parent.childAttachments = childAttachments
             parent.pageImagePaths = childAttachments.compactMap(\.filePath)
             if parent.filePath == nil, let original = childAttachments.first(where: { $0.kind == "audio" || $0.filename != nil }) {
                 parent.filePath = original.filePath; parent.filename = parent.filename ?? original.filename
             }
-            built[parentPK] = parent
+            return parent
         }
-        return parentPKs.compactMap { built[$0] }.sorted { $0.id < $1.id }
+        return rootPKs.compactMap { build($0, visited: []) }.sorted { $0.id < $1.id }
     }
 
     public func rawNote(_ ref: String) throws -> RawProtobufMessage {
@@ -338,7 +357,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         return folderList.filter(\.isSmartFolder).map { folder in
             let rule = Self.smartRule(folder.smartFolderQuery)
             let labels = rule.map(Self.ruleLabels) ?? []
-            let unsupported = rule.map(Self.unsupportedRules) ?? ["invalid query"]
+            let unsupported = rule == nil ? ["invalid query"] : []
             let ids: [String]?
             if evaluate, let rule, unsupported.isEmpty {
                 ids = summaries.filter { summary in
@@ -457,19 +476,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         return pairs.sorted { $0.0 < $1.0 }.map(\.1)
     }
 
-    private enum SmartFlag: String {
-        case deleted, checklist, checklistInProgress, checklistCompleted, attachment, pinned, systemPaper
-        case passwordProtected, shared, mention, tagged, quickNote
-    }
-    private enum SmartDateField { case created, modified }
-    private indirect enum SmartRule {
-        case all([SmartRule]), any([SmartRule]), not(SmartRule)
-        case flag(SmartFlag, Bool), tag(String), folder(String), attachmentSection(Int)
-        case sharedParticipant(String), mentionParticipant(String)
-        case relativeDate(SmartDateField, type: Int, amount: Int?, unit: Int?)
-        case dateRange(SmartDateField, from: Date, to: Date)
-        case unsupported(String)
-    }
+    private typealias SmartRule = SmartFolderQueryRule
     private struct SmartNote {
         var summary: NoteSummary
         var attachments: [Attachment]
@@ -477,43 +484,8 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     }
 
     private static func smartRule(_ json: String?) -> SmartRule? {
-        guard let json, let data = json.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
-        return smartRuleValue(object)
-    }
-
-    private static func smartRuleValue(_ value: Any) -> SmartRule {
-        guard let dictionary = value as? [String: Any] else { return .unsupported("non-object clause") }
-        if let type = dictionary["type"] { return smartRuleValue(type) }
-        if dictionary.count != 1 { return .all(dictionary.keys.sorted().map { smartRuleValue([$0: dictionary[$0]!]) }) }
-        let key = dictionary.keys.first!, value = dictionary[key]!
-        if key == "and" || key == "or" {
-            guard let values = value as? [Any] else { return .unsupported(key) }
-            let rules = values.map(smartRuleValue)
-            return key == "and" ? .all(rules) : .any(rules)
-        }
-        if key == "not" { return .not(smartRuleValue(value)) }
-        if let flag = SmartFlag(rawValue: key) {
-            guard let expected = value as? Bool else { return .unsupported(key) }
-            return .flag(flag, expected)
-        }
-        if key == "tag", let tag = value as? String { return .tag(tag) }
-        if key == "folder", let folder = value as? String { return .folder(folder) }
-        if key == "sharedParticipant", let id = value as? String { return .sharedParticipant(id) }
-        if key == "mentionParticipant", let id = value as? String { return .mentionParticipant(id) }
-        if key == "attachmentSection", let section = (value as? NSNumber)?.intValue { return .attachmentSection(section) }
-        if key == "creationDateRelativeRange" || key == "modificationDateRelativeRange",
-           let values = value as? [String: Any], let type = (values["type"] as? NSNumber)?.intValue {
-            let field: SmartDateField = key.hasPrefix("creation") ? .created : .modified
-            return .relativeDate(field, type: type, amount: (values["customAmount"] as? NSNumber)?.intValue,
-                                 unit: (values["customUnit"] as? NSNumber)?.intValue)
-        }
-        if key == "creationDateRange" || key == "modificationDateRange",
-           let values = value as? [String: Any], let from = (values["fromDate"] as? NSNumber)?.doubleValue,
-           let to = (values["toDate"] as? NSNumber)?.doubleValue {
-            let field: SmartDateField = key.hasPrefix("creation") ? .created : .modified
-            return .dateRange(field, from: Date(timeIntervalSinceReferenceDate: from), to: Date(timeIntervalSinceReferenceDate: to))
-        }
-        return .unsupported(key)
+        guard let json else { return nil }
+        return try? SmartFolderQueryGrammar.parse(json)
     }
 
     private static func ruleLabels(_ rule: SmartRule) -> [String] {
@@ -531,16 +503,6 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             return ["\(field == .created ? "creation" : "modification")DateRelativeRange=\(type):\(amount.map(String.init) ?? ""): \(unit.map(String.init) ?? "")"]
         case .dateRange(let field, let from, let to):
             return ["\(field == .created ? "creation" : "modification")DateRange=\(from.timeIntervalSinceReferenceDate)...\(to.timeIntervalSinceReferenceDate)"]
-        case .unsupported(let key): return ["unsupported=\(key)"]
-        }
-    }
-
-    private static func unsupportedRules(_ rule: SmartRule) -> [String] {
-        switch rule {
-        case .all(let rules), .any(let rules): return Array(Set(rules.flatMap(unsupportedRules))).sorted()
-        case .not(let value): return unsupportedRules(value)
-        case .unsupported(let key): return [key]
-        default: return []
         }
     }
 
@@ -583,7 +545,6 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         case .dateRange(let field, let from, let to):
             guard let date = field == .created ? note.summary.created : note.summary.modified else { return false }
             return date >= from && date <= to
-        case .unsupported: return false
         }
     }
 

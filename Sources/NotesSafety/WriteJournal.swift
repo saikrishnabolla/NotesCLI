@@ -70,7 +70,21 @@ public final class WriteJournal: @unchecked Sendable {
     private let database: OpaquePointer
     private let lock = NSLock()
 
-    public init(url: URL = NotesSafetyPaths.journal) throws {
+    public static func openReadOnlyIfExists(url: URL = NotesSafetyPaths.journal) throws -> WriteJournal? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try WriteJournal(url: url, readOnly: true)
+    }
+
+    public init(url: URL = NotesSafetyPaths.journal, readOnly: Bool = false) throws {
+        if readOnly {
+            var handle: OpaquePointer?
+            guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+                  let handle else { throw NotesError("journal_unavailable", "Could not open the write journal read-only.") }
+            database = handle
+            do { try execute("PRAGMA query_only=ON"); try execute("PRAGMA busy_timeout=5000") }
+            catch { sqlite3_close(handle); throw error }
+            return
+        }
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var handle: OpaquePointer?
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,

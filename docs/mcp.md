@@ -107,6 +107,7 @@ Every MCP write tool accepts `dry_run: true`. A real write returns an `outcome`:
 - `verified`: a fresh database snapshot found the change.
 - `unverified`: Notes accepted the write, but the readback did not prove it.
 - `unknown`: the request timed out or lost its response. Read current state and never retry automatically.
+- `rolled_back`: a native create failed after Notes saved the new note, so NotesCLI moved that note to Recently Deleted. Nothing was kept; `noteID` names the removed note. If the move fails, the outcome is `unknown` with the same `noteID`.
 
 Use a folder named `notescli-test` and titles beginning with `notescli-test-` for agent experiments. Delete moves items to Recently Deleted.
 

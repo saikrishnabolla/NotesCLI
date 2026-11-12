@@ -61,6 +61,7 @@ enum Output {
         case .verified: return "✓ verified"
         case .unverified: return "• unverified"
         case .unknown: return "? unknown"
+        case .rolledBack: return "↺ rolled back"
         }
     }
     static func write(_ result: WriteResult, json: Bool) throws {
@@ -69,9 +70,19 @@ enum Output {
             if json { try Self.json(response) }
             throw NotesError("write_outcome_unknown", result.message ?? "The write may have completed. Do not retry automatically.", hint: "Read the note before retrying.")
         }
+        if result.outcome == .rolledBack {
+            if json { try Self.json(response) }
+            throw rolledBackError(result)
+        }
         if json { try Self.json(response) }
         else { table(["ENGINE", "OUTCOME", "ID", "MESSAGE"], [[response.engine, outcome(result.outcome), result.noteID?.uuid ?? result.folderID ?? "", result.message ?? ""]]) }
     }
+}
+
+/// A rolled-back write failed and kept nothing, so the command exits with an error after reporting it.
+func rolledBackError(_ result: WriteResult) -> NotesError {
+    NotesError("write_rolled_back", result.message ?? "The write failed and its partial result was removed.",
+               hint: "Nothing was kept. Fix the error, then retry.")
 }
 
 func positive(_ n: Int?, name: String) throws {

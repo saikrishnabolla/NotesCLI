@@ -25,7 +25,7 @@ Notes CLIs and MCP servers (see PARITY.md), then do better on fidelity and safet
 - Scripting is the default write engine. Native writes run only with `--engine native`, `NOTESCLI_ENGINE=native`, or MCP `--allow-native`.
 - The native engine uses Apple's private Notes framework and Notes' persistent Core Data store. It can break after a macOS update. Run the native doctor first and keep backups.
 - Never modify NoteStore.sqlite with SQL.
-- Every write is read back from a fresh snapshot and reported as `verified`, `unverified`, or `unknown` (timeouts). Never retry a write whose outcome is unknown.
+- Every write is read back from a fresh snapshot and reported as `verified`, `unverified`, `unknown` (timeouts), or `rolled_back` (a failed native create whose partial note was moved to Recently Deleted). Never retry a write whose outcome is unknown.
 - Every write honors read-only mode, dry-run, write-folder allowlists, concurrency guards, the write journal, and snapshots. Native restore requires saved attachment objects to remain in Notes.
 - Delete means move to Recently Deleted. No hard delete.
 - Live write tests touch real iCloud data: they run ONLY inside a folder named `notescli-test` in the default account, use titles prefixed `notescli-test-`, and delete what they create. Live tests are opt-in via `NOTESCLI_LIVE_TESTS=1`; default `swift test` must not touch Notes.

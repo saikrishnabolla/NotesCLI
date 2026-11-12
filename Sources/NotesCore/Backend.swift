@@ -108,7 +108,8 @@ public extension NotesReading {
     }
 }
 
-public enum WriteOutcome: String, Codable, Sendable { case verified, unverified, unknown }
+/// `rolledBack`: the write failed and its partial result was removed; nothing was kept.
+public enum WriteOutcome: String, Codable, Sendable { case verified, unverified, unknown, rolledBack = "rolled_back" }
 
 public struct WriteResult: Codable, Sendable {
     public var outcome: WriteOutcome

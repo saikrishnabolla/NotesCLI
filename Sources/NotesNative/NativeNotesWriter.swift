@@ -22,6 +22,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         var attachmentPosition: Int?
     }
     var operation: Operation?
+    var createdNoteCleanup = CreatedNoteCleanup.notes
     fileprivate let operationID: () -> String
     fileprivate let contextProvider: () throws -> NSManagedObjectContext
 
@@ -388,6 +389,18 @@ public final class NativeNotesWriter: NotesNativeWriting {
         operation?.noteID = notes.first.map(id)
         for note in notes { try sync(note) }
         context.refreshAllObjects()
+    }
+
+    /// The catch step of every path that creates a note and then adds content. Rolls back unsaved changes and
+    /// rethrows when nothing was kept. When Notes already saved the new note, moves it to Recently Deleted and
+    /// returns `rolled_back`, or `unknown` with the note ID when that fails.
+    func rollBackCreatedNote(_ noteID: String?, after error: Error, in context: NSManagedObjectContext) throws -> NativeWriteResult {
+        context.rollback()
+        let failure = (error as? NotesError) ?? nativeError(error)
+        guard let noteID, operation?.committed != true else { throw failure }
+        let result = try createdNoteCleanup.clean(noteID, after: failure, operationID: operation?.id, context: context)
+        return NativeWriteResult(writeResult: result, verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
+                                 operationID: operation?.id)
     }
 
     fileprivate func sync(_ note: NSManagedObject) throws {
@@ -1197,9 +1210,10 @@ public final class NativeNotesWriter: NotesNativeWriting {
         let write = try performWrite { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
-            var noteID = "", attachmentID = "", type = "com.apple.notes.paper"
+            var noteID = "", attachmentID = "", type = "com.apple.notes.paper", createdNoteID: String?
             do {
                 let note = try NCNotesRuntime.newNote(in: destination)
+                createdNoteID = id(note)
                 try NCNotesRuntime.setValue(title, forKey: "title", of: note)
                 let editor = try NCBodyEditor(note: note)
                 try editor.prepare(["insert"])
@@ -1207,6 +1221,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     context: context, editor: editor, existing: [:]).0
                 var kind: NSString?
                 attachmentID = try NCNotesRuntime.addSystemPaperDrawing(drawing as AnyObject, to: note, type: &kind)
+                try TestFault.check("after_attachment")
                 createdAttachmentID = attachmentID
                 type = kind as String? ?? type
                 let marker = try NCNotesRuntime.attachmentMarker(id: attachmentID, type: type)
@@ -1218,11 +1233,12 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 operation?.attachmentID = attachmentID
                 operation?.attachmentType = type
                 operation?.attachmentPosition = max(0, built.length - 1)
+                try TestFault.check("before_save")
                 try save(context, notes: [note])
                 noteID = id(note)
             } catch {
-                context.rollback()
-                throw (error as? NotesError) ?? nativeError(error)
+                createdAttachmentID = ""
+                return try rollBackCreatedNote(createdNoteID, after: error, in: context)
             }
             let fresh = try self.note(noteID, in: context)
             let placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID }.count
@@ -1274,9 +1290,10 @@ public final class NativeNotesWriter: NotesNativeWriting {
         let write = try performWrite { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
-            var noteID = "", attachmentIDs: [String] = []
+            var noteID = "", attachmentIDs: [String] = [], createdNoteID: String?
             do {
                 let note = try NCNotesRuntime.newNote(in: destination)
+                createdNoteID = id(note)
                 try NCNotesRuntime.setValue(title, forKey: "title", of: note)
                 let editor = try NCBodyEditor(note: note)
                 try editor.prepare(["insert"])
@@ -1286,6 +1303,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 for frozen in attachments {
                     var kind: NSString?
                     let attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
+                    try TestFault.check("after_attachment")
                     let marker = try NCNotesRuntime.attachmentMarker(id: attachmentID, type: kind as String? ?? "public.data")
                     if built.length > 0 { built.append(NSAttributedString(string: "\n")) }
                     built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("NSAttachment"): marker]))
@@ -1294,9 +1312,10 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 try editor.begin(["insert"])
                 try editor.insert(built, at: 0)
                 try editor.finish()
+                try TestFault.check("before_save")
                 try save(context, notes: [note])
                 noteID = id(note)
-            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            } catch { return try rollBackCreatedNote(createdNoteID, after: error, in: context) }
             var hashes: [String: String] = [:]
             for (index, attachmentID) in attachmentIDs.enumerated() {
                 if let hash = storedAttachmentHash(noteID: noteID, attachmentID: attachmentID, expected: attachments[index].sha256) {
@@ -1311,6 +1330,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
                       hashes.count == attachments.count else { return nil }
                 return ["title": note.summary.title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)"]
             }, mismatch: "The created note or frozen attachment bytes did not match.")
+        }
+        guard write.writeResult.outcome != .rolledBack else {
+            return NativeCreateResult(attachmentIDs: [], attachmentSHA256: [:], write: write)
         }
         let noteID = write.writeResult.noteID?.uuid ?? ""
         let note = try? SQLiteNotesStore(refresh: true).note(noteID)
@@ -1511,8 +1533,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func duplicate(_ ref: String, title newTitle: String?, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         let source = try note(ref, in: context); try guardWritable(source, allowShared: allowShared); try refreshIfStale(source, protectsBody: false); guard let folder = value(source, "folder") as? NSManagedObject else { throw NotesError("folder_not_found", "The source note has no folder.") }
-        do { let copy = try NCNotesRuntime.duplicateNote(source, folder: folder); if let newTitle { try NCNotesRuntime.setValue(newTitle, forKey: "title", of: copy) }; try save(context, notes: [copy]); let copyTitle = title(copy); return result(id(copy), native: ["duplicatedFrom": id(source), "title": copyTitle], sqlite: { $0.summary.title == copyTitle ? ["title": $0.summary.title] : nil }) }
-        catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+        var copyID: String?
+        do { let copy = try NCNotesRuntime.duplicateNote(source, folder: folder); copyID = id(copy); if let newTitle { try NCNotesRuntime.setValue(newTitle, forKey: "title", of: copy) }; try save(context, notes: [copy]); let copyTitle = title(copy); return result(id(copy), native: ["duplicatedFrom": id(source), "title": copyTitle], sqlite: { $0.summary.title == copyTitle ? ["title": $0.summary.title] : nil }) }
+        catch { return try rollBackCreatedNote(copyID, after: error, in: context) }
         }
     }
 
@@ -2099,15 +2122,17 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return try performRecordingWrite(duration: duration) { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
-            var noteID = "", attachmentID = "", childIDs: [String] = [], kind: NSString?
+            var noteID = "", attachmentID = "", childIDs: [String] = [], kind: NSString?, createdNoteID: String?
             do {
                 let note = try NCNotesRuntime.newNote(in: destination)
+                createdNoteID = id(note)
                 try NCNotesRuntime.setValue(title, forKey: "title", of: note)
                 let editor = try NCBodyEditor(note: note)
                 try editor.prepare(["insert"])
                 let built = try MarkdownNativeWriter(owner: self).attributed(markdown: "# " + title, note: note, context: context,
                                                                               editor: editor, existing: [:]).0
                 attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
+                try TestFault.check("after_attachment")
                 operation?.attachmentID = attachmentID
                 operation?.attachmentType = kind as String? ?? "public.mpeg-4-audio"
                 operation?.attachmentPosition = built.length
@@ -2125,11 +2150,12 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 try editor.begin(["insert"])
                 try editor.insert(built, at: 0)
                 try editor.finish()
+                try TestFault.check("before_save")
                 try save(context, notes: [note])
                 noteID = id(note)
             } catch {
-                context.rollback()
-                throw (error as? NotesError) ?? nativeError(error)
+                let write = try rollBackCreatedNote(createdNoteID, after: error, in: context)
+                return NativeRecordingResult(attachmentID: "", childAttachmentIDs: [], duration: duration, transcriptSegments: 0, write: write)
             }
             return try recordingResult(noteID: noteID, attachmentID: attachmentID, childIDs: childIDs,
                                        duration: duration, transcript: transcript, frozen: frozen, position: title.utf16.count + 1)

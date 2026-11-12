@@ -65,7 +65,7 @@ notescli export --out notes-export --attachments
 notescli delete NOTE_ID --yes
 ```
 
-Writes return `verified`, `unverified`, or `unknown`, plus the `engine` used. Native results also include `operationID` when available. If a write returns `unknown`, check the note before you retry. Delete moves notes to Recently Deleted.
+Writes return `verified`, `unverified`, `unknown`, or `rolled_back`, plus the `engine` used. `rolled_back` means a native create failed and its partial note was moved to Recently Deleted. Native results also include `operationID` when available. If a write returns `unknown`, check the note before you retry. Delete moves notes to Recently Deleted.
 
 Rich edits such as native checklists, pins, tags, links, highlights, positioned images, tables, table-cell formatting, paragraph styles, range edits, duplication, restore, and folder moves require `--engine native` or `NOTESCLI_ENGINE=native`. Native undo and revert verify the note ID and title, decoded text and runs, tables and rich cells, and attachment IDs, types, and parent relationships through a fresh database read. They do not compare attachment file bytes. The scripting engine refuses these snapshots unless you pass `--allow-downgrade`. See the [Apple Notes feature inventory](docs/APPLE-NOTES-FEATURES.md) for all 95 rows.
 

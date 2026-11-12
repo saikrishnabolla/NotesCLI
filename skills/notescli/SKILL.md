@@ -14,6 +14,7 @@ Dry-run each write when the tool supports it. Read every write result:
 - `verified`: a fresh Notes database read found the change.
 - `unverified`: Notes accepted the change, but readback did not prove it.
 - `unknown`: read the note before any retry.
+- `rolled_back`: the create failed and its partial note is in Recently Deleted. Fix the error, then retry.
 
 Worked example:
 

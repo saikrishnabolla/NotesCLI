@@ -297,6 +297,17 @@ final class ProtocolTests: XCTestCase {
         let unknownResult = try call(unknown, "pin_note", ["ref": "welcome"])
         XCTAssertEqual(unknownResult["isError"] as? Bool, true)
         XCTAssertEqual(try structured(unknownResult)["operationID"] as? String, "operation-unknown")
+
+        let rolledBack = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { _, _ in
+            try MCPNativeResult(result: WriteResult(outcome: .rolledBack, noteID: NoteID(uuid: "partial-note"),
+                                                    message: "The partly created note partial-note was moved to Recently Deleted."),
+                                operationID: "operation-rollback", value: ["ok": false])
+        })
+        let rolledBackResult = try call(rolledBack, "pin_note", ["ref": "welcome"])
+        XCTAssertEqual(rolledBackResult["isError"] as? Bool, true)
+        let rolledBackValue = try XCTUnwrap(try structured(rolledBackResult)["result"] as? [String: Any])
+        XCTAssertEqual(rolledBackValue["outcome"] as? String, "rolled_back")
+        XCTAssertEqual((rolledBackValue["noteID"] as? [String: Any])?["uuid"] as? String, "partial-note")
     }
     func testNativeFolderAndSmartFolderWritesUseFolderIdentity() throws {
         let account = Account(id: "account", name: "Demo", kind: "local", isDefault: true)

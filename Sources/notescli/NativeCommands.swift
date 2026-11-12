@@ -52,6 +52,10 @@ func outputEngineWrite(_ input: EngineWriteResponse, options: GlobalOptions) thr
         let operation = response.operationID.map { " Native operation ID: \($0)." } ?? ""
         throw NotesError("write_outcome_unknown", (response.result.message ?? "The write may have completed. Do not retry automatically.") + operation, hint: "Read the note before retrying.")
     }
+    if response.result.outcome == .rolledBack {
+        if options.json { try Output.json(response) }
+        throw rolledBackError(response.result)
+    }
     if options.json { try Output.json(response) }
     else { Output.table(["ENGINE", "OUTCOME", "ID", "MESSAGE"], [[response.engine, Output.outcome(response.result.outcome),
         response.result.noteID?.uuid ?? response.result.folderID ?? "", response.result.message ?? ""]]) }

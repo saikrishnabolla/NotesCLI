@@ -983,7 +983,7 @@ public final class MCPServer {
             var value: [String: Any] = ["engine": engine, "result": try NotePresentation.object(result)]
             if let operationID { value["operationID"] = operationID }
             if let details { value["details"] = details }
-            return try content(value, isError: result.outcome == .unknown)
+            return try content(value, isError: result.outcome == .unknown || result.outcome == .rolledBack)
         } catch {
             try? journal.finish(begun.entry.id, outcome: .failed, message: String(describing: error))
             throw error

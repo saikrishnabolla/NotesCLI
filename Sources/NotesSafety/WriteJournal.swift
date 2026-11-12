@@ -3,7 +3,7 @@ import Foundation
 import NotesCore
 import SQLite3
 
-public enum JournalOutcome: String, Codable, Sendable { case started, verified, unverified, unknown, failed }
+public enum JournalOutcome: String, Codable, Sendable { case started, verified, unverified, unknown, failed, rolledBack = "rolled_back" }
 
 public enum JournalRestoreAction: Sendable, Equatable {
     case checklistAutoSort(enabled: Bool)

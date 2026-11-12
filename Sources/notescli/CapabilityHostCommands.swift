@@ -13,6 +13,7 @@ struct HostCommand: ParsableCommand {
 }
 
 struct HostStatus: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "status")
     private struct Report: Codable {
         var installed: Bool
         var running: Bool
@@ -73,6 +74,7 @@ enum HostInstallation {
 }
 
 struct HostInstall: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "install")
     func run() throws {
         guard let source = HostInstallation.sourceApp else {
             throw NotesError("host_app_missing", "The release does not contain NotesCLI Capability Host.app.")
@@ -118,6 +120,7 @@ struct HostInstall: ParsableCommand {
 }
 
 struct HostRestart: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "restart")
     func run() throws {
         guard HostInstallation.launchctl(["kickstart", "-k", "gui/\(getuid())/com.saikrishnabolla.notescli.capability-host"]) == 0 else {
             throw NotesError("host_restart_failed", "The capability host is not installed or could not restart.")
@@ -126,6 +129,7 @@ struct HostRestart: ParsableCommand {
 }
 
 struct HostUninstall: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "uninstall")
     @Flag var dryRun = false
     func run() throws {
         let targets = [CapabilityHostPaths.launchAgent, CapabilityHostPaths.app]

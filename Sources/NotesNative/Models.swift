@@ -1,5 +1,6 @@
 import Foundation
 import NotesCore
+import PencilKit
 
 public struct NativeDoctorReport: Codable, Sendable {
     public var frameworkLoaded: Bool
@@ -122,6 +123,18 @@ public struct NativeCreateResult: Codable, Sendable {
     public var write: NativeWriteResult
 }
 
+public struct NativePaperAttachment: Sendable {
+    public var attachmentID: String
+    public var typeUTI: String
+    public var drawings: [PKDrawing]
+
+    public init(attachmentID: String, typeUTI: String, drawings: [PKDrawing]) {
+        self.attachmentID = attachmentID
+        self.typeUTI = typeUTI
+        self.drawings = drawings
+    }
+}
+
 public struct NativeTable: Codable, Sendable, Equatable {
     public var attachmentID: String
     public var rows: [[String]]
@@ -177,8 +190,10 @@ public protocol NotesNativeWriting {
                            allowShared: Bool) throws -> NativeWriteResult
     func setInlineFormat(_ ref: String, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult
     func insertFile(_ ref: String, file: URL, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
+    func insertDrawing(_ ref: String, drawing: PKDrawing, position: Int?, allowShared: Bool) throws -> NativeAttachmentResult
     func insertFrozenFile(_ ref: String, frozen: FrozenAttachmentInput, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
     func createNote(title: String, markdown: String, folder: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult
+    func createDrawingNote(title: String, folder: String?, drawing: PKDrawing, allowShared: Bool) throws -> NativeCreateResult
     func insertURL(_ ref: String, url: URL, card: Bool, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func deleteAttachment(_ ref: String, attachmentID: String, allowShared: Bool) throws -> NativeWriteResult
     func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult

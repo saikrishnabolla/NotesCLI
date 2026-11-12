@@ -5,6 +5,7 @@ import NotesMCP
 import NotesNative
 import NotesSafety
 import NotesStore
+import PencilKit
 
 enum MCPClient: String, CaseIterable, ExpressibleByArgument {
     case claudeCode = "claude-code"
@@ -48,10 +49,27 @@ struct MCPRoot: ParsableCommand {
     }
 }
 
+private struct MCPDrawingExportAttachment: Codable {
+    var attachmentID: String
+    var typeUTI: String
+    var drawingCount: Int
+    var strokeCount: Int
+}
+
+private struct MCPDrawingExportValue: Codable {
+    var format: String
+    var mediaType: String
+    var encoding: String
+    var data: String
+    var strokeCount: Int
+    var attachments: [MCPDrawingExportAttachment]
+}
+
 private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: any NotesReading) throws -> MCPNativeResult {
     func string(_ key: String) -> String? { arguments[key] as? String }
     func integer(_ key: String) -> Int? { (arguments[key] as? NSNumber)?.intValue }
     func boolean(_ key: String) -> Bool? { arguments[key] as? Bool }
+    func number(_ key: String) -> Double? { (arguments[key] as? NSNumber)?.doubleValue }
     func ref() throws -> String {
         guard let value = string("ref") else { throw NotesError("invalid_arguments", "ref is required.") }
         return value
@@ -68,6 +86,52 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         let selected = [("superscript", 1), ("subscript", -1), ("clear_script", 0)].filter { boolean($0.0) == true }
         guard selected.count <= 1 else { throw NotesError("invalid_arguments", "Choose one of superscript, subscript, or clear_script.") }
         return selected.first?.1
+    }
+    func drawing() throws -> PKDrawing {
+        guard let path = string("svg") else { throw NotesError("invalid_arguments", "svg is required.") }
+        let width = number("width")
+        if let width, width <= 0 { throw NotesError("invalid_arguments", "width must be greater than zero.") }
+        let ink: DrawingInk
+        if let raw = string("ink") {
+            guard let value = DrawingInk(rawValue: raw) else { throw NotesError("invalid_arguments", "Invalid ink; use pen, marker, pencil, or monoline.") }
+            ink = value
+        } else { ink = .pen }
+        let fit: SVGFit
+        if let raw = string("fit") {
+            guard let value = SVGFit(rawValue: raw) else { throw NotesError("invalid_arguments", "Invalid fit; use contain or stretch.") }
+            fit = value
+        } else { fit = .contain }
+        let fill: SVGFillMode
+        if let raw = string("fill") {
+            guard let value = SVGFillMode(rawValue: raw) else { throw NotesError("invalid_arguments", "Invalid fill; use outline or hatch.") }
+            fill = value
+        } else { fill = .outline }
+        let color: DrawingColor?
+        if let raw = string("color") {
+            let hex = raw.hasPrefix("#") ? String(raw.dropFirst()) : raw
+            guard hex.count == 6, let rgb = UInt32(hex, radix: 16) else {
+                throw NotesError("invalid_arguments", "color must be a six-digit hex color.")
+            }
+            color = DrawingColor(red: Double((rgb >> 16) & 255) / 255,
+                                 green: Double((rgb >> 8) & 255) / 255,
+                                 blue: Double(rgb & 255) / 255)
+        } else { color = nil }
+        let size: DrawingSize?
+        if let raw = string("size") {
+            let values = raw.lowercased().split(separator: "x", maxSplits: 1).compactMap { Double($0) }
+            guard values.count == 2, values[0] > 0, values[1] > 0 else {
+                throw NotesError("invalid_arguments", "size must be WIDTHxHEIGHT with positive numbers.")
+            }
+            size = DrawingSize(width: values[0], height: values[1])
+        } else { size = nil }
+        let url = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+        let data: Data
+        do { data = try Data(contentsOf: url) }
+        catch { throw NotesError("svg_unavailable", "Could not read the SVG: \(error.localizedDescription)") }
+        return try SVGDrawingConverter.drawing(from: data, options: SVGDrawingOptions(
+            ink: ink, width: width, color: color, blackAndWhite: boolean("bw") ?? false,
+            size: size, fit: fit, fill: fill
+        ))
     }
     let writer = NativeNotesWriter()
     let allowShared = boolean("allow_shared") ?? false
@@ -165,6 +229,37 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "insert_divider": return try result(writer.insertDivider(ref(), position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "insert_math": return try result(writer.insertMathExpression(ref(), expression: string("expression")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "insert_mention": return try result(writer.insertMention(ref(), text: string("text")!, userRecordName: string("user_record_name")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
+    case "drawing_add":
+        let value = try writer.insertDrawing(ref(), drawing: drawing(), position: integer("position"), allowShared: allowShared)
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "drawing_create":
+        let value = try writer.createDrawingNote(title: string("title")!, folder: string("folder"), drawing: drawing(), allowShared: allowShared)
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "drawing_export":
+        let stableID = try reader.summary(ref()).id.uuid
+        let attachments = try writer.paperDrawings(stableID, attachmentID: string("attachment_id"))
+        let drawings = attachments.flatMap(\.drawings)
+        let format = string("format") ?? "svg"
+        let data: String
+        let mediaType: String
+        let encoding: String
+        if format == "png" {
+            data = try SVGDrawingConverter.png(from: drawings).base64EncodedString()
+            mediaType = "image/png"
+            encoding = "base64"
+        } else {
+            data = SVGDrawingConverter.svg(from: drawings)
+            mediaType = "image/svg+xml"
+            encoding = "utf-8"
+        }
+        let summaries = attachments.map {
+            MCPDrawingExportAttachment(attachmentID: $0.attachmentID, typeUTI: $0.typeUTI,
+                                       drawingCount: $0.drawings.count, strokeCount: $0.drawings.reduce(0) { $0 + $1.strokes.count })
+        }
+        return try MCPNativeResult(value: MCPDrawingExportValue(
+            format: format, mediaType: mediaType, encoding: encoding, data: data,
+            strokeCount: drawings.reduce(0) { $0 + $1.strokes.count }, attachments: summaries
+        ))
     case "attach_file":
         let value = try writer.insertFile(ref(), file: URL(fileURLWithPath: string("path")!), position: integer("position"), imageView: string("view"), allowShared: (boolean("allow_shared") ?? false))
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)

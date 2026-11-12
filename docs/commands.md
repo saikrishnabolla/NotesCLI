@@ -117,13 +117,18 @@ notescli format paragraph|inline ...
 notescli attach <ref> <path> [--position <position>] [--view <view>]
 notescli attach <ref> --pasteboard [--position <position>] [--view <view>]
 notescli attachment delete <ref> <attachment-id>
+notescli drawing add <ref> --svg <file> [--ink pen|marker|pencil|monoline]
+                [--width <width>] [--color <hex>] [--bw] [--size <width>x<height>]
+                [--fit contain|stretch] [--fill outline|hatch]
+notescli drawing create --folder <folder> --title <title> --svg <file> [drawing options]
+notescli drawing export <ref> [--attachment <id>] [--format svg|png] [--output <file>]
 notescli table create|set|add-row|add-column|remove-row|remove-column ...
 notescli duplicate <ref> [--title <title>]
 notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
 All write commands accept `--dry-run`, `--idempotency-key`, `--write-folders`, `--if-modified`, `--expect-revision`, `--allow-shared`, `--wait-sync`, and `--sync-timeout`. Shared-note writes require native mode and Notes write permission. A sync timeout leaves the write verified and returns `syncPending: true`. Body rewrites also accept `--allow-attachment-loss`.
 

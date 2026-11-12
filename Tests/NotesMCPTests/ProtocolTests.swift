@@ -51,7 +51,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 98)
+        XCTAssertEqual(nativeTools.count, 101)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
         for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
@@ -62,6 +62,16 @@ final class ProtocolTests: XCTestCase {
         for name in ["smart_folder_edit_typed", "get_folder_sort", "set_folder_sort", "set_default_account"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
+        for name in ["drawing_add", "drawing_create", "drawing_export"] {
+            XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
+        }
+        let drawingAdd = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "drawing_add" })
+        let drawingAddSchema = try XCTUnwrap(drawingAdd["inputSchema"] as? [String: Any])
+        XCTAssertEqual(drawingAddSchema["required"] as? [String], ["ref", "svg"])
+        let drawingProperties = try XCTUnwrap(drawingAddSchema["properties"] as? [String: Any])
+        XCTAssertEqual((drawingProperties["ink"] as? [String: Any])?["enum"] as? [String], ["pen", "marker", "pencil", "monoline"])
+        XCTAssertEqual((drawingProperties["fit"] as? [String: Any])?["enum"] as? [String], ["contain", "stretch"])
+        XCTAssertEqual((drawingProperties["fill"] as? [String: Any])?["enum"] as? [String], ["outline", "hatch"])
         let create = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "create_note" })
         let createProperties = ((create["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
         XCTAssertNotNil(createProperties?["attachments"])

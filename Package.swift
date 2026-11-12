@@ -1,5 +1,8 @@
 // swift-tools-version:6.0
 import PackageDescription
+import Foundation
+
+let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 
 let package = Package(
     name: "NotesCLI",
@@ -26,7 +29,9 @@ let package = Package(
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
         // macOS: rich writes through NotesShared, loaded only at runtime.
         .target(name: "NotesNativeObjC", linkerSettings: [.linkedFramework("CoreData"), .linkedFramework("AppKit")]),
-        .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"]),
+        .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"], linkerSettings: [
+            .linkedFramework("PencilKit")
+        ]),
         // MCP server over stdio, same operations as the CLI.
         // Write journal, snapshots/undo, and the write-folder allowlist.
         .target(name: "NotesSafety", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
@@ -42,7 +47,10 @@ let package = Package(
         .executableTarget(name: "notescli", dependencies: [
             "NotesCore", "NotesStore", "NotesIndex", "NotesAutomation", "NotesNative", "NotesMCP", "NotesSync", "NotesSafety",
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
-        ]),
+        ], exclude: ["Info.plist"], linkerSettings: [.unsafeFlags([
+            "-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist",
+            "-Xlinker", packageRoot + "/Sources/notescli/Info.plist",
+        ])]),
         .testTarget(name: "NotesCoreTests", dependencies: ["NotesCore"]),
         .testTarget(name: "NotesStoreTests", dependencies: ["NotesStore", "NotesCore"]),
         .testTarget(name: "NotesIndexTests", dependencies: ["NotesIndex", "NotesStore", "NotesCore"]),

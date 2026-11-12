@@ -98,6 +98,9 @@ struct WatchCommand: ParsableCommand {
     }
 
     private func execute(_ command: String, event: NoteEvent) throws {
+        guard ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] != "1" else {
+            throw NotesError("host_command_refused", "watch --exec cannot run through the capability host.")
+        }
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/sh"); process.arguments = ["-c", command]
         process.environment = ProcessInfo.processInfo.environment.merging([
             "NOTESCLI_EVENT": event.kind.rawValue, "NOTESCLI_NOTE_ID": event.noteID,

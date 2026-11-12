@@ -41,9 +41,11 @@ public enum AudioTranscriber {
 
     /// The Speech Recognition status recorded for notescli itself, read in a helper process when needed.
     public static var authorizationStatus: SFSpeechRecognizerAuthorizationStatus {
-        if let helper = SpeechHelper.executable,
-           let raw = try? SpeechHelper.run(helper, ["--status"], as: Int.self),
-           let status = SFSpeechRecognizerAuthorizationStatus(rawValue: raw) { return status }
+        if let helper = SpeechHelper.executable {
+            guard let raw = try? SpeechHelper.run(helper, ["--status"], as: Int.self, timeout: 2),
+                  let status = SFSpeechRecognizerAuthorizationStatus(rawValue: raw) else { return .notDetermined }
+            return status
+        }
         return SFSpeechRecognizer.authorizationStatus()
     }
 

@@ -1,7 +1,9 @@
 import ArgumentParser
+import Darwin
 import Foundation
 import NotesCore
 import NotesDiagrams
+import NotesHost
 import NotesMCP
 import NotesNative
 import NotesSafety
@@ -14,9 +16,11 @@ enum MCPClient: String, CaseIterable, ExpressibleByArgument {
     case codex
     case cursor
     case vscode
+    case tailscale
     case all
 
     static var concrete: [MCPClient] { [.claudeCode, .claudeDesktop, .codex, .cursor, .vscode] }
+    static var installable: [MCPClient] { concrete + [.tailscale] }
     var label: String {
         switch self {
         case .claudeCode: return "Claude Code"
@@ -24,6 +28,7 @@ enum MCPClient: String, CaseIterable, ExpressibleByArgument {
         case .codex: return "Codex"
         case .cursor: return "Cursor"
         case .vscode: return "VS Code"
+        case .tailscale: return "Tailscale"
         case .all: return "All clients"
         }
     }
@@ -33,7 +38,7 @@ struct MCPRoot: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mcp",
         abstract: "Run MCP on stdio or manage client connections.",
-        subcommands: [MCPInstall.self, MCPUninstall.self, MCPStatus.self]
+        subcommands: [MCPInstall.self, MCPUninstall.self, MCPStatus.self, MCPServe.self, MCPToken.self]
     )
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.") var allowNative = false
@@ -42,11 +47,96 @@ struct MCPRoot: ParsableCommand {
         let backend = try options.backends()
         let selectedWriter: (any NotesWriting)? = options.readOnly ? nil : try backend.writer()
         let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
+        let exposure: MCPToolExposureProfile = ProcessInfo.processInfo.environment["NOTESCLI_MCP_REMOTE_SAFE"] == "1" ? .remote : .local
         let server = MCPServer(reader: backend.reader, writer: selectedWriter, readOnly: options.readOnly,
                                allowNative: allowNative, nativeHandler: handler,
                                syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
-                               stateRoot: NotesSafetyPaths.applicationSupport)
+                               stateRoot: NotesSafetyPaths.applicationSupport, exposureProfile: exposure,
+                               readFidelity: backend.fidelity.rawValue, unavailableReadFields: backend.unavailableFields)
         server.run()
+    }
+}
+
+struct MCPServe: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "serve", abstract: "Run an MCP transport.", shouldDisplay: false)
+    @Flag(help: "Serve authenticated Streamable HTTP on the configured loopback port.") var http = false
+
+    func validate() throws {
+        guard http else { throw ValidationError("Use --http.") }
+    }
+
+    func run() throws {
+        let config = try TailscaleMCP.loadConfiguration()
+        let backend = try Backends.make(nil)
+        let writer: (any NotesWriting)? = config.readOnly ? nil : try backend.writer()
+        let native: MCPNativeHandler? = config.allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
+        let mcp = MCPServer(reader: backend.reader, writer: writer, readOnly: config.readOnly,
+                            allowNative: config.allowNative, nativeHandler: native,
+                            syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
+                            stateRoot: NotesSafetyPaths.applicationSupport, exposureProfile: .remote,
+                            readFidelity: backend.fidelity.rawValue, unavailableReadFields: backend.unavailableFields)
+        let endpoint = try HTTPMCPServer.Configuration(
+            port: UInt16(config.port),
+            tokenProvider: { (try? TailscaleMCP.loadConfiguration())?.token },
+            allowedHosts: config.allowedHosts,
+            allowedOrigins: config.allowedOrigins
+        )
+        let modernConnection = mcp.makeConnection()
+        let server = HTTPMCPServer(configuration: endpoint, handlerFactory: {
+            let legacyConnection = mcp.makeConnection()
+            return { request in
+                let metadata = (request["params"] as? [String: Any])?["_meta"] as? [String: Any]
+                let modern = metadata?[MCPProtocol.protocolVersionKey] as? String == MCPProtocol.modernVersion ||
+                    request["method"] as? String == "server/discover"
+                return mcp.handle(request, connection: modern ? modernConnection : legacyConnection)
+            }
+        })
+        _ = try server.start()
+
+        Darwin.signal(SIGTERM, SIG_IGN)
+        Darwin.signal(SIGINT, SIG_IGN)
+        let stopped = DispatchSemaphore(value: 0)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        term.setEventHandler { stopped.signal() }
+        interrupt.setEventHandler { stopped.signal() }
+        term.resume()
+        interrupt.resume()
+        stopped.wait()
+        server.stop()
+    }
+}
+
+struct MCPToken: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "token", abstract: "Show or rotate the Tailscale MCP token.",
+                                                    subcommands: [MCPTokenShow.self, MCPTokenRotate.self])
+}
+
+private struct MCPRemoteCredentials: Codable {
+    var endpoint: String
+    var token: String
+}
+
+struct MCPTokenShow: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show")
+    @OptionGroup var options: GlobalOptions
+    func run() throws {
+        let config = try TailscaleMCP.loadConfiguration()
+        let value = MCPRemoteCredentials(endpoint: config.endpoint, token: config.token)
+        if options.json { try Output.json(value) }
+        else { Output.table(["ENDPOINT", "TOKEN"], [[value.endpoint, value.token]]) }
+    }
+}
+
+struct MCPTokenRotate: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "rotate")
+    @OptionGroup var options: GlobalOptions
+    func run() throws {
+        try TailscaleMCP.rotateToken()
+        let config = try TailscaleMCP.loadConfiguration()
+        let value = MCPRemoteCredentials(endpoint: config.endpoint, token: config.token)
+        if options.json { try Output.json(value) }
+        else { print("Rotated the Tailscale MCP token. Run 'notescli mcp token show' to display it.") }
     }
 }
 
@@ -361,7 +451,7 @@ private func mcpRecordingTranscript(arguments: [String: Any], prepared: URL) thr
 
 struct MCPInstall: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.", discussion: "The agent skill is in skills/notescli/SKILL.md and is included by the NotesCLI Claude and Codex plugins.")
-    @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, or all.") var client: MCPClient = .all
+    @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.")
     var allowNative = false
@@ -376,10 +466,32 @@ struct MCPInstall: ParsableCommand {
     }
 
     func run() throws {
+        if client == .tailscale {
+            let config = try TailscaleMCP.install(executable: MCPConfiguration.executable,
+                                                  readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
+            try InstallManifest.recordMCPClient(.tailscale, readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
+            try InstallManifest.recordFile(MCPHTTPPaths.config, category: .config)
+            try InstallManifest.recordFile(MCPHTTPPaths.launchAgent, category: .runtime)
+            try InstallManifest.recordFile(MCPHTTPPaths.log, category: .runtime)
+            if options.json {
+                try Output.json(["endpoint": config.endpoint, "token_file": MCPHTTPPaths.config.path])
+            } else {
+                print("Tailscale: installed at \(config.endpoint)")
+                print("Token: run 'notescli mcp token show'")
+            }
+            return
+        }
         try MCPConfiguration.apply(client: client) { selected in
+            if MCPConfiguration.status(selected) == "installed", try !InstallManifest.ownsMCPClient(selected) {
+                return "skipped existing entry (not owned by NotesCLI)"
+            }
             let result = try MCPConfiguration.install(selected, readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
             if !result.hasPrefix("skipped") {
-                try InstallManifest.recordMCPClient(selected, readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
+                guard let entry = try MCPConfiguration.currentOwnership(selected) else {
+                    throw NotesError("mcp_entry_missing", "The \(selected.label) entry could not be verified after installation.")
+                }
+                try InstallManifest.recordMCPClient(selected, readOnly: resolvedReadOnly,
+                                                    allowNative: resolvedAllowNative, entry: entry)
             }
             return result
         }
@@ -389,16 +501,20 @@ struct MCPInstall: ParsableCommand {
 
 struct MCPUninstall: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "uninstall", abstract: "Disconnect notescli from an MCP client.")
-    @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, or all.") var client: MCPClient = .all
+    @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Show exactly what would be removed without changing files.") var dryRun = false
     @Flag(help: "Keep NotesCLI configuration and onboarding state.") var keepConfig = false
 
     func run() throws {
-        let selectedClients = client == .all ? MCPClient.concrete : [client]
+        try Self.execute(client: client, options: options, dryRun: dryRun, keepConfig: keepConfig)
+    }
+
+    static func execute(client: MCPClient, options: GlobalOptions, dryRun: Bool, keepConfig: Bool) throws {
+        let selectedClients = client == .all ? MCPClient.installable : [client]
         var actions: [UninstallAction] = []
         for selected in selectedClients {
-            guard try InstallManifest.ownsMCPClient(selected) else {
+            guard let record = try InstallManifest.mcpClientRecord(selected) else {
                 if client == .all {
                     actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: "not_recorded"))
                     continue
@@ -406,14 +522,71 @@ struct MCPUninstall: ParsableCommand {
                 throw NotesError("uninstall_not_owned", "Refusing to remove the \(selected.label) entry because NotesCLI did not record owning it.")
             }
             if dryRun {
+                if selected != .tailscale {
+                    do {
+                        guard let expected = record.entry else {
+                            throw NotesError("uninstall_ownership_unknown", "The legacy install record has no exact ownership data. Reinstall it first.")
+                        }
+                        try MCPConfiguration.verifyOwnership(selected, expected: expected)
+                    } catch {
+                        if client == .all {
+                            actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue,
+                                                           status: "would_keep_modified"))
+                            continue
+                        }
+                        throw error
+                    }
+                }
                 actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: "would_remove"))
+                if selected == .tailscale, client != .all {
+                    let ownedPaths = Set([MCPHTTPPaths.config.path, MCPHTTPPaths.launchAgent.path, MCPHTTPPaths.log.path])
+                    for file in try InstallManifest.filesToRemove(keepConfig: keepConfig)
+                        where ownedPaths.contains(file.path) {
+                        actions.append(UninstallAction(kind: "file", target: file.path, status: "would_remove"))
+                    }
+                }
             } else {
-                let result = try MCPConfiguration.uninstall(selected)
+                let result: String
+                if selected == .tailscale {
+                    result = try TailscaleMCP.uninstall(keepConfig: keepConfig)
+                    let ownedPaths = Set([MCPHTTPPaths.config.path, MCPHTTPPaths.launchAgent.path, MCPHTTPPaths.log.path])
+                    for file in try InstallManifest.filesToRemove(keepConfig: keepConfig)
+                        where ownedPaths.contains(file.path) {
+                        try InstallManifest.removeRecordedFile(file)
+                    }
+                } else {
+                    do {
+                        guard let expected = record.entry else {
+                            throw NotesError("uninstall_ownership_unknown", "The legacy install record has no exact ownership data. Reinstall it first.")
+                        }
+                        result = try MCPConfiguration.uninstall(selected, expectedOwnership: expected)
+                    } catch {
+                        if client == .all {
+                            actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue,
+                                                           status: "kept_modified"))
+                            continue
+                        }
+                        throw error
+                    }
+                }
                 try InstallManifest.removeMCPClient(selected)
                 actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: result))
             }
         }
         if client == .all {
+            if FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path) {
+                guard HostInstallation.validSignature(CapabilityHostPaths.app) else {
+                    throw NotesError("uninstall_not_owned", "Refusing to remove a capability host that is not signed by the NotesCLI developer team.")
+                }
+                if dryRun {
+                    actions.append(UninstallAction(kind: "capability_host", target: CapabilityHostPaths.app.path, status: "would_remove"))
+                    actions.append(UninstallAction(kind: "launch_agent", target: CapabilityHostPaths.launchAgent.path, status: "would_remove"))
+                    actions.append(UninstallAction(kind: "socket", target: CapabilityHostPaths.socket.path, status: "would_remove"))
+                } else {
+                    try HostInstallation.uninstall()
+                    actions.append(UninstallAction(kind: "capability_host", target: CapabilityHostPaths.app.path, status: "removed"))
+                }
+            }
             for file in try InstallManifest.filesToRemove(keepConfig: keepConfig) {
                 if dryRun {
                     actions.append(UninstallAction(kind: "file", target: file.path, status: "would_remove"))
@@ -431,6 +604,17 @@ struct MCPUninstall: ParsableCommand {
     }
 }
 
+struct UninstallCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "uninstall", abstract: "Remove every NotesCLI-managed integration and service.")
+    @OptionGroup var options: GlobalOptions
+    @Flag(help: "Show exactly what would be removed without changing files.") var dryRun = false
+    @Flag(help: "Keep NotesCLI configuration and onboarding state.") var keepConfig = false
+
+    func run() throws {
+        try MCPUninstall.execute(client: .all, options: options, dryRun: dryRun, keepConfig: keepConfig)
+    }
+}
+
 private struct UninstallAction: Codable {
     var kind: String
     var target: String
@@ -439,11 +623,18 @@ private struct UninstallAction: Codable {
 
 struct MCPStatus: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "status", abstract: "Show MCP client connections.")
-    @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, or all.") var client: MCPClient = .all
+    @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
 
     func run() throws {
-        let clients = client == .all ? MCPClient.concrete : [client]
-        Output.table(["CLIENT", "STATUS"], clients.map { [$0.label, MCPConfiguration.status($0)] })
+        let clients = client == .all ? MCPClient.installable : [client]
+        Output.table(["CLIENT", "STATUS"], clients.map { selected in
+            if selected == .tailscale {
+                let status = TailscaleMCP.endpointStatus()
+                let ready = status["configured"] as? Bool == true && status["running"] as? Bool == true && status["mounted"] as? Bool == true
+                return [selected.label, ready ? "installed" : "not ready"]
+            }
+            return [selected.label, MCPConfiguration.status(selected)]
+        })
     }
 }
 
@@ -511,11 +702,12 @@ enum MCPConfiguration {
                 at: home.appendingPathComponent("Library/Application Support/Code/User/mcp.json"),
                 serversKey: "servers", readOnly: readOnly, allowNative: allowNative, includeType: true
             )
-        case .all: preconditionFailure("Expand all before installing")
+        case .tailscale, .all: preconditionFailure("Expand managed clients before installing")
         }
     }
 
-    static func uninstall(_ client: MCPClient) throws -> String {
+    static func uninstall(_ client: MCPClient, expectedOwnership: MCPEntryOwnership) throws -> String {
+        try verifyOwnership(client, expected: expectedOwnership)
         switch client {
         case .claudeCode: return try uninstallClaudeCode()
         case .claudeDesktop:
@@ -524,7 +716,41 @@ enum MCPConfiguration {
         case .cursor: return try uninstallJSON(at: home.appendingPathComponent(".cursor/mcp.json"), serversKey: "mcpServers")
         case .vscode:
             return try uninstallJSON(at: home.appendingPathComponent("Library/Application Support/Code/User/mcp.json"), serversKey: "servers")
-        case .all: preconditionFailure("Expand all before uninstalling")
+        case .tailscale, .all: preconditionFailure("Expand managed clients before uninstalling")
+        }
+    }
+
+    static func currentOwnership(_ client: MCPClient) throws -> MCPEntryOwnership? {
+        switch client {
+        case .claudeCode:
+            return try jsonOwnership(at: home.appendingPathComponent(".claude.json"), serversKey: "mcpServers")
+        case .claudeDesktop:
+            return try jsonOwnership(
+                at: home.appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json"),
+                serversKey: "mcpServers"
+            )
+        case .codex:
+            let path = home.appendingPathComponent(".codex/config.toml")
+            guard fileManager.fileExists(atPath: path.path) else { return nil }
+            let text = try String(contentsOf: path, encoding: .utf8)
+            guard let section = tomlSection("mcp_servers.notescli", in: text) else { return nil }
+            return MCPEntryOwnership(format: "toml-section", canonicalValue: section)
+        case .cursor:
+            return try jsonOwnership(at: home.appendingPathComponent(".cursor/mcp.json"), serversKey: "mcpServers")
+        case .vscode:
+            return try jsonOwnership(
+                at: home.appendingPathComponent("Library/Application Support/Code/User/mcp.json"),
+                serversKey: "servers"
+            )
+        case .tailscale, .all:
+            return nil
+        }
+    }
+
+    static func verifyOwnership(_ client: MCPClient, expected: MCPEntryOwnership) throws {
+        let current = try currentOwnership(client)
+        guard current == expected else {
+            throw NotesError("uninstall_entry_modified", "Refusing to remove the \(client.label) entry because it no longer exactly matches the entry NotesCLI installed.")
         }
     }
 
@@ -542,6 +768,7 @@ enum MCPConfiguration {
             return text.split(separator: "\n", omittingEmptySubsequences: false).contains { $0.trimmingCharacters(in: .whitespaces) == "[mcp_servers.notescli]" } ? "installed" : "not installed"
         case .cursor: return jsonStatus(at: home.appendingPathComponent(".cursor/mcp.json"), serversKey: "mcpServers")
         case .vscode: return jsonStatus(at: home.appendingPathComponent("Library/Application Support/Code/User/mcp.json"), serversKey: "servers")
+        case .tailscale: return (TailscaleMCP.endpointStatus()["configured"] as? Bool == true) ? "installed" : "not installed"
         case .all: return ""
         }
     }
@@ -581,6 +808,17 @@ enum MCPConfiguration {
             throw NotesError("invalid_client_config", "\(path.path) must contain a JSON object.")
         }
         return root
+    }
+
+    private static func jsonOwnership(at path: URL, serversKey: String) throws -> MCPEntryOwnership? {
+        guard fileManager.fileExists(atPath: path.path) else { return nil }
+        let root = try readJSON(at: path)
+        guard let servers = root[serversKey] as? [String: Any], let entry = servers["notescli"] else { return nil }
+        guard let object = entry as? [String: Any], JSONSerialization.isValidJSONObject(object) else {
+            throw NotesError("invalid_client_config", "\(path.path): notescli must be a JSON object.")
+        }
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        return MCPEntryOwnership(format: "json", canonicalValue: String(decoding: data, as: UTF8.self))
     }
 
     private static func jsonStatus(at path: URL, serversKey: String) -> String {
@@ -625,6 +863,25 @@ enum MCPConfiguration {
         return output.joined(separator: "\n")
     }
 
+    private static func tomlSection(_ name: String, in text: String) -> String? {
+        var output: [String] = []
+        var collecting = false
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                if trimmed == "[\(name)]" {
+                    collecting = true
+                    output = [line]
+                    continue
+                }
+                if collecting { break }
+            }
+            if collecting { output.append(line) }
+        }
+        while output.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { output.removeLast() }
+        return output.isEmpty ? nil : output.joined(separator: "\n")
+    }
+
     private static func tomlString(_ value: String) -> String {
         let data = try! JSONSerialization.data(withJSONObject: [value], options: [.withoutEscapingSlashes])
         let array = String(decoding: data, as: UTF8.self)
@@ -650,7 +907,9 @@ enum MCPConfiguration {
     }
 
     private static func uninstallClaudeCode() throws -> String {
-        guard let claude = findExecutable("claude") else { return "skipped (claude CLI not found)" }
+        guard let claude = findExecutable("claude") else {
+            throw NotesError("client_command_failed", "Claude Code is not available, so its MCP entry was not removed.")
+        }
         let current = try run(claude, ["mcp", "get", "notescli"])
         guard current.status == 0 else { return "not installed" }
         _ = try backupIfPresent(home.appendingPathComponent(".claude.json"))
@@ -717,8 +976,16 @@ enum PermissionGuide {
         @unknown default: warning("Speech Recognition: unknown status.")
         }
 
-        info("Full Disk Access is required to read Apple Notes.")
-        info("Add the app that launches notescli: Terminal for shell use, or the MCP host app (Claude, Codex, Cursor, or VS Code).")
+        info("Full Disk Access is required for full-fidelity Apple Notes reads.")
+        if ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] == "1" {
+            info("Add NotesCLI Capability Host.app. Other terminals and agent apps will use its permission.")
+            let reveal = Process()
+            reveal.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            reveal.arguments = ["-R", CapabilityHostPaths.app.path]
+            if (try? reveal.run()) != nil { reveal.waitUntilExit() }
+        } else {
+            info("Add the app that launches notescli, or run 'notescli onboard' to install the shared capability host.")
+        }
         let settings = Process()
         settings.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         settings.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]

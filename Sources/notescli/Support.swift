@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import NotesAutomation
 import NotesCore
 import NotesMCP
 import Darwin
@@ -35,8 +36,23 @@ enum TerminalStyle {
 }
 
 enum Output {
+    private struct ReadEnvelope<Value: Encodable>: Encodable {
+        var schemaVersion = 1
+        var fidelity: NotesReadFidelity
+        var unavailableFields: [String]
+        var result: Value
+    }
+
     static func error(_ text: String) { FileHandle.standardError.write(Data((text + "\n").utf8)) }
     static func json<T: Encodable>(_ value: T) throws { print(String(decoding: try NotePresentation.json(value), as: UTF8.self)) }
+    static func readJSON<T: Encodable>(_ value: T, backend: Backends) throws {
+        if backend.fidelity == .full { try json(value) }
+        else { try json(ReadEnvelope(fidelity: backend.fidelity, unavailableFields: backend.unavailableFields, result: value)) }
+    }
+    static func fidelityNotice(_ backend: Backends) {
+        guard backend.fidelity == .limited, !CommandLine.arguments.contains("--quiet") else { return }
+        error("Fidelity: limited (Notes Automation). Grant Full Disk Access for full formatting, attachments, tags, pins, and stable IDs.")
+    }
     static func table(_ headers: [String], _ rows: [[String]]) {
         if CommandLine.arguments.contains("--quiet") { return }
         let cleaned = rows.map { $0.map { $0.replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\t", with: " ").filter { !$0.isASCII || $0.asciiValue! >= 32 } } }
@@ -48,13 +64,16 @@ enum Output {
             }.joined(separator: "  ").trimmingCharacters(in: .whitespaces))
         }
     }
-    static func notes(_ notes: [NoteSummary], json: Bool) throws {
-        if json { try Self.json(notes) }
+    static func notes(_ notes: [NoteSummary], json: Bool, backend: Backends? = nil) throws {
+        if json {
+            if let backend { try readJSON(notes, backend: backend) }
+            else { try Self.json(notes) }
+        }
         else { table(["#ID", "ID", "TITLE", "FOLDER", "MODIFIED"], notes.map {
             [$0.number.map { "#\($0)" } ?? $0.id.shortID ?? "", $0.id.uuid,
              $0.title + ($0.isLocked ? " [locked]" : ""), $0.folderPath.joined(separator: " > "),
              $0.modified.map { NotePresentation.relativeDate($0) } ?? ""]
-        }) }
+        }); if let backend { fidelityNotice(backend) } }
     }
     static func outcome(_ outcome: WriteOutcome) -> String {
         switch outcome {
@@ -95,6 +114,9 @@ func confirm(_ prompt: String, yes: Bool) throws {
     guard ["y", "yes"].contains(readLine()?.lowercased() ?? "") else { throw NotesError("cancelled", "Deletion cancelled.") }
 }
 func editor(_ original: String) throws -> String {
+    guard ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] != "1" else {
+        throw NotesError("host_command_refused", "Interactive editors cannot run through the capability host.")
+    }
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-editor-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     defer { try? FileManager.default.removeItem(at: directory) }

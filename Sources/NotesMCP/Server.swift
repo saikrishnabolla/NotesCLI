@@ -28,6 +28,8 @@ public final class MCPServer: @unchecked Sendable {
     public let readOnly: Bool
     public let allowNative: Bool
     public let exposureProfile: MCPToolExposureProfile
+    public let readFidelity: String
+    public let unavailableReadFields: [String]
     public static let textLimit = 48 * 1024
     public static let versions = MCPProtocol.legacyVersions
 
@@ -41,12 +43,15 @@ public final class MCPServer: @unchecked Sendable {
     public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false,
                 allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil, syncWaiter: MCPSyncWaiter? = nil,
                 writeFolders: String? = nil, stateRoot: URL? = nil,
-                exposureProfile: MCPToolExposureProfile = .local) {
+                exposureProfile: MCPToolExposureProfile = .local,
+                readFidelity: String = "full", unavailableReadFields: [String] = []) {
         self.reader = reader
         self.writer = writer
         self.readOnly = readOnly
         self.allowNative = allowNative
         self.exposureProfile = exposureProfile
+        self.readFidelity = readFidelity
+        self.unavailableReadFields = unavailableReadFields
         self.nativeHandler = nativeHandler
         self.syncWaiter = syncWaiter
         self.writeFolders = writeFolders
@@ -62,6 +67,18 @@ public final class MCPServer: @unchecked Sendable {
         let required: [String]
         let properties: [String: [String: Any]]
         var schema: [String: Any] { ["type": "object", "properties": properties, "required": required, "additionalProperties": false] }
+    }
+
+    private struct AttachmentResourceReference: Codable {
+        var ref: String
+        var attachmentID: String
+    }
+
+    private var resourceTemplates: [[String: Any]] {
+        [
+            ["uriTemplate": "notes://note/{uuid}", "name": "Apple Note", "mimeType": "application/json"],
+            ["uriTemplate": "notes://attachment/{token}", "name": "Apple Notes attachment"],
+        ]
     }
 
     private var tools: [Tool] {
@@ -256,7 +273,7 @@ public final class MCPServer: @unchecked Sendable {
         guard exposureProfile == .remote else { return exposed }
         let pathTools: Set<String> = [
             "save_attachment", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes",
-            "recording_add", "recording_create", "attach_file", "diagram_add",
+            "recording_add", "recording_create", "attach_file", "diagram_add", "drawing_add", "drawing_create",
         ]
         exposed.removeAll { pathTools.contains($0.name) }
         exposed = exposed.map { tool in
@@ -362,11 +379,10 @@ public final class MCPServer: @unchecked Sendable {
             case "resources/list":
                 var resources: [[String: Any]] = [["uri": "notes://folders", "name": "Apple Notes folders", "mimeType": "application/json"]]
                 if context.apps { resources.append(NotesMCPWidget.descriptor) }
-                result = cacheable(["resources": resources,
-                                    "resourceTemplates": [["uriTemplate": "notes://note/{uuid}", "name": "Apple Note", "mimeType": "application/json"]]],
+                result = cacheable(["resources": resources, "resourceTemplates": resourceTemplates],
                                    context: context, scope: "public")
             case "resources/templates/list":
-                result = cacheable(["resourceTemplates": [["uriTemplate": "notes://note/{uuid}", "name": "Apple Note", "mimeType": "application/json"]]],
+                result = cacheable(["resourceTemplates": resourceTemplates],
                                    context: context, scope: "public")
             case "resources/read":
                 do {
@@ -464,11 +480,12 @@ public final class MCPServer: @unchecked Sendable {
     }
 
     private func decorate(_ result: [String: Any], context: MCPRequestContext) -> [String: Any] {
-        guard context.era == .modern else { return result }
         var value = result
-        value["resultType"] = "complete"
+        if context.era == .modern { value["resultType"] = "complete" }
         var meta = value["_meta"] as? [String: Any] ?? [:]
         meta[MCPProtocol.serverInfoKey] = serverInfo()
+        meta["net.notescli/readFidelity"] = ["fidelity": readFidelity,
+                                                   "unavailableFields": unavailableReadFields]
         value["_meta"] = meta
         return value
     }
@@ -719,12 +736,66 @@ public final class MCPServer: @unchecked Sendable {
             blocks.append(["type": "audio", "data": data.base64EncodedString(), "mimeType": mime])
         }
         if blocks.isEmpty {
-            blocks.append(["type": "resource_link", "name": attachment.filename ?? attachment.id, "uri": url.absoluteString,
+            let resourceURI = try attachmentResourceURI(ref: ref, attachmentID: attachment.id)
+            blocks.append(["type": "resource_link", "name": attachment.filename ?? attachment.id, "uri": resourceURI,
                            "description": "Attachment exceeds the inline 48 KB budget.", "mimeType": mime, "size": size])
         }
         let structured: [String: Any] = ["id": attachment.id, "kind": attachment.kind, "filename": attachment.filename ?? NSNull(),
-                                         "inline": blocks.first?["type"] as? String != "resource_link", "mime_type": mime, "size": size]
+                                         "inline": blocks.first?["type"] as? String != "resource_link", "mime_type": mime, "size": size,
+                                         "resource_uri": blocks.first?["uri"] ?? NSNull()]
         return ["content": blocks, "structuredContent": structured, "isError": false]
+    }
+
+    private func attachmentResourceURI(ref: String, attachmentID: String) throws -> String {
+        let data = try JSONEncoder().encode(AttachmentResourceReference(ref: ref, attachmentID: attachmentID))
+        let token = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "notes://attachment/\(token)"
+    }
+
+    private func attachmentResource(_ uri: String) throws -> [String: Any] {
+        let suffix = String(uri.dropFirst("notes://attachment/".count))
+        let tokenPart = String(suffix.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0])
+        var token = tokenPart
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        token += String(repeating: "=", count: (4 - token.count % 4) % 4)
+        guard let encoded = Data(base64Encoded: token),
+              let reference = try? JSONDecoder().decode(AttachmentResourceReference.self, from: encoded) else {
+            throw NotesError("resource_not_found", "The attachment resource is invalid.")
+        }
+        let matches = try reader.attachments(reference.ref).filter {
+            $0.id.caseInsensitiveCompare(reference.attachmentID) == .orderedSame
+        }
+        guard matches.count == 1 else { throw NotesError("attachment_not_found", "No attachment matches the id.") }
+        let attachment = matches[0]
+        guard let path = attachment.filePath ?? attachment.fallbackRasterPath else {
+            throw NotesError("attachment_unavailable", "The attachment file is not downloaded.")
+        }
+        let url = URL(fileURLWithPath: path)
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard let total = (attributes[.size] as? NSNumber)?.intValue, total >= 0 else {
+            throw NotesError("attachment_unavailable", "The attachment size is unavailable.")
+        }
+        let components = URLComponents(string: uri)
+        let offsetText = components?.queryItems?.first { $0.name == "offset" }?.value ?? "0"
+        guard let offset = Int(offsetText), offset >= 0, offset <= total else {
+            throw NotesError("invalid_resource", "The attachment resource offset is invalid.")
+        }
+        let chunkLimit = 1_048_576
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        try handle.seek(toOffset: UInt64(offset))
+        let data = try handle.read(upToCount: min(chunkLimit, total - offset)) ?? Data()
+        let nextOffset = offset + data.count
+        let nextURI = nextOffset < total ? "notes://attachment/\(tokenPart)?offset=\(nextOffset)" : nil
+        var metadata: [String: Any] = ["offset": offset, "bytes": data.count, "totalBytes": total,
+                                       "complete": nextURI == nil]
+        if let nextURI { metadata["nextUri"] = nextURI }
+        return ["contents": [["uri": uri, "mimeType": mimeType(attachment, url: url),
+                               "blob": data.base64EncodedString(), "_meta": metadata]]]
     }
 
     private func mimeType(_ attachment: Attachment, url: URL) -> String {
@@ -1260,6 +1331,7 @@ public final class MCPServer: @unchecked Sendable {
             let text = String(decoding: try NotePresentation.json(reader.folders(account: nil)), as: UTF8.self)
             return ["contents": [["uri": uri, "mimeType": "application/json", "text": text]]]
         }
+        if uri.hasPrefix("notes://attachment/") { return try attachmentResource(uri) }
         guard uri.hasPrefix("notes://note/") else { throw NotesError("resource_not_found", "Unknown Notes resource.") }
         let ref = String(uri.dropFirst("notes://note/".count)).removingPercentEncoding ?? ""
         let text = String(decoding: try NotePresentation.json(reader.note(ref)), as: UTF8.self)

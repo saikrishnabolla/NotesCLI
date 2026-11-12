@@ -3,6 +3,7 @@ import Carbon
 import Foundation
 import NotesAutomation
 import NotesCore
+import NotesHost
 import NotesMCP
 
 func automationPermission() -> String {
@@ -29,7 +30,7 @@ struct AccessProbe: Codable {
     var errorCode: String?
 }
 
-struct AccessReadiness: Encodable {
+struct AccessReadiness: Codable {
     var direct: AccessProbe
     var effective: AccessProbe
     /// Reserved for the signed capability host. `null` can become an object without changing this schema.
@@ -51,7 +52,7 @@ struct AgentReadyState: Codable {
     var blockers: [String]
 }
 
-struct AgentDoctorReport: Encodable {
+struct AgentDoctorReport: Codable {
     var schemaVersion: Int
     var readiness: AgentReadyState
     var access: AccessReadiness
@@ -103,6 +104,7 @@ struct Doctor: ParsableCommand {
     func agentReport() -> AgentDoctorReport {
         let direct = directAccess(noteStorePath)
         let effective: AccessProbe
+        var capabilityHost: AccessProbe?
         var inventory: [String: Int]?
 
         if resolvedBackendName == "fake" {
@@ -114,6 +116,10 @@ struct Doctor: ParsableCommand {
             } catch {
                 effective = unavailableProbe(error)
             }
+        } else if let hosted = capabilityHostAccess() {
+            capabilityHost = hosted.probe
+            inventory = hosted.inventory
+            effective = hosted.probe
         } else if direct.available {
             do {
                 let reader = try options.backends().reader
@@ -141,10 +147,29 @@ struct Doctor: ParsableCommand {
         return AgentDoctorReport(
             schemaVersion: 1,
             readiness: AgentReadyState(ready: blockers.isEmpty, blockers: blockers),
-            access: AccessReadiness(direct: direct, effective: effective, capabilityHost: nil),
+            access: AccessReadiness(direct: direct, effective: effective, capabilityHost: capabilityHost),
             automation: automationPermission(), notesApp: notesAppPresent ? "present" : "missing",
             inventory: inventory
         )
+    }
+
+    private func capabilityHostAccess() -> (probe: AccessProbe, inventory: [String: Int]?)? {
+        guard ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] != "1",
+              CapabilityHostClient.isAvailable() else { return nil }
+        do {
+            let captured = try CapabilityHostClient.capture(arguments: ["doctor", "--for-agent", "--json"])
+            guard captured.exitCode == 0 else {
+                return (AccessProbe(available: false, status: "unavailable", source: "capability_host",
+                                    fidelity: "none", unavailableFields: [], errorCode: "capability_host_probe_failed"), nil)
+            }
+            let report = try JSONDecoder().decode(AgentDoctorReport.self, from: captured.stdout)
+            var probe = report.access.effective
+            probe.source = "capability_host"
+            return (probe, report.inventory)
+        } catch {
+            return (AccessProbe(available: false, status: "unavailable", source: "capability_host",
+                                fidelity: "none", unavailableFields: [], errorCode: "capability_host_probe_failed"), nil)
+        }
     }
 
     private var resolvedBackendName: String {

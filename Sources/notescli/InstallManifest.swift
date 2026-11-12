@@ -10,6 +10,12 @@ struct MCPInstallRecord: Codable, Equatable {
     var client: String
     var readOnly: Bool
     var allowNative: Bool
+    var entry: MCPEntryOwnership?
+}
+
+struct MCPEntryOwnership: Codable, Equatable {
+    var format: String
+    var canonicalValue: String
 }
 
 struct InstalledFileRecord: Codable, Equatable {
@@ -31,16 +37,22 @@ enum InstallManifest {
 
     static var url: URL { applicationSupport.appendingPathComponent("install-manifest.json") }
 
-    static func recordMCPClient(_ client: MCPClient, readOnly: Bool, allowNative: Bool) throws {
+    static func recordMCPClient(_ client: MCPClient, readOnly: Bool, allowNative: Bool,
+                                entry: MCPEntryOwnership? = nil) throws {
         var manifest = try load()
         manifest.mcpClients.removeAll { $0.client == client.rawValue }
-        manifest.mcpClients.append(MCPInstallRecord(client: client.rawValue, readOnly: readOnly, allowNative: allowNative))
+        manifest.mcpClients.append(MCPInstallRecord(client: client.rawValue, readOnly: readOnly,
+                                                    allowNative: allowNative, entry: entry))
         manifest.mcpClients.sort { $0.client < $1.client }
         try save(manifest)
     }
 
     static func ownsMCPClient(_ client: MCPClient) throws -> Bool {
-        try load().mcpClients.contains { $0.client == client.rawValue }
+        try mcpClientRecord(client) != nil
+    }
+
+    static func mcpClientRecord(_ client: MCPClient) throws -> MCPInstallRecord? {
+        try load().mcpClients.first { $0.client == client.rawValue }
     }
 
     static func removeMCPClient(_ client: MCPClient) throws {
@@ -114,10 +126,12 @@ enum InstallManifest {
         let support = applicationSupport.standardizedFileURL.path + "/"
         let launchAgents = MCPConfiguration.home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
             .standardizedFileURL.path + "/"
+        let mcpLog = MCPConfiguration.home.appendingPathComponent("Library/Logs/notescli-mcp-http.log")
+            .standardizedFileURL.path
         let isSupportFile = path.hasPrefix(support) && path != url.path
         let name = URL(fileURLWithPath: path).lastPathComponent
         let isLaunchAgent = path.hasPrefix(launchAgents) && name.hasPrefix("com.saikrishnabolla.notescli") && name.hasSuffix(".plist")
-        guard isSupportFile || isLaunchAgent else {
+        guard isSupportFile || isLaunchAgent || path == mcpLog else {
             throw NotesError("uninstall_path_refused", "Refusing a path outside NotesCLI-owned locations.")
         }
         return path

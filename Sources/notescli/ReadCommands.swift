@@ -31,10 +31,11 @@ struct ReadList: ParsableCommand {
         if let after, let before, after > before { throw ValidationError("--since must precede --until.") }
         let query = NoteQuery(folder: folder, account: account, includeDeleted: includeDeleted, pinnedOnly: pinned,
                               tag: tag, modifiedAfter: after, modifiedBefore: before, attachmentKinds: try parseAttachmentKinds(has))
-        let page = try ReadCursorPaging.page(options.backends().reader.notes(query, sort: sort), sort: sort, cursor: cursor, limit: limit)
-        if options.json { try Output.json(page) }
+        let backend = try options.backends()
+        let page = try ReadCursorPaging.page(backend.reader.notes(query, sort: sort), sort: sort, cursor: cursor, limit: limit)
+        if options.json { try Output.readJSON(page, backend: backend) }
         else {
-            try Output.notes(page.notes, json: false)
+            try Output.notes(page.notes, json: false, backend: backend)
             if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
         }
     }
@@ -57,13 +58,13 @@ struct IndexedSearch: ParsableCommand {
     @Option(help: "Continue from an opaque stable cursor.") var cursor: String?
     func validate() throws { try positive(limit, name: "limit") }
     func run() throws {
-        let reader = try options.backends().reader
+        let backend = try options.backends(), reader = backend.reader
         if index {
             let local = LocalNotesIndex(); _ = try local.update(from: reader, rebuild: rebuild)
             let kindQuery = try parseAttachmentKinds(has).map { "has:\($0)" }.joined(separator: " AND ")
             let effectiveQuery = kindQuery.isEmpty ? query : "(\(query)) AND \(kindQuery)"
             let page = try ReadCursorPaging.searchPage(local.search(effectiveQuery, folder: folder, limit: 5000), cursor: cursor, limit: limit ?? 50)
-            if options.json { try Output.json(page) }
+            if options.json { try Output.readJSON(page, backend: backend) }
             else {
                 Output.table(["#ID", "ID", "TITLE", "FOLDER", "SCORE", "SNIPPET"], page.hits.map { [$0.number.map { "#\($0)" } ?? $0.shortID ?? "", $0.noteID, $0.title, $0.folder, String(format: "%.0f", $0.score), $0.snippet] })
                 if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
@@ -80,18 +81,18 @@ struct IndexedSearch: ParsableCommand {
             }
             scored.sort { $0.score == $1.score ? $0.summary.id.uuid < $1.summary.id.uuid : $0.score > $1.score }
             let page = try ReadCursorPaging.fuzzyPage(scored, cursor: cursor, limit: limit)
-            if options.json { try Output.json(page) }
+            if options.json { try Output.readJSON(page, backend: backend) }
             else {
-                try Output.notes(page.notes, json: false)
+                try Output.notes(page.notes, json: false, backend: backend)
                 if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
             }
             return
         }
         let notes = try reader.notes(NoteQuery(folder: folder, text: query, attachmentKinds: try parseAttachmentKinds(has)))
         let page = try ReadCursorPaging.page(notes, sort: .modified, cursor: cursor, limit: limit)
-        if options.json { try Output.json(page) }
+        if options.json { try Output.readJSON(page, backend: backend) }
         else {
-            try Output.notes(page.notes, json: false)
+            try Output.notes(page.notes, json: false, backend: backend)
             if let next = page.nextCursor, !options.quiet { print("Next cursor: \(next)") }
         }
     }

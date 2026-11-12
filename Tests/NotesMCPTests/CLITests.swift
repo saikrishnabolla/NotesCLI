@@ -56,6 +56,22 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
     }
 
+    func testOnboardRecognizesArchiveLayoutCapabilityHost() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let app = home.appendingPathComponent("Applications/NotesCLI Capability Host.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+
+        let result = try run(["--backend", "fake", "onboard", "--check-only", "--json"], environment: environment)
+        XCTAssertEqual(result.0, 0, result.2)
+        let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any])
+        let steps = try XCTUnwrap(report["steps"] as? [[String: Any]])
+        let install = try XCTUnwrap(steps.first { $0["id"] as? String == "host-install" })
+        XCTAssertEqual(install["required"] as? Bool, true)
+        XCTAssertEqual(install["status"] as? String, "pending")
+    }
+
     func testManifestUninstallDryRunAndOwnershipGuard() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -75,11 +91,69 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(removed.0, 0, removed.2)
         XCTAssertFalse((try String(contentsOf: config, encoding: .utf8)).contains("[mcp_servers.notescli]"))
 
-        try "[mcp_servers.notescli]\ncommand = \"unowned\"\n".write(to: config, atomically: true, encoding: .utf8)
+        let reinstalled = try run(["mcp", "install", "--client", "codex"], environment: environment)
+        XCTAssertEqual(reinstalled.0, 0, reinstalled.2)
+        var modified = try String(contentsOf: config, encoding: .utf8)
+        modified = modified.replacingOccurrences(of: #"args = ["mcp"]"#, with: #"args = ["mcp", "--read-only"]"#)
+        try modified.write(to: config, atomically: true, encoding: .utf8)
         let refused = try run(["mcp", "uninstall", "--client", "codex", "--json"], environment: environment)
         XCTAssertNotEqual(refused.0, 0)
-        XCTAssertTrue(refused.2.contains("uninstall_not_owned"), refused.2)
-        XCTAssertTrue((try String(contentsOf: config, encoding: .utf8)).contains("unowned"))
+        XCTAssertTrue(refused.2.contains("uninstall_entry_modified"), refused.2)
+        XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), modified)
+    }
+
+    func testJSONMCPUninstallRemovesExactEntryAndPreservesModifiedEntry() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let config = home.appendingPathComponent(".cursor/mcp.json")
+
+        let installed = try run(["mcp", "install", "--client", "cursor"], environment: environment)
+        XCTAssertEqual(installed.0, 0, installed.2)
+        let removed = try run(["mcp", "uninstall", "--client", "cursor", "--json"], environment: environment)
+        XCTAssertEqual(removed.0, 0, removed.2)
+        let removedRoot = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as? [String: Any])
+        XCTAssertNil((removedRoot["mcpServers"] as? [String: Any])?["notescli"])
+
+        let reinstalled = try run(["mcp", "install", "--client", "cursor"], environment: environment)
+        XCTAssertEqual(reinstalled.0, 0, reinstalled.2)
+        var root = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as? [String: Any])
+        var servers = try XCTUnwrap(root["mcpServers"] as? [String: Any])
+        var entry = try XCTUnwrap(servers["notescli"] as? [String: Any])
+        entry["env"] = ["USER_OVERRIDE": "1"]
+        servers["notescli"] = entry
+        root["mcpServers"] = servers
+        try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: config)
+        let modified = try Data(contentsOf: config)
+
+        let refused = try run(["mcp", "uninstall", "--client", "cursor", "--json"], environment: environment)
+        XCTAssertNotEqual(refused.0, 0)
+        XCTAssertTrue(refused.2.contains("uninstall_entry_modified"), refused.2)
+        XCTAssertEqual(try Data(contentsOf: config), modified)
+    }
+
+    func testLegacyManifestDecodesButCannotAuthorizeMCPEntryRemoval() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let config = home.appendingPathComponent(".codex/config.toml")
+        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let entry = "[mcp_servers.notescli]\ncommand = \"notescli\"\nargs = [\"mcp\"]\n"
+        try entry.write(to: config, atomically: true, encoding: .utf8)
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI")
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let manifest: [String: Any] = [
+            "schemaVersion": 1,
+            "owner": "NotesCLI",
+            "mcpClients": [["client": "codex", "readOnly": false, "allowNative": false]],
+            "files": [],
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: support.appendingPathComponent("install-manifest.json"))
+
+        let refused = try run(["mcp", "uninstall", "--client", "codex", "--json"], environment: environment)
+        XCTAssertNotEqual(refused.0, 0)
+        XCTAssertTrue(refused.2.contains("uninstall_ownership_unknown"), refused.2)
+        XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), entry)
     }
 
     func testMCPInstallPersistsAllowNativeForEveryFileBasedStdioClient() throws {
@@ -124,7 +198,25 @@ final class CLITests: XCTestCase {
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: false)
         let claude = bin.appendingPathComponent("claude")
         let log = home.appendingPathComponent("claude.log")
-        try "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CLAUDE_LOG\"\ncase \"$*\" in *'mcp get notescli'*) exit 1;; esac\nexit 0\n"
+        try """
+            #!/bin/sh
+            printf '%s\\n' "$*" >> "$CLAUDE_LOG"
+            case "$1 $2" in
+              "mcp get")
+                /usr/bin/grep -q '"notescli"' "$HOME/.claude.json" 2>/dev/null
+                exit $?
+                ;;
+              "mcp add")
+                printf '{"mcpServers":{"notescli":{"args":["mcp","--allow-native"],"command":"%s"}}}\\n' "$7" > "$HOME/.claude.json"
+                exit 0
+                ;;
+              "mcp remove")
+                printf '{"mcpServers":{}}\\n' > "$HOME/.claude.json"
+                exit 0
+                ;;
+            esac
+            exit 1
+            """
             .write(to: claude, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: claude.path)
         let environment = [
@@ -137,6 +229,28 @@ final class CLITests: XCTestCase {
         let calls = try String(contentsOf: log, encoding: .utf8)
         XCTAssertTrue(calls.contains("mcp add --scope user notescli --"), calls)
         XCTAssertTrue(calls.contains("mcp --allow-native"), calls)
+
+        let removed = try run(["mcp", "uninstall", "--client", "claude-code", "--json"], environment: environment)
+        XCTAssertEqual(removed.0, 0, removed.2)
+        let removedConfig = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: home.appendingPathComponent(".claude.json"))) as? [String: Any])
+        XCTAssertNil((removedConfig["mcpServers"] as? [String: Any])?["notescli"])
+
+        let reinstalled = try run(["mcp", "install", "--client", "claude-code", "--allow-native"], environment: environment)
+        XCTAssertEqual(reinstalled.0, 0, reinstalled.2)
+        let config = home.appendingPathComponent(".claude.json")
+        var root = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as? [String: Any])
+        var servers = try XCTUnwrap(root["mcpServers"] as? [String: Any])
+        var entry = try XCTUnwrap(servers["notescli"] as? [String: Any])
+        entry["args"] = ["mcp", "--read-only"]
+        servers["notescli"] = entry
+        root["mcpServers"] = servers
+        try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: config)
+        let modified = try Data(contentsOf: config)
+
+        let refused = try run(["mcp", "uninstall", "--client", "claude-code", "--json"], environment: environment)
+        XCTAssertNotEqual(refused.0, 0)
+        XCTAssertTrue(refused.2.contains("uninstall_entry_modified"), refused.2)
+        XCTAssertEqual(try Data(contentsOf: config), modified)
     }
 
     func testManifestUninstallKeepsConfigAndRefusesTamperedPaths() throws {
@@ -174,6 +288,15 @@ final class CLITests: XCTestCase {
         let removed = try run(["mcp", "uninstall", "--json"], environment: environment)
         XCTAssertEqual(removed.0, 0, removed.2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: onboarding.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.path))
+
+        let log = home.appendingPathComponent("Library/Logs/notescli-mcp-http.log")
+        try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("log".utf8).write(to: log)
+        try writeManifest(path: log.path)
+        let removedLog = try run(["mcp", "uninstall", "--json"], environment: environment)
+        XCTAssertEqual(removedLog.0, 0, removedLog.2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.path))
     }
     func testGlobalOptionsAndParsing() throws {
@@ -225,7 +348,7 @@ final class CLITests: XCTestCase {
         let json = try run(["--backend", "fake", "--json"])
         XCTAssertEqual(json.0, 0, json.2)
         let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
-        XCTAssertEqual(home["version"] as? String, "1.0.3")
+        XCTAssertEqual(home["version"] as? String, "1.1.0")
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },

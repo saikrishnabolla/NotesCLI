@@ -537,7 +537,7 @@ final class ProtocolTests: XCTestCase {
         let audioURL = root.appendingPathComponent("recording.mp3")
         try Data([0x49, 0x44, 0x33]).write(to: audioURL)
         let largeAudioURL = root.appendingPathComponent("large-recording.mp3")
-        try Data(repeating: 0, count: 40 * 1024).write(to: largeAudioURL)
+        try Data(repeating: 0, count: 1_200_000).write(to: largeAudioURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: largeAudioURL.path)
         let text = "Title\nSection\n"
         var document = NoteDocument(text: text, runs: [
@@ -575,6 +575,20 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual((audio["content"] as? [[String: Any]])?.first?["type"] as? String, "audio")
         let resource = try call(server, "get_attachment", ["ref": "rich", "attachment_id": "audio-large"])
         XCTAssertEqual((resource["content"] as? [[String: Any]])?.first?["type"] as? String, "resource_link")
+        let resourceURI = try XCTUnwrap((resource["content"] as? [[String: Any]])?.first?["uri"] as? String)
+        XCTAssertTrue(resourceURI.hasPrefix("notes://attachment/"))
+        XCTAssertFalse(resourceURI.contains("file://"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: largeAudioURL.path)
+        let read = try request(server, method: "resources/read", params: ["uri": resourceURI])
+        let contents = ((read["result"] as? [String: Any])?["contents"] as? [[String: Any]])
+        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(contents?.first?["blob"] as? String))?.count, 1_048_576)
+        let metadata = try XCTUnwrap(contents?.first?["_meta"] as? [String: Any])
+        let nextURI = try XCTUnwrap(metadata["nextUri"] as? String)
+        let next = try request(server, method: "resources/read", params: ["uri": nextURI])
+        let nextContents = ((next["result"] as? [String: Any])?["contents"] as? [[String: Any]])
+        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(nextContents?.first?["blob"] as? String))?.count,
+                       1_200_000 - 1_048_576)
+        XCTAssertEqual((nextContents?.first?["_meta"] as? [String: Any])?["complete"] as? Bool, true)
     }
 
     func testReadOnlyAnchorReadsDoNotCreateState() throws {
@@ -630,6 +644,6 @@ final class ServerVersionTests: XCTestCase {
         let server = MCPServer(reader: fake, writer: fake)
         let response = try XCTUnwrap(server.handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-06-18", "capabilities": [String: Any](), "clientInfo": ["name": "t", "version": "1"]]]))
         let info = try XCTUnwrap((response["result"] as? [String: Any])?["serverInfo"] as? [String: Any])
-        XCTAssertEqual(info["version"] as? String, "1.0.3")
+        XCTAssertEqual(info["version"] as? String, "1.1.0")
     }
 }

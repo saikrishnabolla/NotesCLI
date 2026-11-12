@@ -17,20 +17,24 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
 
     private let runner: any ScriptRunning
     private let timeout: TimeInterval
+    private let snapshotTTL: TimeInterval
     private let permissionCheck: @Sendable () throws -> Void
     private let lock = NSLock()
     private var cachedSnapshot: ScriptingSnapshot?
+    private var cachedAt: Date?
 
-    public init(timeout: TimeInterval = 30) {
+    public init(timeout: TimeInterval = 30, snapshotTTL: TimeInterval = 1) {
         runner = OSAScriptRunner()
         self.timeout = timeout
+        self.snapshotTTL = max(0, snapshotTTL)
         permissionCheck = { try NotesAutomationPermission.check() }
     }
 
-    init(runner: any ScriptRunning, timeout: TimeInterval = 30,
+    init(runner: any ScriptRunning, timeout: TimeInterval = 30, snapshotTTL: TimeInterval = 1,
          permissionCheck: @escaping @Sendable () throws -> Void) {
         self.runner = runner
         self.timeout = timeout
+        self.snapshotTTL = max(0, snapshotTTL)
         self.permissionCheck = permissionCheck
     }
 
@@ -148,9 +152,12 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
 
     private func snapshot() throws -> ScriptingSnapshot {
         try lock.withLock {
-            if let cachedSnapshot { return cachedSnapshot }
+            if let cachedSnapshot, let cachedAt, Date().timeIntervalSince(cachedAt) < snapshotTTL {
+                return cachedSnapshot
+            }
             let value = try loadSnapshot()
             cachedSnapshot = value
+            cachedAt = Date()
             return value
         }
     }

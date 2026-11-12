@@ -48,10 +48,11 @@ public enum SpeechHelper {
         return copy
     }
 
-    static func run<Value: Codable>(_ executable: URL, _ arguments: [String], as: Value.Type) throws -> Value {
+    static func run<Value: Codable>(_ executable: URL, _ arguments: [String], as: Value.Type,
+                                    timeout: TimeInterval? = nil) throws -> Value {
         let reply = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-speech-" + UUID().uuidString + ".json")
         defer { try? FileManager.default.removeItem(at: reply) }
-        let status = try spawnDisclaimed(executable, [subcommand] + arguments + ["--reply", reply.path])
+        let status = try spawnDisclaimed(executable, [subcommand] + arguments + ["--reply", reply.path], timeout: timeout)
         guard let data = try? Data(contentsOf: reply), let decoded = try? JSONDecoder().decode(Reply<Value>.self, from: data) else {
             throw NotesError("speech_helper_failed", "The speech helper exited with status \(status) and no result.",
                              hint: "Run notescli permissions, then try again.")
@@ -63,7 +64,7 @@ public enum SpeechHelper {
 
     private typealias Disclaim = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
 
-    private static func spawnDisclaimed(_ executable: URL, _ arguments: [String]) throws -> Int32 {
+    private static func spawnDisclaimed(_ executable: URL, _ arguments: [String], timeout: TimeInterval?) throws -> Int32 {
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
@@ -84,7 +85,24 @@ public enum SpeechHelper {
             throw NotesError("speech_helper_failed", "Could not start the speech helper: \(String(cString: strerror(spawned))).")
         }
         var status: Int32 = 0
-        while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
-        return status
+        guard let timeout else {
+            while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+            return status
+        }
+
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        while true {
+            let result = waitpid(pid, &status, WNOHANG)
+            if result == pid { return status }
+            if result == -1, errno != EINTR {
+                throw NotesError("speech_helper_failed", "Could not wait for the speech helper: \(String(cString: strerror(errno))).")
+            }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                kill(pid, SIGKILL)
+                while waitpid(pid, &status, 0) == -1 && errno == EINTR {}
+                throw NotesError("speech_helper_timeout", "The speech helper did not respond in time.")
+            }
+            usleep(10_000)
+        }
     }
 }

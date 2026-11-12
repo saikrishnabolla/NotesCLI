@@ -57,4 +57,14 @@ final class LimitedReaderTests: XCTestCase {
             XCTAssertEqual((error as? NotesError)?.code, "limited_read_unsupported")
         }
     }
+
+    func testReaderRefreshesExpiredSnapshot() throws {
+        let updated = snapshot.replacingOccurrences(of: "Quarterly plan", with: "Updated plan")
+        let runner = StubRunner([ScriptOutput(stdout: snapshot), ScriptOutput(stdout: updated)])
+        let reader = ScriptingNotesReader(runner: runner, snapshotTTL: 0, permissionCheck: {})
+
+        XCTAssertEqual(try reader.notes(NoteQuery()).first?.title, "Quarterly plan")
+        XCTAssertEqual(try reader.notes(NoteQuery()).first?.title, "Updated plan")
+        XCTAssertEqual(runner.calls.count, 2)
+    }
 }

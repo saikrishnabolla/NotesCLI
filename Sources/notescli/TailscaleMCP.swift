@@ -1,5 +1,6 @@
 import Foundation
 import NotesCore
+import NotesHost
 import NotesSafety
 import Security
 
@@ -12,7 +13,33 @@ struct MCPHTTPConfiguration: Codable {
     var token: String
     var tailscaleHostname: String
     var tailscaleIPs: [String]
+    var readOnly: Bool
     var allowNative: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case version, host, port, path, token, tailscaleHostname, tailscaleIPs, readOnly, allowNative
+    }
+
+    init(token: String, tailscaleHostname: String, tailscaleIPs: [String], readOnly: Bool, allowNative: Bool) {
+        self.token = token
+        self.tailscaleHostname = tailscaleHostname
+        self.tailscaleIPs = tailscaleIPs
+        self.readOnly = readOnly
+        self.allowNative = allowNative
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
+        host = try values.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
+        port = try values.decodeIfPresent(Int.self, forKey: .port) ?? 7362
+        path = try values.decodeIfPresent(String.self, forKey: .path) ?? "/notescli"
+        token = try values.decode(String.self, forKey: .token)
+        tailscaleHostname = try values.decode(String.self, forKey: .tailscaleHostname)
+        tailscaleIPs = try values.decodeIfPresent([String].self, forKey: .tailscaleIPs) ?? []
+        readOnly = try values.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+        allowNative = try values.decodeIfPresent(Bool.self, forKey: .allowNative) ?? false
+    }
 
     var endpoint: String { "https://\(tailscaleHostname)\(path)" }
     var allowedHosts: Set<String> {
@@ -53,38 +80,81 @@ enum TailscaleMCP {
         return value
     }
 
-    static func install(executable: String, allowNative: Bool) throws -> MCPHTTPConfiguration {
+    static func install(executable: String, readOnly: Bool, allowNative: Bool) throws -> MCPHTTPConfiguration {
+        guard CapabilityHostClient.isAvailable() else {
+            throw NotesError("capability_host_required", "Install and start NotesCLI Capability Host before publishing MCP.",
+                             hint: "Run 'notescli onboard'.")
+        }
         let tailscale = try tailscaleStatus()
+        let existingConfiguration = try? loadConfiguration()
+        let expectedTarget = "http://127.0.0.1:\(existingConfiguration?.port ?? 7362)"
+        let previousRoute = routeTarget(binary: tailscale.binary, path: "/notescli")
+        if let target = previousRoute, target != expectedTarget {
+            throw NotesError("tailscale_route_not_owned", "Refusing to replace a Tailscale /notescli route that points somewhere else.")
+        }
+        let previousConfigData = try? Data(contentsOf: MCPHTTPPaths.config)
+        let previousAgentData = try? Data(contentsOf: MCPHTTPPaths.launchAgent)
+        let previousAgentRunning = launchctl(["print", "gui/\(getuid())/\(label)"]).status == 0
         var config: MCPHTTPConfiguration
-        if let existing = try? loadConfiguration() { config = existing }
+        if let existingConfiguration { config = existingConfiguration }
         else {
             config = MCPHTTPConfiguration(token: try newToken(), tailscaleHostname: tailscale.hostname,
-                                          tailscaleIPs: tailscale.ips, allowNative: allowNative)
+                                          tailscaleIPs: tailscale.ips, readOnly: readOnly, allowNative: allowNative)
         }
         config.tailscaleHostname = tailscale.hostname
         config.tailscaleIPs = tailscale.ips
+        config.readOnly = readOnly
         config.allowNative = allowNative
-        try save(config)
-        try installLaunchAgent(executable: stableExecutable(executable))
-        let result = run(tailscale.binary, ["serve", "--bg", "--https=443", "--set-path=\(config.path)", "http://127.0.0.1:\(config.port)"],
-                         environment: ["TAILSCALE_BE_CLI": "1"])
-        guard result.status == 0 else {
-            throw NotesError("tailscale_serve_failed", result.output.isEmpty ? "Tailscale could not publish the NotesCLI endpoint." : result.output)
+        do {
+            try save(config)
+            try installLaunchAgent(executable: stableExecutable(executable))
+            try waitForHealth("http://127.0.0.1:\(config.port)/health", code: "http_service_failed")
+            let result = run(tailscale.binary, ["serve", "--bg", "--https=443", "--set-path=\(config.path)", "http://127.0.0.1:\(config.port)"],
+                             environment: ["TAILSCALE_BE_CLI": "1"])
+            guard result.status == 0 else {
+                throw NotesError("tailscale_serve_failed", result.output.isEmpty ? "Tailscale could not publish the NotesCLI endpoint." : result.output)
+            }
+            try waitForHealth(config.endpoint + "/health", code: "tailscale_endpoint_unhealthy")
+            return config
+        } catch {
+            let installError = error
+            do {
+                try rollbackInstall(binary: tailscale.binary, config: config, previousRoute: previousRoute,
+                                    previousConfigData: previousConfigData, previousAgentData: previousAgentData,
+                                    previousAgentRunning: previousAgentRunning)
+            } catch {
+                throw NotesError("tailscale_rollback_failed",
+                                 "Tailscale MCP setup failed (\(installError)). Restoring the previous setup also failed (\(error)).")
+            }
+            throw installError
         }
-        return config
     }
 
-    static func uninstall() throws {
+    static func uninstall(keepConfig: Bool = false) throws -> String {
+        let config = try? loadConfiguration()
+        var result = "removed"
         if let binary = tailscaleBinary() {
-            let result = run(binary, ["serve", "--https=443", "--set-path=/notescli", "off"], environment: ["TAILSCALE_BE_CLI": "1"])
-            if result.status != 0, !result.output.lowercased().contains("not found") {
-                throw NotesError("tailscale_serve_failed", result.output.isEmpty ? "Tailscale could not remove the NotesCLI endpoint." : result.output)
+            let path = config?.path ?? "/notescli"
+            let expected = "http://127.0.0.1:\(config?.port ?? 7362)"
+            if let target = routeTarget(binary: binary, path: path) {
+                if target == expected {
+                    let removal = run(binary, ["serve", "--https=443", "--set-path=\(path)", "off"], environment: ["TAILSCALE_BE_CLI": "1"])
+                    if removal.status != 0, !removal.output.lowercased().contains("not found") {
+                        throw NotesError("tailscale_serve_failed", removal.output.isEmpty ? "Tailscale could not remove the NotesCLI endpoint." : removal.output)
+                    }
+                } else {
+                    result = "kept foreign route"
+                }
             }
         }
         _ = launchctl(["bootout", "gui/\(getuid())", MCPHTTPPaths.launchAgent.path])
         if FileManager.default.fileExists(atPath: MCPHTTPPaths.launchAgent.path) {
             try FileManager.default.removeItem(at: MCPHTTPPaths.launchAgent)
         }
+        if !keepConfig, FileManager.default.fileExists(atPath: MCPHTTPPaths.config.path) {
+            try FileManager.default.removeItem(at: MCPHTTPPaths.config)
+        }
+        return result
     }
 
     static func rotateToken() throws {
@@ -96,21 +166,15 @@ enum TailscaleMCP {
     static func endpointStatus() -> [String: Any] {
         let config = try? loadConfiguration()
         let job = launchctl(["print", "gui/\(getuid())/\(label)"])
-        let serve = tailscaleBinary().map { run($0, ["serve", "status", "--json"], environment: ["TAILSCALE_BE_CLI": "1"]) }
-        let mounted: Bool
-        if let serve, serve.status == 0, let data = serve.output.data(using: .utf8),
-           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let web = root["Web"] as? [String: Any] {
-            mounted = web.values.contains { value in
-                guard let site = value as? [String: Any], let handlers = site["Handlers"] as? [String: Any] else { return false }
-                return handlers["/notescli"] != nil
-            }
-        } else { mounted = false }
+        let mounted = config.map { value in
+            tailscaleBinary().flatMap { routeTarget(binary: $0, path: value.path) } == "http://127.0.0.1:\(value.port)"
+        } ?? false
         return [
             "configured": config != nil,
             "running": job.status == 0,
             "mounted": mounted,
             "endpoint": config?.endpoint ?? NSNull(),
+            "read_only": config?.readOnly ?? false,
             "allow_native": config?.allowNative ?? false,
         ]
     }
@@ -121,6 +185,57 @@ enum TailscaleMCP {
         let data = try JSONEncoder().encode(config) + Data("\n".utf8)
         try data.write(to: MCPHTTPPaths.config, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: MCPHTTPPaths.config.path)
+    }
+
+    private static func rollbackInstall(binary: String, config: MCPHTTPConfiguration, previousRoute: String?,
+                                        previousConfigData: Data?, previousAgentData: Data?,
+                                        previousAgentRunning: Bool) throws {
+        let domain = "gui/\(getuid())"
+        _ = launchctl(["bootout", domain, MCPHTTPPaths.launchAgent.path])
+        for _ in 0..<20 {
+            if launchctl(["print", "\(domain)/\(label)"]).status != 0 { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard launchctl(["print", "\(domain)/\(label)"]).status != 0 else {
+            throw NotesError("tailscale_rollback_failed", "The replacement MCP service did not stop during rollback.")
+        }
+        if let previousConfigData {
+            try previousConfigData.write(to: MCPHTTPPaths.config, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: MCPHTTPPaths.config.path)
+        } else {
+            try? FileManager.default.removeItem(at: MCPHTTPPaths.config)
+        }
+        if let previousAgentData {
+            try previousAgentData.write(to: MCPHTTPPaths.launchAgent, options: .atomic)
+            if previousAgentRunning {
+                let restored = launchctl(["bootstrap", domain, MCPHTTPPaths.launchAgent.path])
+                guard restored.status == 0 else {
+                    throw NotesError("tailscale_rollback_failed", restored.output.isEmpty ?
+                                     "The previous MCP service could not be restarted." : restored.output)
+                }
+                if let previousConfigData,
+                   let previous = try? JSONDecoder().decode(MCPHTTPConfiguration.self, from: previousConfigData) {
+                    try waitForHealth("http://127.0.0.1:\(previous.port)/health", code: "tailscale_rollback_failed")
+                }
+            }
+        } else {
+            try? FileManager.default.removeItem(at: MCPHTTPPaths.launchAgent)
+        }
+        if let previousRoute {
+            let restored = run(binary, ["serve", "--bg", "--https=443", "--set-path=\(config.path)", previousRoute],
+                               environment: ["TAILSCALE_BE_CLI": "1"])
+            guard restored.status == 0, routeTarget(binary: binary, path: config.path) == previousRoute else {
+                throw NotesError("tailscale_rollback_failed", restored.output.isEmpty ?
+                                 "The previous Tailscale route could not be restored." : restored.output)
+            }
+        } else if routeTarget(binary: binary, path: config.path) == "http://127.0.0.1:\(config.port)" {
+            let removed = run(binary, ["serve", "--https=443", "--set-path=\(config.path)", "off"],
+                              environment: ["TAILSCALE_BE_CLI": "1"])
+            guard removed.status == 0, routeTarget(binary: binary, path: config.path) == nil else {
+                throw NotesError("tailscale_rollback_failed", removed.output.isEmpty ?
+                                 "The failed Tailscale route could not be removed." : removed.output)
+            }
+        }
     }
 
     private static func newToken() throws -> String {
@@ -148,7 +263,7 @@ enum TailscaleMCP {
             "KeepAlive": true,
             "LimitLoadToSessionType": "Aqua",
             "ProcessType": "Background",
-            "EnvironmentVariables": ["NO_COLOR": "1"],
+            "EnvironmentVariables": ["NO_COLOR": "1", "NOTESCLI_CAPABILITY_HOST": "force"],
             "StandardOutPath": MCPHTTPPaths.log.path,
             "StandardErrorPath": MCPHTTPPaths.log.path,
         ]
@@ -158,6 +273,10 @@ enum TailscaleMCP {
         try data.write(to: MCPHTTPPaths.launchAgent, options: .atomic)
         let domain = "gui/\(getuid())"
         _ = launchctl(["bootout", domain, MCPHTTPPaths.launchAgent.path])
+        for _ in 0..<20 {
+            if launchctl(["print", "\(domain)/\(label)"]).status != 0 { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
         let result = launchctl(["bootstrap", domain, MCPHTTPPaths.launchAgent.path])
         guard result.status == 0 else {
             throw NotesError("http_service_failed", result.output.isEmpty ? "launchd could not start the NotesCLI MCP endpoint." : result.output)
@@ -183,9 +302,33 @@ enum TailscaleMCP {
         return TailnetStatus(binary: binary, hostname: hostname, ips: node["TailscaleIPs"] as? [String] ?? [])
     }
 
+    private static func waitForHealth(_ url: String, code: String) throws {
+        var last = ""
+        for _ in 0..<20 {
+            let result = run("/usr/bin/curl", ["--fail", "--silent", "--show-error", "--max-time", "2", url])
+            if result.status == 0 { return }
+            last = result.output
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        throw NotesError(code, last.isEmpty ? "The NotesCLI MCP endpoint did not become healthy." : last)
+    }
+
     private static func tailscaleBinary() -> String? {
         for path in ["/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
             where FileManager.default.isExecutableFile(atPath: path) { return path }
+        return nil
+    }
+
+    private static func routeTarget(binary: String, path: String) -> String? {
+        let serve = run(binary, ["serve", "status", "--json"], environment: ["TAILSCALE_BE_CLI": "1"])
+        guard serve.status == 0, let data = serve.output.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let web = root["Web"] as? [String: Any] else { return nil }
+        for value in web.values {
+            guard let site = value as? [String: Any], let handlers = site["Handlers"] as? [String: Any],
+                  let handler = handlers[path] as? [String: Any], let proxy = handler["Proxy"] as? String else { continue }
+            return proxy
+        }
         return nil
     }
 

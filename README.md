@@ -2,7 +2,7 @@
 
 NotesCLI is a macOS command and MCP server for Apple Notes. It reads a private copy of the Notes database. By default, it sends writes through Notes.app scripting.
 
-You need macOS 14 or later. Reading Notes requires Full Disk Access. Creating or changing notes requires Automation access to Notes.
+You need macOS 14 or later. Full-fidelity reads require Full Disk Access. Without it, accounts, folders, lists, search, and note text use a limited Notes Automation reader. Creating or changing notes requires Automation access to Notes.
 
 ## Install
 
@@ -16,8 +16,10 @@ notescli setup
 From a release archive:
 
 ```bash
-tar -xzf notescli-1.0.3-macos-universal.tar.gz
+tar -xzf notescli-1.1.0-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
+mkdir -p "$HOME/Applications"
+ditto "NotesCLI Capability Host.app" "$HOME/Applications/NotesCLI Capability Host.app"
 notescli setup
 ```
 
@@ -42,7 +44,7 @@ notescli permissions
 notescli doctor
 ```
 
-`notescli permissions` opens the Full Disk Access pane and makes a harmless Apple Event request to Notes. Grant access to the app that starts NotesCLI: your terminal for shell use, or Claude, Codex, Cursor, or VS Code for MCP use.
+`notescli setup` installs NotesCLI Capability Host.app. Grant Full Disk Access, Automation, and Speech Recognition to that app once. Terminal, Claude, Codex, Cursor, and VS Code send Notes commands through its private socket.
 
 ## Common commands
 
@@ -91,6 +93,13 @@ notescli mcp install --client all --read-only
 ```
 
 Supported clients are Claude Code, Claude Desktop, Codex, Cursor, and VS Code. Existing config files are backed up before a change. See [MCP setup](docs/mcp.md) for paths, removal, and plugin installation.
+
+Publish MCP on this Mac's tailnet:
+
+```bash
+notescli mcp install --client tailscale --allow-native
+notescli mcp token show
+```
 
 The repository includes an agent skill at [`skills/notescli/SKILL.md`](skills/notescli/SKILL.md). `notescli mcp install` points to it after installing the server entry.
 

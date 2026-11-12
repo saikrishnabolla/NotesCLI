@@ -2,15 +2,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${NOTESCLI_VERSION:-1.0.0}"
+VERSION="${NOTESCLI_VERSION:-1.1.0}"
 IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bolla (GXKRUPGJVF)}"
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
 HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"
 ENTITLEMENTS="$ROOT/packaging/macos/notescli.entitlements"
 OUTPUT_DIR="${NOTESCLI_RELEASE_DIR:-$ROOT/dist}"
+NOTARY_PROFILE="${NOTESCLI_NOTARY_PROFILE:-}"
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "build-release.sh requires macOS." >&2; exit 1; }
 [[ -f "$INFO_PLIST" && -f "$HOST_INFO_PLIST" && -f "$ENTITLEMENTS" ]] || { echo "Release metadata is missing." >&2; exit 1; }
+if [[ "$IDENTITY" != "-" && -z "$NOTARY_PROFILE" ]]; then
+    echo "NOTESCLI_NOTARY_PROFILE is required for Developer ID releases." >&2
+    exit 1
+fi
 
 mkdir -p "$OUTPUT_DIR"
 STAGING="$(mktemp -d "$ROOT/.build/notescli-release.XXXXXX")"
@@ -19,7 +24,7 @@ RELEASE_INFO_PLIST="$STAGING/Info.plist"
 cp "$INFO_PLIST" "$RELEASE_INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$RELEASE_INFO_PLIST"
 HOST_APP="$STAGING/NotesCLI Capability Host.app"
-mkdir -p "$HOST_APP/Contents/MacOS" "$HOST_APP/Contents/Resources"
+mkdir -p "$HOST_APP/Contents/MacOS" "$HOST_APP/Contents/Helpers"
 cp "$HOST_INFO_PLIST" "$HOST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$HOST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$HOST_APP/Contents/Info.plist"
@@ -45,11 +50,13 @@ else
     echo "Signing with $IDENTITY"
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$STAGING/notescli"
 fi
-cp "$STAGING/notescli" "$HOST_APP/Contents/Resources/notescli"
+cp "$STAGING/notescli" "$HOST_APP/Contents/Helpers/notescli"
 if [[ "$IDENTITY" == "-" ]]; then
-    codesign --force --deep --sign - "$HOST_APP"
+    codesign --force --sign - "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
+    codesign --force --sign - "$HOST_APP"
 else
-    codesign --force --deep --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP"
+    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
+    codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP"
 fi
 
 ARCHITECTURES="$(lipo -archs "$STAGING/notescli")"
@@ -58,8 +65,18 @@ ARCHITECTURES="$(lipo -archs "$STAGING/notescli")"
     exit 1
 }
 echo "Architectures: $ARCHITECTURES"
+for BINARY in "$HOST_APP/Contents/MacOS/NotesCLI Capability Host" "$HOST_APP/Contents/Helpers/notescli"; do
+    INNER_ARCHITECTURES="$(lipo -archs "$BINARY")"
+    [[ " $INNER_ARCHITECTURES " == *" arm64 "* && " $INNER_ARCHITECTURES " == *" x86_64 "* ]] || {
+        echo "Release binary is not universal: $BINARY ($INNER_ARCHITECTURES)" >&2
+        exit 1
+    }
+done
 codesign --verify --strict --verbose=4 "$STAGING/notescli"
 codesign --verify --deep --strict --verbose=4 "$HOST_APP"
+[[ "$(codesign -d --verbose=4 "$STAGING/notescli" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli" ]]
+[[ "$(codesign -d --verbose=4 "$HOST_APP/Contents/Helpers/notescli" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli" ]]
+[[ "$(codesign -d --verbose=4 "$HOST_APP" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli.capability-host" ]]
 codesign -d --verbose=4 --entitlements - "$STAGING/notescli" 2>&1
 
 lipo "$STAGING/notescli" -thin x86_64 -output "$STAGING/notescli-x86_64"
@@ -82,11 +99,18 @@ echo "Embedded Info.plist: NSAppleEventsUsageDescription present"
 }
 echo "Embedded Info.plist: NSSpeechRecognitionUsageDescription present"
 
-set +e
-SPCTL_OUTPUT="$(spctl -a -t install -vv "$STAGING/notescli" 2>&1)"
-SPCTL_STATUS=$?
-set -e
-printf 'Gatekeeper assessment (exit %s):\n%s\n' "$SPCTL_STATUS" "$SPCTL_OUTPUT"
+if [[ -n "$NOTARY_PROFILE" ]]; then
+    echo "Notarizing and stapling NotesCLI Capability Host.app"
+    ditto -c -k --keepParent "$HOST_APP" "$STAGING/NotesCLI-Capability-Host.zip"
+    xcrun notarytool submit "$STAGING/NotesCLI-Capability-Host.zip" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$HOST_APP"
+    xcrun stapler validate "$HOST_APP"
+    rm -f -- "$STAGING/NotesCLI-Capability-Host.zip"
+fi
+
+echo "Validating distributed artifacts with Gatekeeper"
+spctl -a -t execute -vv "$STAGING/notescli"
+spctl -a -t execute -vv "$HOST_APP"
 
 ZIP="$OUTPUT_DIR/notescli-$VERSION-macos-universal.zip"
 TARBALL="$OUTPUT_DIR/notescli-$VERSION-macos-universal.tar.gz"

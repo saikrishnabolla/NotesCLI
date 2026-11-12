@@ -30,4 +30,13 @@ final class SpeechHelperTests: XCTestCase {
             XCTAssertEqual(($0 as? NotesError)?.code, "speech_helper_failed")
         }
     }
+
+    func testHelperTimeoutTerminatesAStalledChild() throws {
+        let helper = try script("sleep 30")
+        let started = Date()
+        XCTAssertThrowsError(try SpeechHelper.run(helper, ["--status"], as: Int.self, timeout: 0.1)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "speech_helper_timeout")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+    }
 }

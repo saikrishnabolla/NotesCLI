@@ -1,9 +1,10 @@
 # Connect NotesCLI to MCP clients
 
-NotesCLI runs a stdio MCP server:
+NotesCLI runs a stdio MCP server and an authenticated HTTPS server over Tailscale:
 
 ```bash
 notescli mcp
+notescli mcp install --client tailscale
 ```
 
 The default server exposes 52 tools. Read-only mode exposes 29 read tools. `notescli mcp --allow-native` exposes 106 tools in total.
@@ -87,14 +88,28 @@ The installer records the absolute path of the running `notescli` binary. It upd
 
 Restart desktop clients after changing their config.
 
+## Tailscale endpoint
+
+```bash
+notescli mcp install --client tailscale --allow-native
+notescli mcp token show
+notescli mcp token rotate
+```
+
+The installer starts a loopback-only LaunchAgent and mounts `/notescli` with `tailscale serve`. It keeps existing Serve routes. Requests need the bearer token printed by `mcp token show`. Remote MCP hides tools that accept arbitrary local file paths.
+
+The server supports MCP through the 2026-07-28 revision. It runs independent reads in parallel, serializes writes, handles cancellation, and serves an interactive result card to clients that support MCP Apps.
+
 ## Remove client config
 
 ```bash
 notescli mcp uninstall --client cursor
 notescli mcp uninstall --client all
+notescli uninstall --dry-run
+notescli uninstall
 ```
 
-Removal deletes only the `notescli` entry and backs up a file before changing it.
+Removal touches only entries and files recorded by NotesCLI. The full uninstaller also removes the NotesCLI Tailscale route, LaunchAgents, capability host, socket, and manifest. `--keep-config` keeps onboarding and HTTP configuration.
 
 ## Use the plugins
 

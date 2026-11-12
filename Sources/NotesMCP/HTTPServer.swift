@@ -7,6 +7,8 @@ public enum HTTPMCPConfigurationError: Error, Equatable, Sendable {
     case invalidBodyLimit
     case invalidTimeout
     case invalidConcurrencyLimit
+    case invalidSessionLimit
+    case invalidSessionTTL
 }
 
 public struct HTTPMCPEndpoint: Equatable, Sendable {
@@ -16,6 +18,7 @@ public struct HTTPMCPEndpoint: Equatable, Sendable {
 
 public final class HTTPMCPServer: @unchecked Sendable {
     public typealias Handler = @Sendable ([String: Any]) -> [String: Any]?
+    public typealias HandlerFactory = @Sendable () -> Handler
     public typealias TokenProvider = @Sendable () -> String?
 
     public struct Configuration: Sendable {
@@ -25,6 +28,8 @@ public final class HTTPMCPServer: @unchecked Sendable {
         public let headerTimeout: TimeInterval
         public let bodyTimeout: TimeInterval
         public let maximumConcurrentConnections: Int
+        public let maximumSessions: Int
+        public let sessionTTL: TimeInterval
         let authorizationPolicy: HTTPAuthorizationPolicy
         let tokenProvider: TokenProvider
 
@@ -37,7 +42,9 @@ public final class HTTPMCPServer: @unchecked Sendable {
             maximumBodyBytes: Int = 4 * 1_024 * 1_024,
             headerTimeout: TimeInterval = 10,
             bodyTimeout: TimeInterval = 30,
-            maximumConcurrentConnections: Int = 16
+            maximumConcurrentConnections: Int = 16,
+            maximumSessions: Int = 128,
+            sessionTTL: TimeInterval = 30 * 60
         ) throws {
             guard (256...65_536).contains(maximumHeaderBytes) else {
                 throw HTTPMCPConfigurationError.invalidHeaderLimit
@@ -52,12 +59,20 @@ public final class HTTPMCPServer: @unchecked Sendable {
             guard (1...128).contains(maximumConcurrentConnections) else {
                 throw HTTPMCPConfigurationError.invalidConcurrencyLimit
             }
+            guard (1...1_024).contains(maximumSessions) else {
+                throw HTTPMCPConfigurationError.invalidSessionLimit
+            }
+            guard sessionTTL >= 0.05, sessionTTL <= 24 * 60 * 60 else {
+                throw HTTPMCPConfigurationError.invalidSessionTTL
+            }
             self.port = port
             self.maximumHeaderBytes = maximumHeaderBytes
             self.maximumBodyBytes = maximumBodyBytes
             self.headerTimeout = headerTimeout
             self.bodyTimeout = bodyTimeout
             self.maximumConcurrentConnections = maximumConcurrentConnections
+            self.maximumSessions = maximumSessions
+            self.sessionTTL = sessionTTL
             self.authorizationPolicy = try HTTPAuthorizationPolicy(
                 allowedHosts: allowedHosts,
                 allowedOrigins: allowedOrigins
@@ -80,18 +95,26 @@ public final class HTTPMCPServer: @unchecked Sendable {
         case headerTooLarge
     }
 
+    private struct LegacySession {
+        let handler: Handler
+        var lastAccess: UInt64
+        var activeRequests: Int
+    }
+
     private let configuration: Configuration
-    private let handler: Handler
+    private let handlerFactory: HandlerFactory
     private let stateLock = NSLock()
+    private let sessionLock = NSLock()
     private let acceptQueue = DispatchQueue(label: "notescli.mcp.http.accept")
     private let connectionQueue = DispatchQueue(label: "notescli.mcp.http.connections", attributes: .concurrent)
     private let connectionSlots: DispatchSemaphore
     private var running: RunningState?
     private var activeConnections: Set<Int32> = []
+    private var legacySessions: [String: LegacySession] = [:]
 
-    public init(configuration: Configuration, handler: @escaping Handler) {
+    public init(configuration: Configuration, handlerFactory: @escaping HandlerFactory) {
         self.configuration = configuration
-        self.handler = handler
+        self.handlerFactory = handlerFactory
         self.connectionSlots = DispatchSemaphore(value: configuration.maximumConcurrentConnections)
     }
 
@@ -172,6 +195,7 @@ public final class HTTPMCPServer: @unchecked Sendable {
         state.source.cancel()
         for descriptor in connections { Darwin.shutdown(descriptor, SHUT_RDWR) }
         _ = state.cancelled.wait(timeout: .now() + 2)
+        sessionLock.withLock { legacySessions.removeAll() }
     }
 
     public var localEndpoint: HTTPMCPEndpoint? {
@@ -276,6 +300,11 @@ public final class HTTPMCPServer: @unchecked Sendable {
             return
         }
 
+        guard Self.isMCPPath(Self.path(of: head.target)) else {
+            Self.sendResponse(descriptor, status: 404, body: Self.errorBody(code: -32601, message: "Not found"))
+            return
+        }
+
         switch configuration.authorizationPolicy.evaluate(head.headers, bearerToken: configuration.tokenProvider()) {
         case .allowed:
             break
@@ -346,15 +375,54 @@ public final class HTTPMCPServer: @unchecked Sendable {
             Self.sendResponse(descriptor, status: 400, body: Self.errorBody(code: -32020, message: "MCP transport headers do not match request"))
             return
         }
-        let protocolHeaders = ["MCP-Protocol-Version": protocolVersion]
-
-        let response = handler(request)
+        let method = request["method"] as? String
+        let isLegacy = protocolVersion != MCPProtocol.modernVersion
+        var sessionID: String?
+        let response: [String: Any]?
+        if isLegacy, method == "initialize" {
+            guard head.headers.values(named: "mcp-session-id").isEmpty else {
+                Self.sendResponse(descriptor, status: 400,
+                                  body: Self.errorBody(code: -32020, message: "Mcp-Session-Id is not valid during initialize"))
+                return
+            }
+            let sessionHandler = handlerFactory()
+            response = sessionHandler(request)
+            if request["id"] != nil, response?["error"] == nil {
+                guard let established = storeSession(handler: sessionHandler) else {
+                    Self.sendResponse(descriptor, status: 503,
+                                      body: Self.errorBody(code: -32603, message: "Session capacity reached"))
+                    return
+                }
+                sessionID = established
+            }
+        } else if isLegacy {
+            let suppliedSessionIDs = head.headers.values(named: "mcp-session-id")
+            guard suppliedSessionIDs.count == 1, !suppliedSessionIDs[0].isEmpty else {
+                Self.sendResponse(descriptor, status: 400,
+                                  body: Self.errorBody(code: -32020, message: "Mcp-Session-Id is required"))
+                return
+            }
+            let suppliedSessionID = suppliedSessionIDs[0]
+            sessionID = suppliedSessionID
+            guard let sessionHandler = acquireSession(suppliedSessionID) else {
+                Self.sendResponse(descriptor, status: 404,
+                                  body: Self.errorBody(code: -32021, message: "MCP session not found"))
+                return
+            }
+            response = sessionHandler(request)
+            releaseSession(suppliedSessionID)
+        } else {
+            response = handlerFactory()(request)
+        }
+        let responseVersion = ((response?["result"] as? [String: Any])?["protocolVersion"] as? String) ?? protocolVersion
+        var protocolHeaders = ["MCP-Protocol-Version": responseVersion]
+        if let sessionID { protocolHeaders["Mcp-Session-Id"] = sessionID }
         if request["id"] == nil {
             Self.sendResponse(descriptor, status: 202, body: nil, headers: protocolHeaders)
             return
         }
         guard let response else {
-            Self.sendResponse(descriptor, status: 500, body: Self.errorBody(code: -32603, message: "Internal error"), headers: protocolHeaders)
+            Self.sendResponse(descriptor, status: 202, body: nil, headers: protocolHeaders)
             return
         }
         guard JSONSerialization.isValidJSONObject(response), let responseData = Self.jsonData(response) else {
@@ -362,6 +430,62 @@ public final class HTTPMCPServer: @unchecked Sendable {
             return
         }
         Self.sendResponse(descriptor, status: Self.httpStatus(for: response), body: responseData, headers: protocolHeaders)
+    }
+
+    private func storeSession(handler: @escaping Handler) -> String? {
+        sessionLock.withLock {
+            let now = DispatchTime.now().uptimeNanoseconds
+            removeExpiredSessions(now: now)
+            if legacySessions.count >= configuration.maximumSessions {
+                guard let oldest = legacySessions
+                    .filter({ $0.value.activeRequests == 0 })
+                    .min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key else { return nil }
+                legacySessions.removeValue(forKey: oldest)
+            }
+            var identifier: String
+            repeat { identifier = Self.randomSessionID() } while legacySessions[identifier] != nil
+            legacySessions[identifier] = LegacySession(handler: handler, lastAccess: now, activeRequests: 0)
+            return identifier
+        }
+    }
+
+    private func acquireSession(_ identifier: String) -> Handler? {
+        sessionLock.withLock {
+            let now = DispatchTime.now().uptimeNanoseconds
+            removeExpiredSessions(now: now)
+            guard var session = legacySessions[identifier] else { return nil }
+            session.lastAccess = now
+            session.activeRequests += 1
+            legacySessions[identifier] = session
+            return session.handler
+        }
+    }
+
+    private func releaseSession(_ identifier: String) {
+        sessionLock.withLock {
+            guard var session = legacySessions[identifier] else { return }
+            session.activeRequests = max(0, session.activeRequests - 1)
+            session.lastAccess = DispatchTime.now().uptimeNanoseconds
+            legacySessions[identifier] = session
+        }
+    }
+
+    private func removeExpiredSessions(now: UInt64) {
+        let ttl = UInt64(configuration.sessionTTL * 1_000_000_000)
+        legacySessions = legacySessions.filter { _, session in
+            session.activeRequests > 0 || now < session.lastAccess || now - session.lastAccess < ttl
+        }
+    }
+
+    private static func randomSessionID() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        bytes.withUnsafeMutableBytes { buffer in
+            arc4random_buf(buffer.baseAddress, buffer.count)
+        }
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     private func readRequestHead(_ descriptor: Int32) throws -> Data {
@@ -501,14 +625,26 @@ public final class HTTPMCPServer: @unchecked Sendable {
     }
 
     private static func validatedProtocolVersion(_ headers: HTTPHeaders, request: [String: Any]) -> String? {
-        guard let method = request["method"] as? String,
-              headers.singleValue(named: "mcp-method") == method,
-              let params = request["params"] as? [String: Any],
-              let metadata = params["_meta"] as? [String: Any],
-              let bodyVersion = metadata["io.modelcontextprotocol/protocolVersion"] as? String,
-              headers.singleValue(named: "mcp-protocol-version") == bodyVersion else {
-            return nil
+        guard let method = request["method"] as? String else { return nil }
+        let params = request["params"] as? [String: Any] ?? [:]
+        let metadata = params["_meta"] as? [String: Any]
+        let headerVersion = headers.singleValue(named: "mcp-protocol-version")
+
+        guard let bodyVersion = metadata?[MCPProtocol.protocolVersionKey] as? String else {
+            if method == "initialize" {
+                guard let requested = params["protocolVersion"] as? String,
+                      requested != MCPProtocol.modernVersion else { return nil }
+                if let headerVersion, headerVersion != requested { return nil }
+                return MCPProtocol.legacyVersions.contains(requested) ? requested : MCPProtocol.legacyVersions[0]
+            }
+            guard let headerVersion, MCPProtocol.legacyVersions.contains(headerVersion) else { return nil }
+            if let declaredMethod = headers.singleValue(named: "mcp-method"), declaredMethod != method { return nil }
+            return headerVersion
         }
+
+        guard bodyVersion == MCPProtocol.modernVersion,
+              headerVersion == bodyVersion,
+              headers.singleValue(named: "mcp-method") == method else { return nil }
         let bodyName: String?
         switch method {
         case "tools/call", "prompts/get":
@@ -530,6 +666,10 @@ public final class HTTPMCPServer: @unchecked Sendable {
 
     private static func isHealthPath(_ path: String) -> Bool {
         path == "/health" || path == "/notescli/health"
+    }
+
+    private static func isMCPPath(_ path: String) -> Bool {
+        path == "/" || path == "/notescli"
     }
 
     private static func httpStatus(for response: [String: Any]) -> Int {

@@ -26,14 +26,90 @@ public enum CapabilityHostPaths {
 
 public struct CapabilityHostRequest: Codable, Sendable {
     public static let currentProtocol = 1
+    public static let maximumEncodedBytes = 1_048_576
+    public static let allowedEnvironmentKeys: Set<String> = [
+        "TERM", "NO_COLOR", "LANG", "LC_ALL", "TZ", "NOTESCLI_BACKEND", "NOTESCLI_ENGINE", "NOTESCLI_WRITE_FOLDERS",
+    ]
     public var protocolVersion: Int
     public var arguments: [String]
     public var workingDirectory: String
+    public var environment: [String: String]
 
     public init(arguments: [String], workingDirectory: String) {
         protocolVersion = Self.currentProtocol
         self.arguments = arguments
         self.workingDirectory = workingDirectory
+        environment = Self.allowedEnvironmentKeys.reduce(into: [:]) { values, key in
+            if let value = ProcessInfo.processInfo.environment[key], value.utf8.count <= 4_096 { values[key] = value }
+        }
+    }
+}
+
+public enum CapabilityHostPolicy {
+    private static let allowedCommands: Set<String> = [
+        "accounts", "folders", "list", "show", "search", "tags", "recent", "pinned", "capabilities", "help",
+        "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "checklist", "pin",
+        "unpin", "tag", "link", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
+        "write", "fetch", "index", "stats", "count", "show-many", "selection", "backlinks", "raw", "deleted",
+        "smart-folders", "prepend", "insert-under-heading", "replace-section", "replace-text", "exists", "history",
+        "diff", "undo", "revert", "journal", "smart-folder", "permissions", "mcp", "anchor", "wait-sync",
+        "native-doctor", "native-checklist", "native-pin", "native-tag", "native-link", "native-text", "native-format",
+        "native-attachment", "native-table", "native-duplicate", "native-restore", "native-move-folder", "write-markdown",
+    ]
+    private static let pathOptions: Set<String> = [
+        "--file", "--attach", "--output", "--out", "--path", "--save", "--preview", "--svg", "--transcript-path",
+        "--transcript-file", "--template", "--assets", "--directory", "--exec",
+    ]
+    private static let localMCPActions: Set<String> = ["install", "uninstall", "status", "token", "config", "remove"]
+
+    public static func allows(_ arguments: [String]) -> Bool {
+        guard let index = commandIndex(arguments) else { return allowsHome(arguments) }
+        let command = arguments[index]
+        if command == "doctor" { return arguments == ["doctor", "--for-agent", "--json"] }
+        guard allowedCommands.contains(command), !containsPathOption(arguments) else { return false }
+        if command == "add", !containsOption("--body", in: arguments), !arguments.contains("--stdin") { return false }
+        if arguments[index] == "mcp", index + 1 < arguments.count,
+           localMCPActions.contains(arguments[index + 1]) { return false }
+        return true
+    }
+
+    private static func allowsHome(_ arguments: [String]) -> Bool {
+        var index = 0
+        while index < arguments.count {
+            switch arguments[index] {
+            case "--json", "--quiet", "--no-recent", "--read-only": index += 1
+            case "--backend", "--engine":
+                guard index + 1 < arguments.count else { return false }
+                index += 2
+            default:
+                guard arguments[index].hasPrefix("--backend=") || arguments[index].hasPrefix("--engine=") else { return false }
+                index += 1
+            }
+        }
+        return true
+    }
+
+    private static func containsPathOption(_ arguments: [String]) -> Bool {
+        arguments.contains { argument in
+            if pathOptions.contains(argument) { return true }
+            guard let equals = argument.firstIndex(of: "=") else { return false }
+            return pathOptions.contains(String(argument[..<equals]))
+        }
+    }
+
+    private static func containsOption(_ option: String, in arguments: [String]) -> Bool {
+        arguments.contains { $0 == option || $0.hasPrefix(option + "=") }
+    }
+
+    public static func commandIndex(_ arguments: [String]) -> Int? {
+        var index = 0
+        while index < arguments.count {
+            let value = arguments[index]
+            if value == "--backend" || value == "--engine" { index += 2; continue }
+            if value.hasPrefix("-") { index += 1; continue }
+            return index
+        }
+        return nil
     }
 }
 
@@ -83,6 +159,12 @@ private func alignedControlSize(_ size: Int) -> Int { (size + 3) & ~3 }
 private var controlHeaderSize: Int { alignedControlSize(MemoryLayout<cmsghdr>.size) }
 
 public enum CapabilityHostClient {
+    public struct CapturedCommand: Sendable {
+        public var exitCode: Int32
+        public var stdout: Data
+        public var stderr: Data
+    }
+
     public static func isAvailable(socketURL: URL = CapabilityHostPaths.socket) -> Bool {
         var metadata = stat()
         guard lstat(socketURL.path, &metadata) == 0
@@ -132,7 +214,40 @@ public enum CapabilityHostClient {
         return exitCode
     }
 
+    public static func capture(arguments: [String], socketURL: URL = CapabilityHostPaths.socket) throws -> CapturedCommand {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notescli-host-capture-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outputURL = directory.appendingPathComponent("stdout")
+        let errorURL = directory.appendingPathComponent("stderr")
+        guard FileManager.default.createFile(atPath: outputURL.path, contents: nil,
+                                             attributes: [.posixPermissions: 0o600]),
+              FileManager.default.createFile(atPath: errorURL.path, contents: nil,
+                                             attributes: [.posixPermissions: 0o600]),
+              let input = FileHandle(forReadingAtPath: "/dev/null"),
+              let output = FileHandle(forWritingAtPath: outputURL.path),
+              let error = FileHandle(forWritingAtPath: errorURL.path) else {
+            throw CapabilityHostError.unavailable("Could not prepare capability-host output capture.")
+        }
+        defer {
+            try? input.close()
+            try? output.close()
+            try? error.close()
+        }
+        let status = try run(arguments: arguments, socketURL: socketURL,
+                             descriptors: [input.fileDescriptor, output.fileDescriptor, error.fileDescriptor])
+        try output.synchronize()
+        try error.synchronize()
+        return CapturedCommand(exitCode: status, stdout: try Data(contentsOf: outputURL),
+                               stderr: try Data(contentsOf: errorURL))
+    }
+
     private static func sendRequest(_ data: Data, descriptors: [Int32], socket: Int32) throws {
+        guard data.count <= CapabilityHostRequest.maximumEncodedBytes else {
+            throw CapabilityHostError.protocolFailure("The capability-host request is too large.")
+        }
         let payloadSize = MemoryLayout<Int32>.size * descriptors.count
         let controlSize = controlHeaderSize + alignedControlSize(payloadSize)
         var control = [UInt8](repeating: 0, count: controlSize)
@@ -155,8 +270,17 @@ public enum CapabilityHostClient {
                 }
             }
         }
-        guard sent == data.count else {
+        guard sent > 0 else {
             throw CapabilityHostError.unavailable("Could not send the command to the capability host.")
+        }
+        var offset = sent
+        while offset < data.count {
+            let count = data.withUnsafeBytes { bytes in
+                Darwin.send(socket, bytes.baseAddress?.advanced(by: offset), data.count - offset, MSG_NOSIGNAL)
+            }
+            if count > 0 { offset += count }
+            else if count < 0, errno == EINTR { continue }
+            else { throw CapabilityHostError.unavailable("Could not send the command to the capability host.") }
         }
     }
 
@@ -264,19 +388,19 @@ public final class CapabilityHostServer: @unchecked Sendable {
         var bytes = [UInt8](repeating: 0, count: 64 * 1024)
         let controlSize = controlHeaderSize + alignedControlSize(MemoryLayout<Int32>.size * 3)
         var control = [UInt8](repeating: 0, count: controlSize)
-        let received: (Int, Int) = bytes.withUnsafeMutableBytes { body in
+        let received: (Int, Int, Int32) = bytes.withUnsafeMutableBytes { body in
             var vector = iovec(iov_base: body.baseAddress, iov_len: body.count)
             return withUnsafeMutablePointer(to: &vector) { vectorPointer in
                 control.withUnsafeMutableBytes { ancillary in
                     var message = msghdr(msg_name: nil, msg_namelen: 0, msg_iov: vectorPointer, msg_iovlen: 1,
                                          msg_control: ancillary.baseAddress, msg_controllen: socklen_t(ancillary.count), msg_flags: 0)
                     let count = recvmsg(socket, &message, 0)
-                    return (count, Int(message.msg_controllen))
+                    return (count, Int(message.msg_controllen), message.msg_flags)
                 }
             }
         }
         let count = received.0
-        guard count > 0, let newline = bytes.prefix(count).firstIndex(of: 0x0a) else {
+        guard count > 0, received.2 & MSG_CTRUNC == 0 else {
             throw CapabilityHostError.protocolFailure("The capability-host request is invalid.")
         }
         var descriptors: [Int32] = []
@@ -294,10 +418,24 @@ public final class CapabilityHostServer: @unchecked Sendable {
             throw CapabilityHostError.protocolFailure("The capability-host request is missing standard descriptors.")
         }
         do {
-            let request = try JSONDecoder().decode(CapabilityHostRequest.self, from: Data(bytes[..<newline]))
+            var data = Data(bytes.prefix(count))
+            while !data.contains(0x0a), data.count < CapabilityHostRequest.maximumEncodedBytes {
+                let remaining = CapabilityHostRequest.maximumEncodedBytes - data.count
+                let next = recv(socket, &bytes, min(bytes.count, remaining), 0)
+                if next > 0 { data.append(contentsOf: bytes.prefix(next)); continue }
+                if next < 0, errno == EINTR { continue }
+                throw CapabilityHostError.protocolFailure("The capability-host request is incomplete.")
+            }
+            guard let newline = data.firstIndex(of: 0x0a) else {
+                throw CapabilityHostError.protocolFailure("The capability-host request is too large.")
+            }
+            let request = try JSONDecoder().decode(CapabilityHostRequest.self, from: Data(data[..<newline]))
             guard request.protocolVersion == CapabilityHostRequest.currentProtocol,
                   request.arguments.count <= 512,
-                  request.arguments.allSatisfy({ $0.utf8.count <= 64 * 1024 }) else {
+                  request.arguments.allSatisfy({ $0.utf8.count <= 512 * 1024 }),
+                  request.environment.count <= 16,
+                  Set(request.environment.keys).isSubset(of: CapabilityHostRequest.allowedEnvironmentKeys),
+                  request.environment.allSatisfy({ $0.key.utf8.count <= 128 && $0.value.utf8.count <= 4_096 }) else {
                 throw CapabilityHostError.protocolFailure("The capability-host request is not supported.")
             }
             return (request, descriptors)

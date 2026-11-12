@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.0
+
+### Added
+
+- A signed capability host keeps Full Disk Access, Automation, and Speech Recognition permissions in one app.
+- `notescli mcp install --client tailscale` publishes an authenticated HTTPS MCP endpoint on the tailnet.
+- Reads fall back to Notes Automation when Full Disk Access is missing and report `fidelity: "limited"`.
+- `doctor --for-agent --json`, resumable `onboard`, token rotation, and manifest-based uninstall.
+- MCP 2026-07-28, parallel reads, cancellation, and an MCP Apps result widget.
+
+### Security
+
+- The HTTP server binds to loopback, checks bearer tokens before reading request bodies, restricts hosts and origins, and caps requests at 4 MiB.
+- The capability host checks the caller and bundled CLI signatures, blocks path-bearing commands, and stops child processes when clients disconnect.
+
 ## 1.0.3
 
 ### Fixed

@@ -11,16 +11,26 @@ struct Backends {
     let writer: () throws -> any NotesWriting
     let openNote: (NoteID) throws -> Void
     let isFake: Bool
+    let fidelity: NotesReadFidelity
+    let unavailableFields: [String]
 
     static func make(_ name: String?) throws -> Backends {
         let name = name ?? ProcessInfo.processInfo.environment["NOTESCLI_BACKEND"] ?? "default"
         if name == "fake" {
             let fake = InMemoryNotes.sample()
-            return Backends(reader: fake, writer: { fake }, openNote: { _ in }, isFake: true)
+            return Backends(reader: fake, writer: { fake }, openNote: { _ in }, isFake: true,
+                            fidelity: .full, unavailableFields: [])
         }
         guard name == "default" else { throw NotesError("invalid_backend", "Unknown backend: \(name)") }
-        let reader = try makeReader()
-        return Backends(reader: reader, writer: { try makeWriter(reader: reader) }, openNote: openInNotes, isFake: false)
+        do {
+            let reader = try makeReader()
+            return Backends(reader: reader, writer: { try makeWriter(reader: reader) }, openNote: openInNotes,
+                            isFake: false, fidelity: .full, unavailableFields: [])
+        } catch let error as NotesError where error.code == "full_disk_access_denied" {
+            let reader = ScriptingNotesReader()
+            return Backends(reader: reader, writer: { try makeWriter(reader: reader) }, openNote: openInNotes,
+                            isFake: false, fidelity: reader.fidelity, unavailableFields: reader.unavailableFields)
+        }
     }
 }
 

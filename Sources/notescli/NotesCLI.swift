@@ -1,4 +1,5 @@
 import ArgumentParser
+@preconcurrency import Dispatch
 import Foundation
 import NotesCore
 import NotesMCP
@@ -10,8 +11,9 @@ import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
+    nonisolated(unsafe) private static var hostParentMonitor: DispatchSourceProcess?
     static let version = notesCLIVersion
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self, HostCommand.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self, HostCommand.self, UninstallCommand.self])
     @OptionGroup var options: GlobalOptions
     @Flag(name: .customLong("no-recent"), help: "Hide recently edited titles on the home screen. Also set by NOTESCLI_HOME_RECENT=0.")
     var noRecent = false
@@ -38,6 +40,7 @@ struct NotesCLI: ParsableCommand {
             if shouldUseCapabilityHost() {
                 Darwin.exit(try CapabilityHostClient.run(arguments: Array(CommandLine.arguments.dropFirst())))
             }
+            startHostParentMonitor()
             var command = try parseAsRoot()
             try command.run()
         }
@@ -56,36 +59,37 @@ struct NotesCLI: ParsableCommand {
         }
     }
 
+    private static func startHostParentMonitor() {
+        guard ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] == "1" else { return }
+        let parent = getppid()
+        guard parent > 1 else { Darwin.exit(70) }
+        let source = DispatchSource.makeProcessSource(identifier: parent, eventMask: .exit, queue: .global())
+        source.setEventHandler {
+            Darwin.signal(SIGTERM, SIG_IGN)
+            _ = kill(-getpgrp(), SIGTERM)
+            usleep(500_000)
+            _ = kill(-getpgrp(), SIGKILL)
+            Darwin._exit(70)
+        }
+        hostParentMonitor = source
+        source.resume()
+    }
+
     private static func shouldUseCapabilityHost() -> Bool {
         let environment = ProcessInfo.processInfo.environment
         if environment["NOTESCLI_HOST_ACTIVE"] == "1" { return false }
         let route = CapabilityHostRoute(rawValue: environment["NOTESCLI_CAPABILITY_HOST"] ?? "auto") ?? .auto
         if route == .direct { return false }
         let arguments = Array(CommandLine.arguments.dropFirst())
-        let localCommands = Set(["host", "onboard", "setup", "permissions", "doctor", "completion", "speech-helper"])
         if arguments.contains("--help") || arguments.contains("-h") || arguments.contains("--version") {
             return false
         }
-        let commandIndex = firstCommandIndex(in: arguments)
-        guard let commandIndex else { return route == .force || CapabilityHostClient.isAvailable() }
-        let command = arguments[commandIndex]
-        if localCommands.contains(command) { return false }
-        if command == "mcp",
-           !Set(arguments.dropFirst(commandIndex + 1)).isDisjoint(with: ["install", "uninstall", "status", "config", "remove"]) {
-            return false
+        if CapabilityHostPolicy.commandIndex(arguments).map({ arguments[$0] }) == "doctor" { return false }
+        guard CapabilityHostPolicy.commandIndex(arguments) != nil else {
+            return CapabilityHostPolicy.allows(arguments) && (route == .force || CapabilityHostClient.isAvailable())
         }
+        guard CapabilityHostPolicy.allows(arguments) else { return false }
         return route == .force || CapabilityHostClient.isAvailable()
-    }
-
-    private static func firstCommandIndex(in arguments: [String]) -> Int? {
-        var index = 0
-        while index < arguments.count {
-            let value = arguments[index]
-            if value == "--backend" || value == "--engine" { index += 2; continue }
-            if value.hasPrefix("-") { index += 1; continue }
-            return index
-        }
-        return nil
     }
     static func fail(_ e: NotesError, status: Int32? = nil) -> Never {
         if CommandLine.arguments.contains("--json"), let data = try? NotePresentation.json(e) { FileHandle.standardError.write(data + Data("\n".utf8)) }
@@ -101,9 +105,12 @@ struct Accounts: ParsableCommand {
     @Option var setDefault: String?
     func run() throws {
         if let setDefault { try UnifiedNative.defaultAccount(options, write, ref: setDefault); return }
-        let rows = try options.backends().reader.accounts()
-        if options.json { try Output.json(rows) }
-        else { Output.table(["ID", "NAME", "KIND", "DEFAULT", "DEFAULT FOLDER"], rows.map { [$0.id, $0.name, $0.kind, $0.isDefault ? "yes" : "", $0.defaultFolderName ?? ""] }) }
+        let backend = try options.backends(), rows = try backend.reader.accounts()
+        if options.json { try Output.readJSON(rows, backend: backend) }
+        else {
+            Output.table(["ID", "NAME", "KIND", "DEFAULT", "DEFAULT FOLDER"], rows.map { [$0.id, $0.name, $0.kind, $0.isDefault ? "yes" : "", $0.defaultFolderName ?? ""] })
+            Output.fidelityNotice(backend)
+        }
     }
 }
 struct Folders: ParsableCommand {
@@ -111,9 +118,12 @@ struct Folders: ParsableCommand {
     @Option var account: String?
     @Flag var tree = false
     func run() throws {
-        let rows = try options.backends().reader.folders(account: account)
-        if options.json { try Output.json(rows) }
-        else { Output.table(["ID", "FOLDER", "NOTES"], rows.map { [$0.id, tree ? String(repeating: "  ", count: max(0, $0.path.count - 1)) + $0.name : $0.path.joined(separator: " > "), String($0.noteCount)] }) }
+        let backend = try options.backends(), rows = try backend.reader.folders(account: account)
+        if options.json { try Output.readJSON(rows, backend: backend) }
+        else {
+            Output.table(["ID", "FOLDER", "NOTES"], rows.map { [$0.id, tree ? String(repeating: "  ", count: max(0, $0.path.count - 1)) + $0.name : $0.path.joined(separator: " > "), String($0.noteCount)] })
+            Output.fidelityNotice(backend)
+        }
     }
 }
 struct List: ParsableCommand {
@@ -145,13 +155,19 @@ struct Show: ParsableCommand {
     @Option var format: NoteFormat = .markdown
     @Flag var noAttachments = false
     func run() throws {
-        let note = try options.backends().reader.note(ref)
+        let backend = try options.backends(), note = try backend.reader.note(ref)
         if format == .outline {
             let outline = note.document?.outline() ?? []
-            if options.json { try Output.json(outline) }
+            if options.json { try Output.readJSON(outline, backend: backend) }
             else if !options.quiet { print(String(decoding: try NotePresentation.json(outline), as: UTF8.self)) }
+            if !options.json { Output.fidelityNotice(backend) }
+        } else if options.json, backend.fidelity == .limited {
+            var value = note
+            if noAttachments { value.attachments = [] }
+            try Output.readJSON(value, backend: backend)
         } else if !options.quiet || options.json {
             print(try NotePresentation.render(note, format: options.json ? "json" : format.rawValue, attachments: !noAttachments))
+            if !options.json { Output.fidelityNotice(backend) }
         }
     }
 }

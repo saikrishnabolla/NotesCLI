@@ -84,6 +84,17 @@ final class ModernProtocolTests: XCTestCase {
         XCTAssertNil(pingResult["cacheScope"])
     }
 
+    func testReadFidelityIsExplicitInEveryResult() throws {
+        let server = MCPServer(reader: InMemoryNotes.sample(), readFidelity: "limited",
+                               unavailableReadFields: ["attachments", "formatting"])
+        let response = try modernRequest(server, method: "ping")
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        let metadata = try XCTUnwrap(result["_meta"] as? [String: Any])
+        let fidelity = try XCTUnwrap(metadata["net.notescli/readFidelity"] as? [String: Any])
+        XCTAssertEqual(fidelity["fidelity"] as? String, "limited")
+        XCTAssertEqual(fidelity["unavailableFields"] as? [String], ["attachments", "formatting"])
+    }
+
     func testModernRequestsValidateRequiredMetadataAndVersion() throws {
         let server = MCPServer(reader: InMemoryNotes.sample())
         let nullID = try XCTUnwrap(server.handle(["jsonrpc": "2.0", "id": NSNull(), "method": "ping"]))
@@ -195,7 +206,7 @@ final class ModernProtocolTests: XCTestCase {
         let localNames = Set(localTools.compactMap { $0["name"] as? String })
         let remoteNames = Set(remoteTools.compactMap { $0["name"] as? String })
         let pathTools: Set<String> = ["save_attachment", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes",
-                                      "recording_add", "recording_create", "attach_file", "diagram_add"]
+                                      "recording_add", "recording_create", "attach_file", "diagram_add", "drawing_add", "drawing_create"]
         XCTAssertTrue(pathTools.isSubset(of: localNames))
         XCTAssertTrue(pathTools.isDisjoint(with: remoteNames))
         for tool in remoteTools {

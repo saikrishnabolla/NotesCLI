@@ -59,6 +59,7 @@ notescli pinned --limit 20
 notescli capabilities --json
 notescli add "Meeting notes" --body "# Notes"
 notescli append NOTE_ID --body "Follow up Friday"
+notescli diagram add NOTE_ID --file system-flow.html
 notescli checklist add NOTE_ID "Follow up Friday" --engine native
 notescli export --out notes-export --attachments
 notescli delete NOTE_ID --yes
@@ -66,7 +67,9 @@ notescli delete NOTE_ID --yes
 
 Writes return `verified`, `unverified`, or `unknown`, plus the `engine` used. Native results also include `operationID` when available. If a write returns `unknown`, check the note before you retry. Delete moves notes to Recently Deleted.
 
-Rich edits such as native checklists, pins, tags, links, highlights, positioned images, tables, table-cell formatting, paragraph styles, range edits, duplication, restore, and folder moves require `--engine native` or `NOTESCLI_ENGINE=native`. Native undo and revert verify the note ID and title, decoded text and runs, tables and rich cells, and attachment IDs, types, and parent relationships through a fresh database read. They do not compare attachment file bytes. The scripting engine refuses these snapshots unless you pass `--allow-downgrade`. See the [Apple Notes feature inventory](docs/APPLE-NOTES-FEATURES.md) for all 94 rows.
+Rich edits such as native checklists, pins, tags, links, highlights, positioned images, tables, table-cell formatting, paragraph styles, range edits, duplication, restore, and folder moves require `--engine native` or `NOTESCLI_ENGINE=native`. Native undo and revert verify the note ID and title, decoded text and runs, tables and rich cells, and attachment IDs, types, and parent relationships through a fresh database read. They do not compare attachment file bytes. The scripting engine refuses these snapshots unless you pass `--allow-downgrade`. See the [Apple Notes feature inventory](docs/APPLE-NOTES-FEATURES.md) for all 95 rows.
+
+`diagram add` renders self-contained SVG or HTML through WebKit, crops it, and inserts a 2x or 3x PNG. The PNG stores the original source for `diagram export`. See the bundled `notescli-diagrams` skill for the agent workflow.
 
 The native engine uses Apple's private Notes framework and writes through Notes' own persistent data store. It is opt-in because Apple can change this framework in a macOS update. Keep a backup and run `notescli engine doctor` before using it.
 

@@ -187,11 +187,11 @@ final class SafetyTests: XCTestCase {
         let featureRows = features.split(separator: "\n").filter {
             $0.hasPrefix("|") && !$0.hasPrefix("| ---") && !$0.hasPrefix("| Feature")
         }.map { $0.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
-        XCTAssertEqual(featureRows.count, 94)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 85)
+        XCTAssertEqual(featureRows.count, 95)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 86)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 5)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 4)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 63)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 64)
         XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 8)
         XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 23)
 

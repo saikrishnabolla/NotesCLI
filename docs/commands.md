@@ -130,6 +130,22 @@ notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 
 `link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
+## Diagrams
+
+```text
+notescli diagram add <note> --file <diagram.svg|diagram.html>
+        [--as image|drawing] [--width <pixels>] [--scale 2|3]
+        [--background white|transparent|auto] [--dark]
+notescli diagram create --folder <folder> --title <title> --file <diagram.svg|diagram.html>
+        [--as image|drawing] [--width <pixels>] [--scale 2|3]
+        [--background white|transparent|auto] [--dark]
+notescli diagram export <note> --output <file> [--attachment-id <id>]
+```
+
+Image mode is the default. WebKit waits for web fonts, crops the page to its visible content, renders at 700 pixels and 2x scale by default, and inserts one PNG through the native frozen-byte path. The PNG contains the original SVG or HTML in an iTXt chunk. `diagram export` recovers it; pass `--attachment-id` when a note has more than one diagram.
+
+`--background auto` keeps an opaque source background. A transparent source gets a white fallback, or a dark fallback with `--dark`. Notes does not invert images in dark mode. `--background transparent` clears the page background but leaves any background drawn inside the SVG. `--as drawing` accepts SVG and converts its supported shapes and paths to editable Paper strokes at the requested width. Outline text before conversion because SVG text nodes are not PencilKit strokes.
+
 All write commands accept `--dry-run`, `--idempotency-key`, `--write-folders`, `--if-modified`, `--expect-revision`, `--allow-shared`, `--wait-sync`, and `--sync-timeout`. Shared-note writes require native mode and Notes write permission. A sync timeout leaves the write verified and returns `syncPending: true`. Body rewrites also accept `--allow-attachment-loss`.
 
 ## Safety and sync

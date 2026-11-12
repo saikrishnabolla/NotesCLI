@@ -59,7 +59,7 @@ final class CLITests: XCTestCase {
         let capabilities = try run(["--backend", "fake", "capabilities", "--json"])
         XCTAssertEqual(capabilities.0, 0, capabilities.2)
         let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(capabilities.1.utf8)) as? [String: Any])
-        XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 94)
+        XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 95)
 
         let help = try run(["help", "search"])
         XCTAssertEqual(help.0, 0, help.2)
@@ -155,6 +155,19 @@ final class CLITests: XCTestCase {
             let result = try run(["--backend", "fake", "--engine", "native"] + arguments)
             XCTAssertEqual(result.0, 2, result.2)
             XCTAssertTrue(result.2.contains(expected), result.2)
+            XCTAssertFalse(result.2.contains("native_unavailable"), result.2)
+        }
+    }
+    func testDiagramCLIRejectsInvalidRenderOptionsBeforeNativeDispatch() throws {
+        let invalid = [
+            (["diagram", "add", "welcome", "--file", "/tmp/diagram.svg", "--scale", "4"], "Diagram scale must be 2 or 3."),
+            (["diagram", "add", "welcome", "--file", "/tmp/diagram.svg", "--width", "0"], "Diagram width must be between 1 and 2400 pixels."),
+            (["diagram", "add", "welcome", "--file", "/tmp/diagram.svg", "--background", "gray"], "gray")
+        ]
+        for (arguments, message) in invalid {
+            let result = try run(["--backend", "fake"] + arguments)
+            XCTAssertEqual(result.0, 2, result.2)
+            XCTAssertTrue(result.2.contains(message), result.2)
             XCTAssertFalse(result.2.contains("native_unavailable"), result.2)
         }
     }

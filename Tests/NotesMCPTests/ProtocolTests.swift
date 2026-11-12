@@ -51,7 +51,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 101)
+        XCTAssertEqual(nativeTools.count, 102)
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
         for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
@@ -59,6 +59,7 @@ final class ProtocolTests: XCTestCase {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "table_format_cell" })
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "diagram_add" })
         for name in ["smart_folder_edit_typed", "get_folder_sort", "set_folder_sort", "set_default_account"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
@@ -90,13 +91,16 @@ final class ProtocolTests: XCTestCase {
 
         let capabilities = try structured(call(server, "get_capabilities"))
         XCTAssertEqual(capabilities["macOS"] as? String, ProcessInfo.processInfo.operatingSystemVersionString)
-        XCTAssertEqual((capabilities["features"] as? [[String: Any]])?.count, 94)
+        XCTAssertEqual((capabilities["features"] as? [[String: Any]])?.count, 95)
         let pin = (capabilities["features"] as? [[String: Any]])?.first { $0["feature"] as? String == "Pin and unpin" }
         XCTAssertEqual(pin?["read"] as? String, "Done")
         XCTAssertEqual(pin?["write"] as? String, "Done")
         XCTAssertEqual(pin?["writeEngine"] as? String, "native")
         XCTAssertNotNil(pin?["permissions"])
         XCTAssertNotNil(pin?["nativeSelectors"])
+        let diagrams = (capabilities["features"] as? [[String: Any]])?.first { $0["feature"] as? String == "Editorial SVG and HTML diagrams" }
+        XCTAssertEqual(diagrams?["readEngine"] as? String, "database")
+        XCTAssertEqual(diagrams?["writeEngine"] as? String, "native")
     }
 
     func testCapabilityCatalogMatchesFeatureDocument() throws {
@@ -109,7 +113,7 @@ final class ProtocolTests: XCTestCase {
             guard columns.count == 4 else { return nil }
             return FeatureDefinition(feature: columns[0], read: columns[1], write: columns[2])
         }
-        XCTAssertEqual(documented.count, 94)
+        XCTAssertEqual(documented.count, 95)
         XCTAssertEqual(CapabilityCatalog.features, documented)
     }
 
@@ -138,6 +142,30 @@ final class ProtocolTests: XCTestCase {
         ]
         for (name, arguments, message) in invalid {
             let response = try request(server, method: "tools/call", params: ["name": name, "arguments": arguments])
+            XCTAssertEqual((response["error"] as? [String: Any])?["message"] as? String, message)
+        }
+        XCTAssertEqual(dispatchCount, 0)
+    }
+    func testDiagramSchemaAndValidationUseLiteralNotesDefaults() throws {
+        let fake = InMemoryNotes.sample()
+        var dispatchCount = 0
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { _, _ in
+            dispatchCount += 1
+            return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+        })
+        let tools = ((try request(server, method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]])
+        let diagram = try XCTUnwrap(tools.first { $0["name"] as? String == "diagram_add" })
+        let properties = try XCTUnwrap((diagram["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
+        XCTAssertEqual((properties["width"] as? [String: Any])?["maximum"] as? Int, 2400)
+        XCTAssertEqual((properties["scale"] as? [String: Any])?["enum"] as? [Int], [2, 3])
+        XCTAssertEqual((properties["background"] as? [String: Any])?["enum"] as? [String], ["white", "transparent", "auto"])
+
+        for (arguments, message) in [
+            (["ref": "welcome", "file": "/tmp/diagram.svg", "scale": 4] as [String: Any], "Invalid scale; use 2 or 3."),
+            (["ref": "welcome", "file": "/tmp/diagram.svg", "width": 2401] as [String: Any], "width must be between 1 and 2400"),
+            (["ref": "welcome", "file": "/tmp/diagram.svg", "background": "gray"] as [String: Any], "Invalid background; use white, transparent, or auto.")
+        ] {
+            let response = try request(server, method: "tools/call", params: ["name": "diagram_add", "arguments": arguments])
             XCTAssertEqual((response["error"] as? [String: Any])?["message"] as? String, message)
         }
         XCTAssertEqual(dispatchCount, 0)

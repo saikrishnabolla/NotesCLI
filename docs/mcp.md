@@ -6,7 +6,7 @@ NotesCLI runs a stdio MCP server:
 notescli mcp
 ```
 
-The default server exposes 51 tools. Read-only mode exposes 28 read tools. `notescli mcp --allow-native` exposes 101 tools in total.
+The default server exposes 51 tools. Read-only mode exposes 28 read tools. `notescli mcp --allow-native` exposes 102 tools in total.
 
 ## Tools
 
@@ -45,7 +45,7 @@ tag_add  tag_remove  tag_rename  tag_delete  link_add  link_list
 attach_pasteboard  add_url
 smart_folder_create  smart_folder_rename  smart_folder_delete
 text_find  text_insert  text_delete  text_replace
-format_paragraph  format_inline  attach_file  delete_attachment
+format_paragraph  format_inline  attach_file  diagram_add  delete_attachment
 drawing_add  drawing_create  drawing_export
 table_create  table_set  table_add_row  table_add_column
 table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
@@ -112,6 +112,8 @@ Every Notes write uses the folder allowlist, concurrency checks, journal, snapsh
 Native tools stay hidden unless the server starts with `--allow-native`. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
 
 `drawing_add` and `drawing_create` convert an SVG file to editable `com.apple.paper` strokes. They accept `ink`, `width`, `color`, `bw`, `size`, `fit`, and `fill`. `drawing_export` returns SVG text or a base64-encoded PNG and can select one attachment with `attachment_id`.
+
+`diagram_add` accepts a note `ref`, an SVG or HTML `file`, `as` (`image` or `drawing`), `width`, `scale`, `background`, and `dark`. Image mode renders and inserts a PNG with embedded source. Drawing mode converts supported SVG shapes and paths to editable Paper strokes; outline SVG text first.
 
 `create_note` accepts an `attachments` array in native mode. With native mode enabled, `update_note` and `write_markdown` preserve `notescli-attachment:ID` references. Write tools accept `allow_shared`, `wait_sync`, and `sync_timeout`. Shared writes require Notes write permission. A sync timeout returns `syncPending: true` without retrying the write.
 

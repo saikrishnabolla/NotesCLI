@@ -149,14 +149,14 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(CapabilityCatalog.features, documented)
     }
 
-    func testPaperDrawingWriteIsPartialUntilPencilRoundTripsAreVerified() throws {
+    func testPaperDrawingWriteIsDoneAfterThePencilRoundTrip() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let text = try String(contentsOf: root.appendingPathComponent("docs/APPLE-NOTES-FEATURES.md"), encoding: .utf8)
         let row = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("| Modern Paper drawings |") })
-        XCTAssertTrue(row.hasPrefix("| Modern Paper drawings | Done | Partial |"), String(row))
-        XCTAssertTrue(row.contains("Pencil editing on iPhone and iPad and cross-device round trips are not yet verified."), String(row))
+        XCTAssertTrue(row.hasPrefix("| Modern Paper drawings | Done | Done |"), String(row))
+        XCTAssertTrue(row.contains("edited with Apple Pencil on iPad, synced back, and read with every original and new stroke."), String(row))
         XCTAssertEqual(CapabilityCatalog.features.first { $0.feature == "Modern Paper drawings" },
-                       FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Partial"))
+                       FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Done"))
     }
 
     func testNativeFormattingSchemasAndValidationRejectInvalidValuesBeforeDispatch() throws {

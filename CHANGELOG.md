@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `drawing export --format png` keeps stored ink colors when the Mac is in dark mode. Black strokes were exported as light gray.
+
 ## 1.0.1
 
 ### Fixed

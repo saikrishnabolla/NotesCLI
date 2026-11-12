@@ -202,18 +202,22 @@ public enum SVGDrawingConverter {
             throw SVGDrawingError.invalid("The drawing has empty bounds.")
         }
         let image = NSImage(size: bounds.size)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: bounds.size).fill()
-        for drawing in drawings where !drawing.bounds.isEmpty && !drawing.bounds.isNull {
-            drawing.image(from: drawing.bounds, scale: 2).draw(in: NSRect(
-                x: drawing.bounds.minX - bounds.minX,
-                y: bounds.maxY - drawing.bounds.maxY,
-                width: drawing.bounds.width,
-                height: drawing.bounds.height
-            ))
+        // PencilKit adapts ink colors to the current appearance; export the stored colors, not dark-mode variants.
+        let light = NSAppearance(named: .aqua) ?? NSAppearance.currentDrawing()
+        light.performAsCurrentDrawingAppearance {
+            image.lockFocus()
+            NSColor.clear.setFill()
+            NSRect(origin: .zero, size: bounds.size).fill()
+            for drawing in drawings where !drawing.bounds.isEmpty && !drawing.bounds.isNull {
+                drawing.image(from: drawing.bounds, scale: 2).draw(in: NSRect(
+                    x: drawing.bounds.minX - bounds.minX,
+                    y: bounds.maxY - drawing.bounds.maxY,
+                    width: drawing.bounds.width,
+                    height: drawing.bounds.height
+                ))
+            }
+            image.unlockFocus()
         }
-        image.unlockFocus()
         guard let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff),
               let data = bitmap.representation(using: .png, properties: [:]) else {

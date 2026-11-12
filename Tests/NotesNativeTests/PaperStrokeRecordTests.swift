@@ -53,3 +53,26 @@ final class PaperStrokeRecordTests: XCTestCase {
         XCTAssertEqual(PaperStrokeRecord.mismatch(expected: expected, actual: []), "Expected 1 strokes; read back 0.")
     }
 }
+
+final class DrawingPNGExportTests: XCTestCase {
+    func testPNGExportKeepsStoredColorsInDarkMode() throws {
+        let path = PKStrokePath(controlPoints: (0..<20).map { index in
+            PKStrokePoint(location: CGPoint(x: Double(index) * 5, y: 20), timeOffset: Double(index) / 120,
+                          size: CGSize(width: 12, height: 12), opacity: 1, force: 1, azimuth: 0, altitude: .pi / 2)
+        }, creationDate: Date(timeIntervalSince1970: 0))
+        let black = PKStroke(ink: PKInk(.monoline, color: NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)), path: path)
+        let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
+        var result: Result<Data, Error> = .success(Data())
+        dark.performAsCurrentDrawingAppearance { result = Result { try SVGDrawingConverter.png(from: [PKDrawing(strokes: [black])]) } }
+        let data = try result.get()
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: data))
+        var darkest = 255
+        for x in stride(from: 0, to: bitmap.pixelsWide, by: 2) {
+            for y in stride(from: 0, to: bitmap.pixelsHigh, by: 2) {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), color.alphaComponent > 0.9 else { continue }
+                darkest = min(darkest, Int((max(color.redComponent, color.greenComponent, color.blueComponent) * 255).rounded()))
+            }
+        }
+        XCTAssertLessThan(darkest, 40, "black ink was exported as a light color")
+    }
+}

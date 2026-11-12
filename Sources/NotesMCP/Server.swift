@@ -22,26 +22,31 @@ public struct MCPNativeResult {
 public typealias MCPNativeHandler = (_ tool: String, _ arguments: [String: Any]) throws -> MCPNativeResult
 public typealias MCPSyncWaiter = (_ noteID: String, _ modifiedAfter: Date, _ timeout: TimeInterval) throws -> Bool
 
-public final class MCPServer {
+public final class MCPServer: @unchecked Sendable {
     public let reader: any NotesReading
     public let writer: (any NotesWriting)?
     public let readOnly: Bool
     public let allowNative: Bool
+    public let exposureProfile: MCPToolExposureProfile
     public static let textLimit = 48 * 1024
-    public static let versions = ["2025-06-18", "2025-03-26", "2024-11-05"]
+    public static let versions = MCPProtocol.legacyVersions
 
     private let nativeHandler: MCPNativeHandler?
     private let syncWaiter: MCPSyncWaiter?
     private let writeFolders: String?
     private let stateRoot: URL
+    private let defaultConnection = MCPConnection()
+    private let executionGate = MCPExecutionGate()
 
     public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false,
                 allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil, syncWaiter: MCPSyncWaiter? = nil,
-                writeFolders: String? = nil, stateRoot: URL? = nil) {
+                writeFolders: String? = nil, stateRoot: URL? = nil,
+                exposureProfile: MCPToolExposureProfile = .local) {
         self.reader = reader
         self.writer = writer
         self.readOnly = readOnly
         self.allowNative = allowNative
+        self.exposureProfile = exposureProfile
         self.nativeHandler = nativeHandler
         self.syncWaiter = syncWaiter
         self.writeFolders = writeFolders
@@ -247,16 +252,36 @@ public final class MCPServer {
             t("table_get", "Read decoded native tables.", ["ref"], ["ref": string, "attachment_id": string, "format": ["type": "string", "enum": ["markdown", "json", "csv"]]])
         ]
         // MARK: w3-read end
-        return values.filter { (!readOnly || !$0.write) && (!$0.native || allowNative) }
+        var exposed = values.filter { (!readOnly || !$0.write) && (!$0.native || allowNative) }
+        guard exposureProfile == .remote else { return exposed }
+        let pathTools: Set<String> = [
+            "save_attachment", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes",
+            "recording_add", "recording_create", "attach_file", "diagram_add",
+        ]
+        exposed.removeAll { pathTools.contains($0.name) }
+        exposed = exposed.map { tool in
+            guard tool.name == "create_note" || tool.name == "recording_transcribe" else { return tool }
+            var properties = tool.properties
+            properties.removeValue(forKey: tool.name == "create_note" ? "attachments" : "transcript_path")
+            return Tool(name: tool.name, description: tool.description, write: tool.write, native: tool.native,
+                        destructive: tool.destructive, required: tool.required, properties: properties)
+        }
+        return exposed
     }
 
-    public func handleLine(_ line: String) -> String? {
+    public func makeConnection() -> MCPConnection { MCPConnection() }
+
+    public func handleLine(_ line: String, connection: MCPConnection? = nil) -> String? {
         let response: [String: Any]?
         do {
             let value = try JSONSerialization.jsonObject(with: Data(line.utf8), options: [.fragmentsAllowed])
-            guard let request = value as? [String: Any] else { return encode(error(id: NSNull(), code: -32600, message: "Invalid request")) }
-            response = handle(request)
-        } catch { response = self.error(id: NSNull(), code: -32700, message: "Parse error") }
+            guard let request = value as? [String: Any] else {
+                return encode(error(id: NSNull(), code: -32600, message: "Invalid request"))
+            }
+            response = handle(request, connection: connection ?? defaultConnection)
+        } catch {
+            response = self.error(id: NSNull(), code: -32700, message: "Parse error")
+        }
         return response.map(encode)
     }
 
@@ -274,52 +299,245 @@ public final class MCPServer {
     }
 
     public func handle(_ request: [String: Any]) -> [String: Any]? {
+        handle(request, connection: defaultConnection)
+    }
+
+    /// Transport-neutral request entrypoint. HTTP transports can keep one
+    /// connection per legacy session and use a fresh connection for modern,
+    /// stateless requests.
+    public func handle(_ request: [String: Any], connection: MCPConnection) -> [String: Any]? {
         let id = request["id"] ?? NSNull()
         guard request["jsonrpc"] as? String == "2.0", let method = request["method"] as? String,
-              request["id"] == nil || id is NSNull || id is String || (id is NSNumber && String(cString: (id as! NSNumber).objCType) != "c") else {
+              request["id"] == nil || MCPProtocol.isValidRequestID(id) else {
             return error(id: NSNull(), code: -32600, message: "Invalid request")
         }
-        if request["id"] == nil { return nil }
-        guard request["params"] == nil || request["params"] is [String: Any] else { return error(id: id, code: -32602, message: "Parameters must be an object") }
+        guard request["params"] == nil || request["params"] is [String: Any] else {
+            return request["id"] == nil ? nil : error(id: id, code: -32602, message: "Parameters must be an object")
+        }
         let params = request["params"] as? [String: Any] ?? [:]
+        if request["id"] == nil {
+            handleNotification(method: method, params: params, connection: connection)
+            return nil
+        }
+        guard let cancellation = connection.reserve(id) else {
+            return error(id: id, code: -32600, message: "This request id is already running")
+        }
+        defer { connection.release(id, cancellation: cancellation) }
+        return handleReserved(id: id, method: method, params: params, connection: connection,
+                              cancellation: cancellation)
+    }
+
+    private func handleReserved(id: Any, method: String, params: [String: Any],
+                                connection: MCPConnection, cancellation: MCPRequestCancellation) -> [String: Any]? {
         do {
-            let result: [String: Any]
+            let context = try requestContext(method: method, params: params, connection: connection,
+                                             cancellation: cancellation)
+            var result: [String: Any]
             switch method {
             case "initialize":
+                guard context.era == .legacy else {
+                    throw MCPRPCError(code: -32601,
+                                      message: "initialize is a legacy method; use server/discover.",
+                                      data: ["supported": MCPProtocol.supportedVersions])
+                }
                 guard let version = params["protocolVersion"] as? String else { return error(id: id, code: -32602, message: "protocolVersion is required") }
-                result = ["protocolVersion": Self.versions.contains(version) ? version : Self.versions[0],
-                          "capabilities": ["tools": ["listChanged": false], "resources": ["subscribe": false, "listChanged": false], "prompts": ["listChanged": false]],
-                          "serverInfo": ["name": "notescli", "version": notesCLIVersion]]
+                let selected = Self.versions.contains(version) ? version : Self.versions[0]
+                let capabilities = params["capabilities"] as? [String: Any] ?? [:]
+                connection.updateLegacy(version: selected, capabilities: capabilities)
+                result = ["protocolVersion": selected, "capabilities": serverCapabilities(),
+                          "serverInfo": serverInfo(),
+                          "instructions": "Read and write Apple Notes through typed tools."]
+            case "server/discover":
+                result = cacheable([
+                    "supportedVersions": MCPProtocol.supportedVersions,
+                    "capabilities": serverCapabilities(),
+                    "instructions": "Read and write Apple Notes through typed tools.",
+                ], context: context, scope: "public")
             case "ping": result = [:]
             case "tools/list":
-                result = ["tools": tools.map { ["name": $0.name, "description": $0.description, "inputSchema": $0.schema,
-                    "annotations": ["readOnlyHint": !$0.write, "destructiveHint": $0.destructive]] as [String: Any] }]
+                result = cacheable(["tools": tools.map { toolDescriptor($0, context: context) }],
+                                   context: context, scope: "public")
             case "tools/call":
-                guard let name = params["name"] as? String, let tool = tools.first(where: { $0.name == name }) else { return error(id: id, code: -32602, message: "Unknown or unavailable tool") }
-                guard params["arguments"] == nil || params["arguments"] is [String: Any] else { return error(id: id, code: -32602, message: "arguments must be an object") }
-                let arguments = params["arguments"] as? [String: Any] ?? [:]
-                if let issue = validate(arguments, tool: tool) { return error(id: id, code: -32602, message: issue) }
-                do { result = try call(tool, arguments) }
-                catch {
-                    let value = error as? NotesError ?? NotesError("internal_error", String(describing: error))
-                    result = try content(["error": NotePresentation.object(value)], isError: true)
-                }
+                result = try executeTool(params: params, context: context)
             case "resources/list":
-                result = ["resources": [["uri": "notes://folders", "name": "Apple Notes folders", "mimeType": "application/json"]],
-                          "resourceTemplates": [["uriTemplate": "notes://note/{uuid}", "name": "Apple Note", "mimeType": "application/json"]]]
-            case "resources/read": result = try readResource(params)
+                var resources: [[String: Any]] = [["uri": "notes://folders", "name": "Apple Notes folders", "mimeType": "application/json"]]
+                if context.apps { resources.append(NotesMCPWidget.descriptor) }
+                result = cacheable(["resources": resources,
+                                    "resourceTemplates": [["uriTemplate": "notes://note/{uuid}", "name": "Apple Note", "mimeType": "application/json"]]],
+                                   context: context, scope: "public")
+            case "resources/templates/list":
+                result = cacheable(["resourceTemplates": [["uriTemplate": "notes://note/{uuid}", "name": "Apple Note", "mimeType": "application/json"]]],
+                                   context: context, scope: "public")
+            case "resources/read":
+                do {
+                    if context.cancellation.isCancelled { throw MCPRequestCancelled() }
+                    guard executionGate.acquire(.read, cancellation: context.cancellation) else { throw MCPRequestCancelled() }
+                    defer { executionGate.release(.read) }
+                    if context.cancellation.isCancelled { throw MCPRequestCancelled() }
+                    result = cacheable(try readResource(params), context: context, scope: "private")
+                } catch let value as NotesError {
+                    let code = context.era == .legacy && value.code == "resource_not_found" ? -32002 : -32602
+                    throw MCPRPCError(code: code, message: value.message,
+                                      data: (try? NotePresentation.object(value)) as? [String: Any])
+                }
             case "prompts/list":
-                result = ["prompts": [["name": "find_note", "description": "Find and summarize matching notes", "arguments": [["name": "query", "required": true]]],
-                                      ["name": "weekly_review", "description": "Review notes modified in the last seven days", "arguments": []]]]
-            case "prompts/get": result = try getPrompt(params)
+                result = cacheable(["prompts": [["name": "find_note", "description": "Find and summarize matching notes", "arguments": [["name": "query", "required": true]]],
+                                                     ["name": "weekly_review", "description": "Review notes modified in the last seven days", "arguments": []]]],
+                                   context: context, scope: "public")
+            case "prompts/get":
+                do { result = try getPrompt(params) }
+                catch let value as NotesError {
+                    throw MCPRPCError(code: -32602, message: value.message,
+                                      data: (try? NotePresentation.object(value)) as? [String: Any])
+                }
             default: return error(id: id, code: -32601, message: "Method not found")
             }
-            return ["jsonrpc": "2.0", "id": id, "result": result]
+            return ["jsonrpc": "2.0", "id": id, "result": decorate(result, context: context)]
+        } catch is MCPRequestCancelled {
+            return nil
+        } catch let value as MCPRPCError {
+            return error(id: id, code: value.code, message: value.message, data: value.data)
         } catch {
             let value = error as? NotesError ?? NotesError("internal_error", String(describing: error))
             return self.error(id: id, code: -32603, message: value.message, data: (try? NotePresentation.object(value)) as? [String: Any])
         }
     }
+
+    private func requestContext(method: String, params: [String: Any], connection: MCPConnection,
+                                cancellation: MCPRequestCancellation) throws -> MCPRequestContext {
+        if let rawMeta = params["_meta"], !(rawMeta is [String: Any]) {
+            throw MCPRPCError(code: -32602, message: "params._meta must be an object", data: nil)
+        }
+        let meta = params["_meta"] as? [String: Any] ?? [:]
+        let hasVersion = meta[MCPProtocol.protocolVersionKey] != nil
+        let hasCapabilities = meta[MCPProtocol.clientCapabilitiesKey] != nil
+        if method == "server/discover" || hasVersion || hasCapabilities {
+            if hasVersion, meta[MCPProtocol.protocolVersionKey] as? String != MCPProtocol.modernVersion {
+                throw MCPRPCError(code: MCPProtocol.unsupportedVersionError,
+                                  message: "UnsupportedProtocolVersion",
+                                  data: ["supported": MCPProtocol.supportedVersions,
+                                         "requested": meta[MCPProtocol.protocolVersionKey] ?? NSNull()])
+            }
+            if !hasVersion || !hasCapabilities {
+                throw MCPRPCError(code: -32602,
+                                  message: "Modern requests require protocolVersion and clientCapabilities in params._meta.",
+                                  data: ["supported": MCPProtocol.supportedVersions])
+            }
+            guard !hasCapabilities || meta[MCPProtocol.clientCapabilitiesKey] is [String: Any] else {
+                throw MCPRPCError(code: -32602, message: "clientCapabilities must be an object",
+                                  data: ["supported": MCPProtocol.supportedVersions])
+            }
+            let capabilities = meta[MCPProtocol.clientCapabilitiesKey] as? [String: Any] ?? [:]
+            return MCPRequestContext(era: .modern, version: MCPProtocol.modernVersion,
+                                     apps: MCPProtocol.supportsApps(capabilities), legacyAliases: false,
+                                     capabilities: capabilities, cancellation: cancellation)
+        }
+        let state = connection.legacyState()
+        let apps = MCPProtocol.supportsApps(state.capabilities)
+        return MCPRequestContext(era: .legacy, version: state.version, apps: apps,
+                                 legacyAliases: true, capabilities: state.capabilities,
+                                 cancellation: cancellation)
+    }
+
+    private func handleNotification(method: String, params: [String: Any], connection: MCPConnection) {
+        guard method == "notifications/cancelled", let requestID = params["requestId"] else { return }
+        connection.cancel(requestID)
+    }
+
+    private func serverInfo() -> [String: Any] { ["name": "notescli", "version": notesCLIVersion] }
+
+    private func serverCapabilities() -> [String: Any] {
+        [
+            "tools": ["listChanged": false],
+            "resources": ["subscribe": false, "listChanged": false],
+            "prompts": ["listChanged": false],
+            "extensions": [MCPProtocol.appsExtension: ["mimeTypes": [MCPProtocol.appsMIMEType]]],
+        ]
+    }
+
+    private func cacheable(_ result: [String: Any], context: MCPRequestContext, scope: String) -> [String: Any] {
+        guard context.era == .modern else { return result }
+        var value = result
+        value["ttlMs"] = MCPProtocol.listTTL
+        value["cacheScope"] = scope
+        return value
+    }
+
+    private func decorate(_ result: [String: Any], context: MCPRequestContext) -> [String: Any] {
+        guard context.era == .modern else { return result }
+        var value = result
+        value["resultType"] = "complete"
+        var meta = value["_meta"] as? [String: Any] ?? [:]
+        meta[MCPProtocol.serverInfoKey] = serverInfo()
+        value["_meta"] = meta
+        return value
+    }
+
+    private func toolDescriptor(_ tool: Tool, context: MCPRequestContext) -> [String: Any] {
+        var descriptor: [String: Any] = [
+            "name": tool.name,
+            "description": tool.description,
+            "inputSchema": tool.schema,
+            "annotations": ["readOnlyHint": !tool.write, "destructiveHint": tool.destructive],
+        ]
+        let meta = widgetMetadata(context: context, includeResultHint: false)
+        if !meta.isEmpty { descriptor["_meta"] = meta }
+        return descriptor
+    }
+
+    private func widgetMetadata(context: MCPRequestContext, includeResultHint: Bool) -> [String: Any] {
+        var meta: [String: Any] = [:]
+        if context.apps { meta["ui"] = ["resourceUri": MCPProtocol.widgetURI] }
+        if context.legacyAliases {
+            meta["ui/resourceUri"] = MCPProtocol.widgetURI
+            meta["openai/outputTemplate"] = MCPProtocol.widgetURI
+            meta["openai/widgetAccessible"] = true
+            meta["openai/widgetDescription"] = "Interactive Apple Notes results."
+        }
+        if context.apps && includeResultHint {
+            meta["net.notescli/ui"] = ["resourceUri": MCPProtocol.widgetURI, "view": "notes"]
+        }
+        return meta
+    }
+
+    private func executeTool(params: [String: Any], context: MCPRequestContext) throws -> [String: Any] {
+        guard let name = params["name"] as? String, let tool = tools.first(where: { $0.name == name }) else {
+            throw MCPRPCError(code: -32602, message: "Unknown or unavailable tool", data: nil)
+        }
+        guard params["arguments"] == nil || params["arguments"] is [String: Any] else {
+            throw MCPRPCError(code: -32602, message: "arguments must be an object", data: nil)
+        }
+        let arguments = params["arguments"] as? [String: Any] ?? [:]
+        if let issue = validate(arguments, tool: tool) {
+            throw MCPRPCError(code: -32602, message: issue, data: nil)
+        }
+        if context.cancellation.isCancelled { throw MCPRequestCancelled() }
+        let access: MCPExecutionGate.Access = tool.write ? .write : .read
+        guard executionGate.acquire(access, cancellation: context.cancellation) else { throw MCPRequestCancelled() }
+        defer { executionGate.release(access) }
+        if context.cancellation.isCancelled { throw MCPRequestCancelled() }
+        var result: [String: Any]
+        do {
+            result = try call(tool, arguments)
+        } catch {
+            let value = error as? NotesError ?? NotesError("internal_error", String(describing: error))
+            result = try content(["error": NotePresentation.object(value)], isError: true)
+        }
+        if context.cancellation.isCancelled {
+            if tool.write {
+                var meta = result["_meta"] as? [String: Any] ?? [:]
+                meta["cancellationRequested"] = true
+                result["_meta"] = meta
+            } else {
+                throw MCPRequestCancelled()
+            }
+        }
+        var meta = result["_meta"] as? [String: Any] ?? [:]
+        for (key, value) in widgetMetadata(context: context, includeResultHint: true) { meta[key] = value }
+        if !meta.isEmpty { result["_meta"] = meta }
+        return result
+    }
+
 
     private func validate(_ args: [String: Any], tool: Tool) -> String? {
         for key in tool.required where args[key] == nil { return "Missing argument: \(key)" }
@@ -1034,6 +1252,10 @@ public final class MCPServer {
 
     private func readResource(_ params: [String: Any]) throws -> [String: Any] {
         guard let uri = params["uri"] as? String else { throw NotesError("invalid_resource", "uri is required.") }
+        if uri == MCPProtocol.widgetURI {
+            return ["contents": [["uri": uri, "mimeType": MCPProtocol.appsMIMEType,
+                                   "text": NotesMCPWidget.html, "_meta": NotesMCPWidget.contentMetadata]]]
+        }
         if uri == "notes://folders" {
             let text = String(decoding: try NotePresentation.json(reader.folders(account: nil)), as: UTF8.self)
             return ["contents": [["uri": uri, "mimeType": "application/json", "text": text]]]
@@ -1057,9 +1279,65 @@ public final class MCPServer {
         }
     }
 
-    public func run() {
-        while let line = readLine() {
-            if let response = handleLine(line) { FileHandle.standardOutput.write(Data((response + "\n").utf8)) }
+    public func run(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) {
+        let connection = makeConnection()
+        let writer = MCPOutputWriter(output)
+        let queue = DispatchQueue(label: "notescli.mcp.requests", qos: .userInitiated, attributes: .concurrent)
+        let group = DispatchGroup()
+
+        func submit(_ line: Data) {
+            guard !line.isEmpty else { return }
+            let value: Any
+            do {
+                value = try JSONSerialization.jsonObject(with: line, options: [.fragmentsAllowed])
+            } catch {
+                writer.send(self.error(id: NSNull(), code: -32700, message: "Parse error"))
+                return
+            }
+            guard let request = value as? [String: Any] else {
+                writer.send(self.error(id: NSNull(), code: -32600, message: "Invalid request"))
+                return
+            }
+            let id = request["id"] ?? NSNull()
+            guard request["jsonrpc"] as? String == "2.0", let method = request["method"] as? String,
+                  request["id"] == nil || MCPProtocol.isValidRequestID(id),
+                  request["params"] == nil || request["params"] is [String: Any] else {
+                writer.send(self.handle(request, connection: connection))
+                return
+            }
+            let params = request["params"] as? [String: Any] ?? [:]
+            if request["id"] == nil {
+                _ = self.handle(request, connection: connection)
+                return
+            }
+            guard let cancellation = connection.reserve(id) else {
+                writer.send(self.error(id: id, code: -32600, message: "This request id is already running"))
+                return
+            }
+            let prepared = MCPPreparedRequest(id: id, method: method, params: params, cancellation: cancellation)
+            group.enter()
+            queue.async { [self] in
+                let response = handleReserved(id: prepared.id, method: prepared.method, params: prepared.params,
+                                              connection: connection, cancellation: prepared.cancellation)
+                writer.send(response)
+                connection.release(prepared.id, cancellation: prepared.cancellation)
+                group.leave()
+            }
         }
+
+        var buffer = Data()
+        while true {
+            let chunk = input.availableData
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 0x0a) {
+                var line = Data(buffer[..<newline])
+                buffer.removeSubrange(...newline)
+                if line.last == 0x0d { line.removeLast() }
+                submit(line)
+            }
+        }
+        if !buffer.isEmpty { submit(buffer) }
+        group.wait()
     }
 }

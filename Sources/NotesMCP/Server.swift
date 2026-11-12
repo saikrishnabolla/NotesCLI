@@ -68,6 +68,18 @@ public final class MCPServer {
         let alignment: [String: Any] = ["type": "string", "enum": ["left", "right", "center", "justified", "natural"]]
         let writingDirection: [String: Any] = ["type": "string", "enum": ["natural", "left-to-right", "right-to-left"]]
         let highlight: [String: Any] = ["type": "string", "enum": ["purple", "pink", "orange", "mint", "blue"]]
+        // MARK: w9-paper begin
+        let drawingInput: [String: [String: Any]] = [
+            "svg": string,
+            "ink": ["type": "string", "enum": ["pen", "marker", "pencil", "monoline"]],
+            "width": ["type": "number", "exclusiveMinimum": 0],
+            "color": string,
+            "bw": bool,
+            "size": string,
+            "fit": ["type": "string", "enum": ["contain", "stretch"]],
+            "fill": ["type": "string", "enum": ["outline", "hatch"]],
+        ]
+        // MARK: w9-paper end
         let page = ["offset": integer, "limit": integer]
         let cursorPage = ["cursor": string, "limit": integer]
         let writeCommon = ["dry_run": bool, "idempotency_key": string, "if_modified": string,
@@ -181,6 +193,14 @@ public final class MCPServer {
                 t("set_folder_sort", "Set a folder's native custom sort.", ["ref", "by", "direction"], ["ref": string, "by": string, "direction": string], write: true, native: true),
                 t("set_default_account", "Set the account Notes uses for new notes.", ["account_id"], ["account_id": string], write: true, native: true),
                 // MARK: w4-format end
+                // MARK: w9-paper begin
+                t("drawing_add", "Convert an SVG to an editable Paper drawing and add it to a note.", ["ref", "svg"],
+                  drawingInput.merging(["ref": string, "position": integer]) { old, _ in old }, write: true, native: true),
+                t("drawing_create", "Create a note containing an editable Paper drawing.", ["folder", "title", "svg"],
+                  drawingInput.merging(["folder": string, "title": string]) { old, _ in old }, write: true, native: true),
+                t("drawing_export", "Export editable drawing strokes as SVG or base64-encoded PNG.", ["ref"],
+                  ["ref": string, "attachment_id": string, "format": ["type": "string", "enum": ["svg", "png"]]], native: true),
+                // MARK: w9-paper end
                 t("attach_file", "Insert a file or positioned image.", ["ref", "path"], ["ref": string, "path": string, "position": integer, "view": string], write: true, native: true),
                 t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),
                 t("table_create", "Create a native table.", ["ref", "rows"], ["ref": string, "rows": rows, "position": integer], write: true, native: true),
@@ -288,6 +308,15 @@ public final class MCPServer {
             case "integer":
                 guard let number = value as? NSNumber, String(cString: number.objCType) != "c", number.doubleValue >= 0,
                       number.doubleValue < Double(Int.max), number.doubleValue.rounded() == number.doubleValue else { return "\(key) must be a nonnegative integer" }
+            // MARK: w9-paper begin
+            case "number":
+                guard let number = value as? NSNumber, String(cString: number.objCType) != "c", number.doubleValue.isFinite else {
+                    return "\(key) must be a number"
+                }
+                if let minimum = spec["exclusiveMinimum"] as? NSNumber, number.doubleValue <= minimum.doubleValue {
+                    return "\(key) must be greater than \(minimum)"
+                }
+            // MARK: w9-paper end
             case "array": if !(value is [Any]) { return "\(key) must be an array" }
             default: break
             }
@@ -822,6 +851,9 @@ public final class MCPServer {
         let note = targetNotes.first
         var paths = targetNotes.map(\.summary.folderPath)
         if tool.name == "create_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
+        // MARK: w9-paper begin
+        if tool.name == "drawing_create", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
+        // MARK: w9-paper end
         var dispatchArguments = arguments
         if let note { dispatchArguments["ref"] = note.summary.id.uuid }
         if tool.name == "link_add", let target = arguments["target"] as? String {

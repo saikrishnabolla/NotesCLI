@@ -13,16 +13,25 @@ struct HostCommand: ParsableCommand {
 }
 
 struct HostStatus: ParsableCommand {
+    private struct Report: Codable {
+        var installed: Bool
+        var running: Bool
+        var app: String
+        var socket: String
+    }
+
     @Flag var json = false
     func run() throws {
-        let value: [String: Any] = [
-            "installed": FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path),
-            "running": CapabilityHostClient.isAvailable(),
-            "app": CapabilityHostPaths.app.path,
-            "socket": CapabilityHostPaths.socket.path,
-        ]
+        let value = Report(installed: FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path),
+                           running: CapabilityHostClient.isAvailable(), app: CapabilityHostPaths.app.path,
+                           socket: CapabilityHostPaths.socket.path)
         if json { try Output.json(value) }
-        else { Output.table(["CHECK", "RESULT"], value.keys.sorted().map { [$0, String(describing: value[$0]!)] }) }
+        else {
+            Output.table(["CHECK", "RESULT"], [
+                ["app", value.app], ["installed", value.installed ? "yes" : "no"],
+                ["running", value.running ? "yes" : "no"], ["socket", value.socket],
+            ])
+        }
     }
 }
 

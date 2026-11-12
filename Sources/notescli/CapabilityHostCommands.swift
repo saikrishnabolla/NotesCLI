@@ -21,12 +21,12 @@ struct HostStatus: ParsableCommand {
         var socket: String
     }
 
-    @Flag var json = false
+    @OptionGroup var options: GlobalOptions
     func run() throws {
         let value = Report(installed: FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path),
                            running: CapabilityHostClient.isAvailable(), app: CapabilityHostPaths.app.path,
                            socket: CapabilityHostPaths.socket.path)
-        if json { try Output.json(value) }
+        if options.json { try Output.json(value) }
         else {
             Output.table(["CHECK", "RESULT"], [
                 ["app", value.app], ["installed", value.installed ? "yes" : "no"],

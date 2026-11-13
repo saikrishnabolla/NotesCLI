@@ -16,7 +16,7 @@ notescli setup
 From a release archive:
 
 ```bash
-tar -xzf notescli-1.1.3-macos-universal.tar.gz
+tar -xzf notescli-1.1.4-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
 mkdir -p "$HOME/Applications"
 ditto "NotesCLI Capability Host.app" "$HOME/Applications/NotesCLI Capability Host.app"

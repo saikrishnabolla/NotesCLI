@@ -447,22 +447,25 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(resized.writeResult.outcome, .verified)
         pass("tables", "create/edit/add/remove rows=2 columns=2 sqlite=true")
 
-        let markdown = "# \(title)-main\n## Heading\n**<mark data-apple-notes-highlight=\"mint\">native</mark> formatting**\n- [x] done\n- item\n[web](https://example.com)\n![table](notescli-attachment:\(tableID))\n| x | y |\n| --- | --- |\n| 1 | 2 |\n"
+        let preservedTable = verify(try native.createTable(target, rows: [["kept", "cell"], ["row", "two"]], position: nil, allowShared: false), "markdown preserved table create")
+        let preservedTableID = try XCTUnwrap(preservedTable.verification.nativeReadback["tableID"])
+        let markdown = "# \(title)-target\n## Heading\n**<mark data-apple-notes-highlight=\"mint\">native</mark> formatting**\n- [x] done\n- item\n[web](https://example.com)\n![table](notescli-attachment:\(preservedTableID))\n| x | y |\n| --- | --- |\n| 1 | 2 |\n"
         let backupRoot = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/NotesCLI/backups", isDirectory: true)
-        let backupID = try SQLiteNotesStore(refresh: true).note(ref).summary.id.uuid
+        let backupID = try SQLiteNotesStore(refresh: true).note(target).summary.id.uuid
         let beforeBackups = Set((try? FileManager.default.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil)) ?? [])
-        let dry = verify(try native.writeMarkdown(ref, markdown: markdown, dryRun: true, backup: true, allowShared: false), "markdown dry run")
+        let dry = verify(try native.writeMarkdown(target, markdown: markdown, dryRun: true, backup: true, allowShared: false), "markdown dry run")
         createdBackups = ((try? FileManager.default.contentsOfDirectory(at: backupRoot, includingPropertiesForKeys: nil)) ?? []).filter { !beforeBackups.contains($0) && $0.lastPathComponent.hasPrefix(backupID) }
         XCTAssertEqual(dry.verification.nativeReadback["dryRun"], "true")
         XCTAssertEqual(Set(createdBackups.map(\.pathExtension)), Set(["md", "json"]))
-        let written = verify(try native.writeMarkdown(ref, markdown: markdown, dryRun: false, backup: false, allowShared: false), "markdown write")
+        let written = verify(try native.writeMarkdown(target, markdown: markdown, dryRun: false, backup: false, allowShared: false), "markdown write")
         XCTAssertEqual(written.writeResult.outcome, .verified)
-        let markdownReadback = try SQLiteNotesStore(refresh: true).note(ref)
+        let markdownReadback = try SQLiteNotesStore(refresh: true).note(target)
         XCTAssertTrue(markdownReadback.summary.hasChecklist)
         XCTAssertTrue(markdownReadback.document?.runs.contains { $0.highlight == .mint && $0.font.bold } == true)
         XCTAssertTrue(NoteRenderer.markdown(try XCTUnwrap(markdownReadback.document)).contains("**<mark data-apple-notes-highlight=\"mint\">native</mark> formatting**"))
         XCTAssertEqual(markdownReadback.document?.tables?.count, 2)
-        pass("write-markdown", "dry-run/checklist/headings/lists/links/tables backupFiles=2 sqlite=true")
+        XCTAssertTrue(markdownReadback.document?.runs.contains { $0.attachment?.id == preservedTableID } == true)
+        pass("write-markdown", "dry-run/checklist/headings/lists/links/tables/preserved-attachment backupFiles=2 sqlite=true")
 
         XCTAssertEqual(try native.moveFolder(child, parent: root, allowShared: false).writeResult.outcome, .verified)
         XCTAssertEqual(try native.moveFolder(child, parent: nativeFolder, allowShared: false).writeResult.outcome, .verified)

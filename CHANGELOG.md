@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.4
+
+### Fixed
+
+- MCP `create_note` honors `engine: "native"` without attachments and rejects unsupported native requests instead of using the scripting engine.
+- Full-body writes ignore Apple Notes' built-in title metadata while still protecting custom fonts, sizes, and right-to-left text.
+- The fake backend stays local when the capability host is installed.
+- Protected-folder discovery skips locale folders that do not contain a strings file.
+
 ## 1.1.3
 
 ### Fixed

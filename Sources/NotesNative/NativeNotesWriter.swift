@@ -2455,20 +2455,29 @@ private final class MarkdownNativeWriter {
 
     private func unpreservedFeatures(in note: Note, coveredBy ranges: [NSRange]) -> [String] {
         guard let document = note.document else { return [] }
+        let text = document.text as NSString
         func covered(_ range: NSRange) -> Bool {
             ranges.contains { $0.location <= range.location && NSMaxRange($0) >= NSMaxRange(range) }
         }
+        func isNewline(_ value: unichar) -> Bool { value == 0x0A || value == 0x0D || value == 0x2028 || value == 0x2029 }
+        func contentRange(_ range: NSRange) -> NSRange {
+            var start = range.location, end = NSMaxRange(range)
+            while start < end, isNewline(text.character(at: start)) { start += 1 }
+            while end > start, isNewline(text.character(at: end - 1)) { end -= 1 }
+            return NSRange(location: start, length: end - start)
+        }
         var result: Set<String> = [], offset = 0
         for run in document.runs {
-            let range = NSRange(location: offset, length: run.length); offset += run.length
-            guard run.length > 0, !covered(range) else { continue }
+            let range = contentRange(NSRange(location: offset, length: run.length)); offset += run.length
+            guard range.length > 0, !covered(range) else { continue }
             if run.paragraph?.alignment != nil { result.insert("alignment") }
-            if run.paragraph?.writingDirection != nil { result.insert("writing direction") }
+            if NativeOnlyFeatures.hasCustomWritingDirection(run.paragraph?.writingDirection) { result.insert("writing direction") }
             if run.paragraph?.collapsed == true { result.insert("collapsible headings") }
             if run.paragraph?.startNumber != nil { result.insert("numbered list starts") }
             if (run.paragraph?.blockQuoteLevel ?? 0) > 1 { result.insert("block quote levels") }
-            if run.font.name != nil { result.insert("font family") }
-            if run.font.pointSize != nil { result.insert("font size") }
+            let runText = text.substring(with: range)
+            let isDefaultTitleRun = runText.trimmingCharacters(in: .newlines) == note.summary.title
+            for feature in NativeOnlyFeatures.customFontFeatures(run.font, isDefaultTitleRun: isDefaultTitleRun) { result.insert(feature) }
             if run.color != nil { result.insert("text color") }
         }
         return result.sorted()

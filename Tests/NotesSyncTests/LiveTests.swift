@@ -3,6 +3,16 @@ import PDFKit
 import XCTest
 @testable import NotesSync
 
+private enum LiveCLIJSON {
+    static func notes(from json: String) throws -> [[String: Any]] {
+        guard let response = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any],
+              let notes = response["notes"] as? [[String: Any]] else {
+            throw NotesSyncError.invalidState("notescli list returned an invalid response.")
+        }
+        return notes
+    }
+}
+
 final class LiveTests: XCTestCase {
     private var root: URL { URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() }
 
@@ -28,6 +38,11 @@ final class LiveTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_TESTS"] == "1" else {
             throw XCTSkip("Set NOTESCLI_LIVE_TESTS=1 for real-library export and isolated notescli-test/sync verification.")
         }
+    }
+
+    func testListResponseReadsPaginatedNotes() throws {
+        let notes = try LiveCLIJSON.notes(from: #"{"notes":[{"title":"Owned"}]}"#)
+        XCTAssertEqual(notes.first?["title"] as? String, "Owned")
     }
 
     func testLiveExportReportsOnlyCountsAndSizes() throws {
@@ -64,7 +79,7 @@ final class LiveTests: XCTestCase {
             }
         }
         try ensureLiveFolders()
-        let existing = try JSONSerialization.jsonObject(with: Data(try run(["--json", "list", "--folder", syncPath]).utf8)) as! [[String: Any]]
+        let existing = try LiveCLIJSON.notes(from: run(["--json", "list", "--folder", syncPath]))
         guard existing.allSatisfy({ ($0["title"] as? String)?.hasPrefix("notescli-test-") == true }) else {
             throw NotesSyncError.invalidState("notescli-test/sync contains a title not owned by live tests.")
         }
@@ -153,7 +168,7 @@ final class LiveTests: XCTestCase {
             .sorted { (($0["path"] as? [String])?.count ?? 0) > (($1["path"] as? [String])?.count ?? 0) }
         for folder in owned {
             guard let id = folder["id"] as? String else { continue }
-            let notes = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(run(["--json", "list", "--folder", id]).utf8)) as? [[String: Any]])
+            let notes = try LiveCLIJSON.notes(from: run(["--json", "list", "--folder", id]))
             guard notes.allSatisfy({ ($0["title"] as? String)?.hasPrefix("notescli-test-") == true }) else {
                 throw NotesSyncError.invalidState("Refusing to clean a notescli-test folder containing an unowned title.")
             }
@@ -162,7 +177,7 @@ final class LiveTests: XCTestCase {
                 else if let uuid = note["id"] as? String { _ = try run(["delete", uuid, "--yes"]) }
             }
             try waitForFolderToEmpty(id)
-            _ = try run(["folder", "delete", id, "--yes"])
+            _ = try run(["folder", "delete", id, "--yes", "--expect-count", "0"])
             try waitForFolderToDisappear(try XCTUnwrap(folder["coreDataID"] as? String))
         }
     }
@@ -189,7 +204,7 @@ final class LiveTests: XCTestCase {
         let deadline = Date().addingTimeInterval(20)
         while Date() < deadline {
             guard let json = try? run(["--json", "list", "--folder", id]) else { return }
-            if let notes = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [[String: Any]], notes.isEmpty { return }
+            if let notes = try? LiveCLIJSON.notes(from: json), notes.isEmpty { return }
             Thread.sleep(forTimeInterval: 0.25)
         }
         throw NotesSyncError.invalidState("The isolated live-test folder did not become empty.")

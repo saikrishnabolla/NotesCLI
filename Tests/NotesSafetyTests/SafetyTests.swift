@@ -142,6 +142,40 @@ final class SafetyTests: XCTestCase {
         ])
     }
 
+    func testNativeOnlyFeaturesIgnoreDefaultNotesTitleMetadata() throws {
+        var note = try InMemoryNotes.sample().note("welcome")
+        var paragraph = ParagraphStyle(kind: .title)
+        paragraph.writingDirection = 0
+        var font = FontStyle(bold: true)
+        font.name = ".AppleSystemUIFontBold"
+        font.pointSize = 24
+        note.summary.title = "Title"
+        note.document = NoteDocument(text: "Title\n", runs: [
+            AttributeRun(length: 6, paragraph: paragraph, font: font),
+        ])
+        note.attachments = []
+
+        XCTAssertEqual(NativeOnlyFeatures.detect(in: note), [])
+
+        note.document?.runs[0].font.name = nil
+        XCTAssertEqual(NativeOnlyFeatures.detect(in: note), [])
+
+        note.document?.runs[0].font.pointSize = 13
+        XCTAssertEqual(NativeOnlyFeatures.detect(in: note), ["font size"])
+
+        note.document?.text = "Body\n"
+        note.document?.runs[0].font.bold = false
+        note.document?.runs[0].font.pointSize = 24
+        XCTAssertEqual(NativeOnlyFeatures.detect(in: note), ["font size"])
+
+        note.document?.text = "Title\n"
+        note.document?.runs[0].font.bold = true
+        note.document?.runs[0].paragraph?.writingDirection = 1
+        note.document?.runs[0].font.name = "Avenir Next"
+        note.document?.runs[0].font.pointSize = 22
+        XCTAssertEqual(NativeOnlyFeatures.detect(in: note), ["font family", "font size", "writing direction"])
+    }
+
     func testSnapshotRestorePolicyRefusesScriptingUnlessDowngradeIsAllowed() throws {
         var note = try InMemoryNotes.sample().note("welcome")
         note.document = NoteDocument(text: "task", runs: [

@@ -4,6 +4,10 @@ import NotesCore
 @testable import NotesAutomation
 
 final class LiveSafetyTests: XCTestCase {
+    private struct CLIWriteResponse: Decodable {
+        var result: WriteResult
+    }
+
     func testCLIRenameReadbackAndStableCreateID() throws {
         guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_TESTS"] == "1" else {
             throw XCTSkip("Set NOTESCLI_LIVE_TESTS=1; writes use only notescli-test/safety.")
@@ -53,7 +57,7 @@ final class LiveSafetyTests: XCTestCase {
 
         let createdRun = try runCLI(["--json", "add", title, "--folder", "notescli-test > safety", "--body", "## Section\n\nbody-\(token)"])
         XCTAssertEqual(createdRun.status, 0, createdRun.stderr)
-        let created = try JSONDecoder().decode(WriteResult.self, from: Data(createdRun.stdout.utf8))
+        let created = try writeResult(createdRun.stdout)
         if created.outcome == .unknown { unknown = true }
         XCTAssertEqual(created.outcome, .verified)
         XCTAssertFalse(created.noteID?.uuid.isEmpty == true)
@@ -63,7 +67,7 @@ final class LiveSafetyTests: XCTestCase {
 
         let renamedRun = try runCLI(["--json", "rename", noteID!, renamed])
         XCTAssertEqual(renamedRun.status, 0, renamedRun.stderr)
-        let renameResult = try JSONDecoder().decode(WriteResult.self, from: Data(renamedRun.stdout.utf8))
+        let renameResult = try writeResult(renamedRun.stdout)
         if renameResult.outcome == .unknown { unknown = true }
         XCTAssertEqual(renameResult.outcome, .verified)
 
@@ -95,9 +99,9 @@ final class LiveSafetyTests: XCTestCase {
             ["replace-section", noteID!, "Section", "--body", "section-\(token)"],
             ["replace-text", noteID!, "section-\(token)", "final-\(token)"]
         ] {
-            let run = try runCLI(["--json"] + arguments + ["--write-folders", "notescli-test > safety"])
+            let run = try runCLI(["--json", "--engine", "native"] + arguments + ["--write-folders", "notescli-test > safety"])
             guard run.status == 0 else { XCTFail(run.stderr); return }
-            let result = try JSONDecoder().decode(WriteResult.self, from: Data(run.stdout.utf8))
+            let result = try writeResult(run.stdout)
             if result.outcome == .unknown { unknown = true }
             XCTAssertEqual(result.outcome, .verified, "\(arguments): \(result.message ?? "")")
         }
@@ -111,15 +115,19 @@ final class LiveSafetyTests: XCTestCase {
         let history = try runCLI(["--json", "history", noteID!])
         XCTAssertEqual(history.status, 0, history.stderr)
         XCTAssertGreaterThanOrEqual((try JSONSerialization.jsonObject(with: Data(history.stdout.utf8)) as? [Any])?.count ?? 0, 5)
-        let undone = try runCLI(["--json", "undo", noteID!, "--write-folders", "notescli-test > safety"])
+        let undone = try runCLI(["--json", "--engine", "native", "undo", noteID!, "--write-folders", "notescli-test > safety"])
         XCTAssertEqual(undone.status, 0, undone.stderr)
-        let undoResult = try JSONDecoder().decode(WriteResult.self, from: Data(undone.stdout.utf8))
+        let undoResult = try writeResult(undone.stdout)
         XCTAssertEqual(undoResult.outcome, .verified)
         let restored = try runCLI(["--json", "show", noteID!])
         let restoredNote = try decoder.decode(Note.self, from: Data(restored.stdout.utf8))
         XCTAssertTrue(restoredNote.document?.plainText().contains("section-\(token)") == true)
         XCTAssertFalse(restoredNote.document?.plainText().contains("final-\(token)") == true)
         print("LIVE safety snapshots/undo: PASS")
+    }
+
+    private func writeResult(_ output: String) throws -> WriteResult {
+        try JSONDecoder().decode(CLIWriteResponse.self, from: Data(output.utf8)).result
     }
 
     private func runCLI(_ arguments: [String]) throws -> (status: Int32, stdout: String, stderr: String) {

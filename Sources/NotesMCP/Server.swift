@@ -837,14 +837,21 @@ public final class MCPServer: @unchecked Sendable {
         let offset = i("offset"), limit = max(1, i("limit", 100))
         // MARK: w3-write begin
         let nativeBodyTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text"])
+        let nativeRoutableTools = nativeBodyTools.union(["create_note"])
         if ["file_push", "sync_notes"].contains(tool.name), s("engine") == "native" {
             throw NotesError("unsupported_engine", "The native engine is not available for MCP file or folder sync. Use write_markdown for an explicit native body replacement.")
         }
-        if nativeBodyTools.contains(tool.name), s("engine") == "native" {
+        if s("engine") == "native", !tool.native {
+            guard nativeRoutableTools.contains(tool.name) else {
+                throw NotesError("unsupported_engine", "\(tool.name) has no native implementation.")
+            }
             guard allowNative else { throw NotesError("native_unavailable", "Native MCP writes are disabled.") }
             return try callNative(tool, a)
         }
-        if allowNative && tool.name == "create_note" && a["attachments"] != nil {
+        if tool.name == "create_note", a["attachments"] != nil {
+            guard s("engine") != "scripting", allowNative else {
+                throw NotesError("native_required", "Attachments require the native engine.", hint: "Start notescli mcp with --allow-native.")
+            }
             return try callNative(tool, a)
         }
         // MARK: w3-write end

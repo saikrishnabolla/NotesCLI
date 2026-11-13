@@ -4,25 +4,25 @@ import NotesCore
 /// Read localization data, not private framework code. Notes' dictionary has no trash flag.
 /// Keep every translation so a per-app language override cannot permit a second delete.
 enum ProtectedFolders {
-    static let names: [String]? = loadNames()
+    static let names: [String]? = loadNames(from: Bundle(path: "/System/Library/PrivateFrameworks/NotesShared.framework"))
 
-    private static func loadNames() -> [String]? {
-        guard let bundle = Bundle(path: "/System/Library/PrivateFrameworks/NotesShared.framework"),
-              let resources = bundle.resourceURL else { return nil }
+    /// Locale folders may hold no `Localizable.strings` once Apple moves strings into the
+    /// `.loctable`. Look files up through the bundle and read them with `NSDictionary`, so a
+    /// missing file is skipped without raising an error a test runner could report.
+    static func loadNames(from bundle: Bundle?) -> [String]? {
+        guard let bundle else { return nil }
         var names: Set<String> = ["Recently Deleted", "Trash"]
         var found = false
-        let table = resources.appendingPathComponent("Localizable.loctable")
-        if let data = try? Data(contentsOf: table),
-           let locales = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: [String: Any]] {
-            for values in locales.values {
+        if let url = bundle.url(forResource: "Localizable", withExtension: "loctable"),
+           let locales = NSDictionary(contentsOf: url) as? [String: Any] {
+            for case let values as [String: Any] in locales.values {
                 if let name = values["Recently Deleted"] as? String { names.insert(name); found = true }
             }
         }
         for locale in bundle.localizations {
-            let table = resources.appendingPathComponent(locale + ".lproj/Localizable.strings")
-            if let data = try? Data(contentsOf: table),
-               let values = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String],
-               let name = values["Recently Deleted"] {
+            if let url = bundle.url(forResource: "Localizable", withExtension: "strings", subdirectory: nil, localization: locale),
+               let values = NSDictionary(contentsOf: url) as? [String: Any],
+               let name = values["Recently Deleted"] as? String {
                 names.insert(name); found = true
             }
         }

@@ -7,7 +7,9 @@ final class CLITests: XCTestCase {
         let paths = [".build/debug/notescli", ".build/out/Products/Debug/notescli", ".build/arm64-apple-macosx/debug/notescli"]
         let binary = try XCTUnwrap(paths.map { root.appendingPathComponent($0) }.first { FileManager.default.isExecutableFile(atPath: $0.path) }, "Build notescli before running CLI tests")
         let process = Process(); process.executableURL = binary; process.arguments = args; process.currentDirectoryURL = root
-        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+        var processEnvironment = ProcessInfo.processInfo.environment
+        processEnvironment["NOTESCLI_CAPABILITY_HOST"] = "direct"
+        process.environment = processEnvironment.merging(environment) { _, new in new }
         let stdout = Pipe(), stderr = Pipe(), stdin = Pipe()
         process.standardOutput = stdout; process.standardError = stderr; process.standardInput = stdin
         try process.run()
@@ -59,6 +61,19 @@ final class CLITests: XCTestCase {
         let strippedResponse = try XCTUnwrap(responses[4])
         XCTAssertEqual((strippedResponse["error"] as? [String: Any])?["message"] as? String,
                        "Unknown argument: attachments")
+    }
+
+    func testFakeBackendNeverRoutesThroughCapabilityHost() throws {
+        for arguments in [["--backend", "fake", "--json", "accounts"], ["--backend=fake", "--json", "accounts"]] {
+            let result = try run(arguments, environment: ["NOTESCLI_CAPABILITY_HOST": "force"])
+            XCTAssertEqual(result.0, 0, result.2)
+            let accounts = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [[String: Any]])
+            XCTAssertEqual(accounts.first?["name"] as? String, "Demo")
+        }
+        let environmentResult = try run(["--json", "accounts"], environment: [
+            "NOTESCLI_CAPABILITY_HOST": "force", "NOTESCLI_BACKEND": "fake",
+        ])
+        XCTAssertEqual(environmentResult.0, 0, environmentResult.2)
     }
 
     func testDoctorAgentReadinessHasStableAccessContract() throws {
@@ -461,7 +476,7 @@ final class CLITests: XCTestCase {
         let json = try run(["--backend", "fake", "--json"])
         XCTAssertEqual(json.0, 0, json.2)
         let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
-        XCTAssertEqual(home["version"] as? String, "1.1.3")
+        XCTAssertEqual(home["version"] as? String, "1.1.4")
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },

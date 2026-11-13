@@ -78,9 +78,10 @@ struct NotesCLI: ParsableCommand {
     private static func shouldUseCapabilityHost() -> Bool {
         let environment = ProcessInfo.processInfo.environment
         if environment["NOTESCLI_HOST_ACTIVE"] == "1" { return false }
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if requestedBackend(arguments: arguments, environment: environment) == "fake" { return false }
         let route = CapabilityHostRoute(rawValue: environment["NOTESCLI_CAPABILITY_HOST"] ?? "auto") ?? .auto
         if route == .direct { return false }
-        let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.contains("--help") || arguments.contains("-h") || arguments.contains("--version") {
             return false
         }
@@ -90,6 +91,14 @@ struct NotesCLI: ParsableCommand {
         }
         guard CapabilityHostPolicy.allows(arguments) else { return false }
         return route == .force || CapabilityHostClient.isAvailable()
+    }
+
+    private static func requestedBackend(arguments: [String], environment: [String: String]) -> String {
+        for (index, argument) in arguments.enumerated() {
+            if argument == "--backend", arguments.indices.contains(index + 1) { return arguments[index + 1] }
+            if argument.hasPrefix("--backend=") { return String(argument.dropFirst("--backend=".count)) }
+        }
+        return environment["NOTESCLI_BACKEND"] ?? "default"
     }
     static func fail(_ e: NotesError, status: Int32? = nil) -> Never {
         if CommandLine.arguments.contains("--json"), let data = try? NotePresentation.json(e) { FileHandle.standardError.write(data + Data("\n".utf8)) }

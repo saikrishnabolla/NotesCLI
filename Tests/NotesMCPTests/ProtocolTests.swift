@@ -221,9 +221,48 @@ final class ProtocolTests: XCTestCase {
                                        operationID: "native-operation", value: ["ok": true])
         })
         _ = try call(server, "create_note", ["title": "With file", "body": "Body", "folder": "Notes", "attachments": ["/tmp/file"]])
+        _ = try call(server, "create_note", ["title": "Native", "body": "Body", "folder": "Notes", "engine": "native"])
         _ = try call(server, "update_note", ["ref": "Welcome", "body": "Changed", "engine": "native"])
-        XCTAssertEqual(calls.map(\.0), ["create_note", "update_note"])
-        XCTAssertEqual(calls[1].1["ref"] as? String, "welcome")
+        XCTAssertEqual(calls.map(\.0), ["create_note", "create_note", "update_note"])
+        XCTAssertEqual(calls[2].1["ref"] as? String, "welcome")
+    }
+    func testNativeEngineRequestsNeverSilentlyDowngrade() throws {
+        let fake = InMemoryNotes.sample()
+        var calls = 0
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { _, _ in
+            calls += 1
+            return try MCPNativeResult(result: WriteResult(outcome: .verified, noteID: NoteID(uuid: "native")),
+                                       operationID: "native-operation", value: ["ok": true])
+        })
+
+        let unsupported = try call(server, "rename_note", ["ref": "welcome", "title": "Changed", "engine": "native"])
+        XCTAssertEqual(unsupported["isError"] as? Bool, true)
+        XCTAssertEqual(((try structured(unsupported)["error"] as? [String: Any])?["code"] as? String), "unsupported_engine")
+        XCTAssertEqual(try fake.note("welcome").summary.title, "Welcome")
+        XCTAssertEqual(calls, 0)
+
+        let attachmentDowngrade = try call(server, "create_note", [
+            "title": "No downgrade", "body": "Body", "folder": "Notes",
+            "engine": "scripting", "attachments": ["/tmp/file"],
+        ])
+        XCTAssertEqual(attachmentDowngrade["isError"] as? Bool, true)
+        XCTAssertEqual(((try structured(attachmentDowngrade)["error"] as? [String: Any])?["code"] as? String), "native_required")
+        XCTAssertEqual(calls, 0)
+
+        let dryRun = try structured(call(server, "create_note", [
+            "title": "Dry run", "body": "Body", "folder": "Notes", "engine": "native", "dry_run": true,
+        ]))
+        XCTAssertEqual(dryRun["engine"] as? String, "native")
+        XCTAssertEqual(dryRun["dry_run"] as? Bool, true)
+        XCTAssertEqual(calls, 0)
+
+        let disabled = MCPServer(reader: fake, writer: fake)
+        let unavailable = try call(disabled, "create_note", [
+            "title": "Disabled", "body": "Body", "folder": "Notes", "engine": "native",
+        ])
+        XCTAssertEqual(unavailable["isError"] as? Bool, true)
+        XCTAssertEqual(((try structured(unavailable)["error"] as? [String: Any])?["code"] as? String), "native_unavailable")
+        XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
     }
     func testScriptingBodyRewriteRequiresNativeOrExplicitDowngrade() throws {
         let sample = InMemoryNotes.sample()
@@ -697,6 +736,6 @@ final class ServerVersionTests: XCTestCase {
         let server = MCPServer(reader: fake, writer: fake)
         let response = try XCTUnwrap(server.handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-06-18", "capabilities": [String: Any](), "clientInfo": ["name": "t", "version": "1"]]]))
         let info = try XCTUnwrap((response["result"] as? [String: Any])?["serverInfo"] as? [String: Any])
-        XCTAssertEqual(info["version"] as? String, "1.1.3")
+        XCTAssertEqual(info["version"] as? String, "1.1.4")
     }
 }

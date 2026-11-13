@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${NOTESCLI_VERSION:-1.1.2}"
+VERSION="${NOTESCLI_VERSION:-1.1.3}"
 IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bolla (GXKRUPGJVF)}"
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
 HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"

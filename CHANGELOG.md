@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.3
+
+### Fixed
+
+- Long-running MCP servers now refresh their Notes snapshot when the database changes, so a note can be read or changed immediately after creation.
+
 ## 1.1.2
 
 ### Fixed

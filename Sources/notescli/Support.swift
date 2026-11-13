@@ -17,7 +17,7 @@ struct GlobalOptions: ParsableArguments {
     @Flag(help: "Refuse all writes.") var readOnly = false
     @Flag(help: "Print JSON, including errors on stderr.") var json = false
     @Flag(help: "Suppress non-essential human output. Errors are still printed.") var quiet = false
-    func backends() throws -> Backends { try Backends.make(backend) }
+    func backends(live: Bool = false) throws -> Backends { try Backends.make(backend, live: live) }
     var resolvedEngine: WriteEngine {
         if CommandLine.arguments.contains(where: { $0 == "--engine" || $0.hasPrefix("--engine=") }) { return engine }
         return WriteEngine(rawValue: ProcessInfo.processInfo.environment["NOTESCLI_ENGINE"] ?? "") ?? engine

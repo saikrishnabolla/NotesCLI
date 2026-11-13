@@ -15,7 +15,7 @@ function draw(list){meta.textContent=list.length?`${list.length} result${list.le
 function render(v){rows=candidates(v);filter.hidden=!rows.length;filter.value='';if(rows.length){draw(rows);return}meta.textContent='Result';content.className='empty';content.textContent=v?.message||v?.error?.message||'The tool completed.'}
 filter.addEventListener('input',()=>{const q=filter.value.toLowerCase();draw(rows.filter(x=>JSON.stringify(x).toLowerCase().includes(q)))});
 addEventListener('message',e=>{const m=e.data||{};if(m.id==='notescli-init'&&m.result){parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');return}if(m.method==='ui/notifications/tool-result')render(m.params?.structuredContent||m.params);const r=m.result||m.params?.result;if(r)render(r.structuredContent||r)});
-parent.postMessage({jsonrpc:'2.0',id:'notescli-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'notescli-widget',version:'1.1.2'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
+parent.postMessage({jsonrpc:'2.0',id:'notescli-init',method:'ui/initialize',params:{protocolVersion:'2026-01-26',appInfo:{name:'notescli-widget',version:'1.1.3'},appCapabilities:{availableDisplayModes:['inline']}}},'*');
 </script></body></html>
 """#
 

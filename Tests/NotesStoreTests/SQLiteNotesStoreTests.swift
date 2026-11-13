@@ -284,6 +284,16 @@ final class SQLiteNotesStoreTests: XCTestCase {
         try FileManager.default.removeItem(at:fixture.database)
         XCTAssertEqual(try fixture.store().notes().count,6)
     }
+
+    func testLiveStoreRefreshesAfterDatabaseChanges() throws {
+        let fixture = try SyntheticLibrary()
+        let store = try LiveSQLiteNotesStore(databaseURL: fixture.database, groupContainerURL: fixture.directory)
+        XCTAssertEqual(try store.note("N2").summary.title, "Second")
+
+        try fixture.sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Changed after launch' WHERE Z_PK=21")
+
+        XCTAssertEqual(try store.note("N2").summary.title, "Changed after launch")
+    }
 }
 
 final class LiveNotesStoreTests: XCTestCase {

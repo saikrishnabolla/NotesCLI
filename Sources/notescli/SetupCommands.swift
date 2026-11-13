@@ -46,7 +46,7 @@ struct MCPRoot: ParsableCommand {
     @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.") var allowNative = false
 
     func run() throws {
-        let backend = try options.backends()
+        let backend = try options.backends(live: true)
         let selectedWriter: (any NotesWriting)? = options.readOnly ? nil : try backend.writer()
         let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
         let environment = ProcessInfo.processInfo.environment
@@ -71,7 +71,7 @@ struct MCPServe: ParsableCommand {
 
     func run() throws {
         let config = try TailscaleMCP.loadConfiguration()
-        let backend = try Backends.make(nil)
+        let backend = try Backends.make(nil, live: true)
         let writer: (any NotesWriting)? = config.readOnly ? nil : try backend.writer()
         let native: MCPNativeHandler? = config.allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
         let mcp = MCPServer(reader: backend.reader, writer: writer, readOnly: config.readOnly,

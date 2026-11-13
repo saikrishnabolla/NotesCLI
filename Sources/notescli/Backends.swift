@@ -14,7 +14,7 @@ struct Backends {
     let fidelity: NotesReadFidelity
     let unavailableFields: [String]
 
-    static func make(_ name: String?) throws -> Backends {
+    static func make(_ name: String?, live: Bool = false) throws -> Backends {
         let name = name ?? ProcessInfo.processInfo.environment["NOTESCLI_BACKEND"] ?? "default"
         if name == "fake" {
             let fake = InMemoryNotes.sample()
@@ -23,7 +23,7 @@ struct Backends {
         }
         guard name == "default" else { throw NotesError("invalid_backend", "Unknown backend: \(name)") }
         do {
-            let reader = try makeReader()
+            let reader = try makeReader(live: live)
             return Backends(reader: reader, writer: { try makeWriter(reader: reader) }, openNote: openInNotes,
                             isFake: false, fidelity: .full, unavailableFields: [])
         } catch let error as NotesError where error.code == "full_disk_access_denied" {
@@ -34,8 +34,9 @@ struct Backends {
     }
 }
 
-func makeReader() throws -> any NotesReading {
-    try SQLiteNotesStore()
+func makeReader(live: Bool = false) throws -> any NotesReading {
+    if live { return try LiveSQLiteNotesStore() }
+    return try SQLiteNotesStore()
 }
 
 /// Real writer: refs resolve through the reader to x-coredata ids, and every write

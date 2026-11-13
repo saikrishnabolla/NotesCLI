@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2
+
+### Fixed
+
+- `notescli permissions` now requests and verifies Notes Automation access for the signed capability host instead of reporting a false success from `osascript`.
+
 ## 1.1.1
 
 ### Security

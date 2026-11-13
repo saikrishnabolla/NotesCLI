@@ -75,16 +75,44 @@ public struct OSAScriptRunner: ScriptRunning {
 }
 
 public enum NotesAutomationPermission {
+    typealias StatusDeterminer = (_ askUserIfNeeded: Bool) -> OSStatus
+
+    private static func determineStatus(askUserIfNeeded: Bool) -> OSStatus {
+        let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.Notes")
+        return AEDeterminePermissionToAutomateTarget(
+            target.aeDesc, typeWildCard, typeWildCard, askUserIfNeeded)
+    }
+
     /// Never opens a consent prompt. A denied or undetermined grant stops the operation before dispatch.
     public static func check() throws {
-        let target = NSAppleEventDescriptor(bundleIdentifier: "com.apple.Notes")
-        let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, false)
+        try check(using: determineStatus)
+    }
+
+    /// Requests consent only when the user explicitly runs the permission setup command.
+    public static func request() throws {
+        try request(using: determineStatus)
+    }
+
+    static func check(using determine: StatusDeterminer) throws {
+        try validate(determine(false), allowAppNotRunning: true)
+    }
+
+    static func request(using determine: StatusDeterminer) throws {
+        try validate(determine(true), allowAppNotRunning: false)
+        // A successful request is not enough: verify the non-prompting status so the
+        // permission guide cannot report success while TCC still considers it unknown.
+        try validate(determine(false), allowAppNotRunning: false)
+    }
+
+    private static func validate(_ status: OSStatus, allowAppNotRunning: Bool) throws {
         if status == -1743 || status == -1744 {
             throw NotesError("automation_denied", "Notes Automation permission check returned \(status)" +
                 (status == -1744 ? " (consent required; no prompt was opened)." : " (not authorized)."),
                 hint: "System Settings > Privacy & Security > Automation")
         }
         // -600 is handled by the read-only launch/retry path.
-        if status != noErr && status != -600 { throw NotesError("automation_error", "Automation permission check returned \(status).") }
+        if status != noErr && !(allowAppNotRunning && status == -600) {
+            throw NotesError("automation_error", "Automation permission check returned \(status).")
+        }
     }
 }

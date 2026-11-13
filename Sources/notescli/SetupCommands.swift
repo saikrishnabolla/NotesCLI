@@ -1,6 +1,8 @@
+import AppKit
 import ArgumentParser
 import Darwin
 import Foundation
+import NotesAutomation
 import NotesCore
 import NotesDiagrams
 import NotesHost
@@ -1001,21 +1003,36 @@ enum PermissionGuide {
         settings.waitUntilExit()
         if settings.terminationStatus != 0 { warning("Could not open the Full Disk Access pane.") }
 
-        info("Requesting Automation access with a harmless read of the Notes app name. No note content is read.")
-        let automation = Process()
-        let pipe = Pipe()
-        automation.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        automation.arguments = ["-e", "tell application \"Notes\" to get name"]
-        automation.standardOutput = pipe
-        automation.standardError = pipe
-        try automation.run()
-        automation.waitUntilExit()
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        if automation.terminationStatus == 0 { info("Automation: authorized for Notes.") }
-        else {
-            warning("Automation was not authorized: \(output)")
+        info("Requesting Automation access for Notes. No note content is read.")
+        do {
+            try ensureNotesIsRunning()
+            try NotesAutomationPermission.request()
+            info("Automation: authorized for Notes.")
+        } catch {
+            warning("Automation was not authorized: \(error)")
             warning("Open System Settings > Privacy & Security > Automation and allow Notes for the same terminal or MCP host app.")
         }
 
+    }
+
+    private static func ensureNotesIsRunning() throws {
+        let bundleIdentifier = "com.apple.Notes"
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty else { return }
+        let launch = Process()
+        launch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        launch.arguments = ["-g", "-b", bundleIdentifier]
+        try launch.run()
+        launch.waitUntilExit()
+        guard launch.terminationStatus == 0 else {
+            throw NotesError("app_not_running", "Notes could not be launched before requesting Automation access.")
+        }
+        let deadline = Date().addingTimeInterval(5)
+        while NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty,
+              Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty else {
+            throw NotesError("app_not_running", "Notes did not finish launching before the Automation request.")
+        }
     }
 }

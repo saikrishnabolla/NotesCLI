@@ -1367,6 +1367,19 @@ public final class MCPServer: @unchecked Sendable {
     }
 
     public func run(input: FileHandle = .standardInput, output: FileHandle = .standardOutput) {
+        guard Thread.isMainThread else {
+            runBlocking(input: input, output: output)
+            return
+        }
+        let stopped = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "notescli.mcp.input", qos: .userInitiated).async { [self] in
+            defer { stopped.signal() }
+            runBlocking(input: input, output: output)
+        }
+        MCPRunLoopWaiter.wait(for: stopped)
+    }
+
+    private func runBlocking(input: FileHandle, output: FileHandle) {
         let connection = makeConnection()
         let writer = MCPOutputWriter(output)
         let queue = DispatchQueue(label: "notescli.mcp.requests", qos: .userInitiated, attributes: .concurrent)

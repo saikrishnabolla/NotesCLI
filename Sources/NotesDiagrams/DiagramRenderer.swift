@@ -18,10 +18,21 @@ public final class DiagramRenderer {
 
     public func render(file: URL, options: DiagramRenderOptions) throws -> RenderedDiagram {
         let source = try DiagramSource(file: file)
-        guard Thread.isMainThread else {
-            throw DiagramError.renderFailed("Diagram rendering must run on the main thread.")
-        }
         let timeout = self.timeout
+        if !Thread.isMainThread {
+            let result = DiagramRenderResult()
+            RunLoop.main.perform {
+                result.complete(Result {
+                    try Self.renderOnMainThread(source: source, options: options, timeout: timeout)
+                })
+            }
+            return try result.wait(timeout: timeout + 1)
+        }
+        return try Self.renderOnMainThread(source: source, options: options, timeout: timeout)
+    }
+
+    private static func renderOnMainThread(source: DiagramSource, options: DiagramRenderOptions,
+                                           timeout: TimeInterval) throws -> RenderedDiagram {
         return try MainActor.assumeIsolated {
             try WebKitDiagramRenderer(timeout: timeout).render(source: source, options: options)
         }
@@ -35,6 +46,23 @@ public final class DiagramRenderer {
               let match = expression.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
               let range = Range(match.range, in: html) else { return meta + html }
         return String(html[..<range.upperBound]) + meta + String(html[range.upperBound...])
+    }
+}
+
+private final class DiagramRenderResult: @unchecked Sendable {
+    private let completed = DispatchSemaphore(value: 0)
+    private var result: Result<RenderedDiagram, Error>?
+
+    func complete(_ result: Result<RenderedDiagram, Error>) {
+        self.result = result
+        completed.signal()
+    }
+
+    func wait(timeout: TimeInterval) throws -> RenderedDiagram {
+        guard completed.wait(timeout: .now() + timeout) == .success else {
+            throw DiagramError.renderFailed("Diagram rendering timed out.")
+        }
+        return try result!.get()
     }
 }
 
@@ -147,6 +175,14 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
           const style = document.createElement('style');
           style.textContent = `\(backgroundRule)`;
           document.head.appendChild(style);
+          const standalone = document.body.dataset.notescliStandaloneSvg === 'true'
+            ? document.body.querySelector(':scope > svg:only-child') : null;
+          const box = standalone && standalone.viewBox && standalone.viewBox.baseVal;
+          if (box && box.width > 0 && box.height > 0 &&
+              !standalone.hasAttribute('width') && !standalone.hasAttribute('height')) {
+            standalone.setAttribute('width', String(box.width));
+            standalone.setAttribute('height', String(box.height));
+          }
           if (document.fonts && document.fonts.ready) {
             await Promise.race([document.fonts.ready, new Promise(resolve => setTimeout(resolve, 8000))]);
           }
@@ -280,7 +316,7 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
         <!doctype html><html><head><meta charset="utf-8"><style>
         html,body{margin:0;padding:0;width:max-content;height:max-content;overflow:visible}
         body{display:block}svg{display:block}
-        </style></head><body>\(svg)</body></html>
+        </style></head><body data-notescli-standalone-svg="true">\(svg)</body></html>
         """
     }
 }

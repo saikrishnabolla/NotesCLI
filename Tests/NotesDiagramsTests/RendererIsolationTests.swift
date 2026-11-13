@@ -67,6 +67,72 @@ final class RendererIsolationTests: XCTestCase {
         }
     }
 
+    func testDiagramRenderFromBackgroundUsesTheMainThread() throws {
+        let file = root.appendingPathComponent("background.html")
+        try Data("<div style=\"width:40px;height:40px;background:#000\"></div>".utf8).write(to: file)
+        let result = RenderResultBox()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            result.set(Result {
+                try DiagramRenderer(timeout: 2).render(
+                    file: file,
+                    options: DiagramRenderOptions(width: 40, scale: 2, background: .white)
+                )
+            })
+            finished.signal()
+        }
+
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while finished.wait(timeout: .now()) != .success, Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+        }
+        XCTAssertNoThrow(try result.get())
+    }
+
+    func testViewBoxOnlySVGHasVisibleBounds() throws {
+        let file = root.appendingPathComponent("viewbox.svg")
+        try Data("""
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 180">
+          <rect width="320" height="180" fill="#ff0000"/>
+        </svg>
+        """.utf8).write(to: file)
+
+        let rendered = try DiagramRenderer().render(
+            file: file,
+            options: DiagramRenderOptions(width: 320, scale: 2, background: .white)
+        )
+
+        XCTAssertEqual(rendered.pixelSize, DiagramPixelSize(width: 640, height: 362))
+    }
+
+    func testResponsiveInlineSVGKeepsItsHTMLLayout() throws {
+        let rendered = try render("""
+        <div style="width:700px">
+          <svg viewBox="0 0 1200 600"><rect x="1100" width="100" height="600" fill="#00ff00"/></svg>
+        </div>
+        """, width: 700)
+
+        XCTAssertEqual(rendered.pixelSize.width, 1400)
+        XCTAssertLessThan(rendered.pixelSize.height, 800)
+    }
+
+    func testStandaloneSVGWithOneExplicitDimensionKeepsBrowserSizing() throws {
+        let file = root.appendingPathComponent("width-only.svg")
+        try Data("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="640" viewBox="0 0 1200 600">
+          <rect width="1200" height="600" fill="#ff0000"/>
+        </svg>
+        """.utf8).write(to: file)
+
+        let rendered = try DiagramRenderer().render(
+            file: file,
+            options: DiagramRenderOptions(width: 700, scale: 2, background: .white)
+        )
+
+        XCTAssertEqual(rendered.pixelSize.width, 1400)
+        XCTAssertGreaterThan(rendered.pixelSize.height, 700)
+    }
+
     func testDiagramWithTooManyElementsIsRefused() throws {
         let html = "<!doctype html><html><head></head><body>" + String(repeating: "<i></i>", count: 50_001) + "</body></html>"
         XCTAssertThrowsError(try render(html)) { error in
@@ -85,6 +151,14 @@ final class RendererIsolationTests: XCTestCase {
         XCTAssertEqual(dataFont.pixelSize, systemFont.pixelSize)
         XCTAssertGreaterThan(dataFont.pixelSize.height, fallback.pixelSize.height * 2)
     }
+}
+
+private final class RenderResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<RenderedDiagram, Error>?
+
+    func set(_ result: Result<RenderedDiagram, Error>) { lock.withLock { self.result = result } }
+    func get() throws -> RenderedDiagram { try lock.withLock { try XCTUnwrap(result).get() } }
 }
 
 /// A loopback HTTP listener that records every request path it receives.

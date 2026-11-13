@@ -5,6 +5,21 @@ import XCTest
 @testable import NotesMCP
 
 final class HTTPTransportTests: XCTestCase, @unchecked Sendable {
+    func testServerWaitKeepsTheMainQueueAvailable() {
+        XCTAssertTrue(Thread.isMainThread)
+        let stopped = DispatchSemaphore(value: 0)
+        let serviced = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            serviced.signal()
+            stopped.signal()
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) { stopped.signal() }
+
+        MCPRunLoopWaiter.wait(for: stopped)
+
+        XCTAssertEqual(serviced.wait(timeout: .now()), .success)
+    }
+
     func testRequestHeadParserNormalizesHeadersAndRejectsAmbiguousFraming() throws {
         let parsed = try HTTPRequestHeadParser.parse(Data(
             "POST /mcp HTTP/1.1\r\nHost: localhost:7777\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 2\r\n\r\n".utf8

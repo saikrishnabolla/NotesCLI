@@ -12,6 +12,37 @@ final class ProtocolTests: XCTestCase {
         return try XCTUnwrap(response["result"] as? [String: Any])
     }
     func structured(_ result: [String: Any]) throws -> [String: Any] { try XCTUnwrap(result["structuredContent"] as? [String: Any]) }
+    func testStdioRunKeepsTheMainQueueAvailableForNativeRequests() throws {
+        XCTAssertTrue(Thread.isMainThread)
+        let input = Pipe()
+        let output = Pipe()
+        let server = MCPServer(reader: InMemoryNotes.sample(), allowNative: true, nativeHandler: { _, _ in
+            let serviced = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async { serviced.signal() }
+            return try MCPNativeResult(value: [
+                "main_queue_available": serviced.wait(timeout: .now() + 0.2) == .success,
+            ])
+        })
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": ["name": "link_list", "arguments": ["ref": "welcome"]],
+        ]
+        var requestData = try JSONSerialization.data(withJSONObject: request)
+        requestData.append(0x0a)
+        input.fileHandleForWriting.write(requestData)
+        input.fileHandleForWriting.closeFile()
+
+        server.run(input: input.fileHandleForReading, output: output.fileHandleForWriting)
+        output.fileHandleForWriting.closeFile()
+
+        let responseData = output.fileHandleForReading.readDataToEndOfFile()
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        let result = try XCTUnwrap(response["result"] as? [String: Any])
+        let value = try XCTUnwrap((try structured(result))["value"] as? [String: Any])
+        XCTAssertEqual(value["main_queue_available"] as? Bool, true)
+    }
     func testVersionsAndNotifications() throws {
         let server = MCPServer(reader: InMemoryNotes.sample())
         for version in MCPServer.versions + ["future"] {
@@ -736,6 +767,6 @@ final class ServerVersionTests: XCTestCase {
         let server = MCPServer(reader: fake, writer: fake)
         let response = try XCTUnwrap(server.handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-06-18", "capabilities": [String: Any](), "clientInfo": ["name": "t", "version": "1"]]]))
         let info = try XCTUnwrap((response["result"] as? [String: Any])?["serverInfo"] as? [String: Any])
-        XCTAssertEqual(info["version"] as? String, "1.1.4")
+        XCTAssertEqual(info["version"] as? String, "1.1.5")
     }
 }

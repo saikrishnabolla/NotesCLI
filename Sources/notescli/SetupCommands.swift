@@ -101,7 +101,7 @@ struct MCPServe: ParsableCommand {
         interrupt.setEventHandler { stopped.signal() }
         term.resume()
         interrupt.resume()
-        stopped.wait()
+        MCPRunLoopWaiter.wait(for: stopped)
         server.stop()
     }
 }

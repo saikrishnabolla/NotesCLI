@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.5
+
+### Fixed
+
+- Local and Tailscale MCP keep the main run loop available so native Notes calls cannot deadlock while opening Apple's shared Notes context.
+- MCP diagram writes render on the main run loop, including SVG files that define only a `viewBox`.
+
 ## 1.1.4
 
 ### Fixed

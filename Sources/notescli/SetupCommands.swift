@@ -510,6 +510,11 @@ struct MCPInstall: ParsableCommand {
 }
 
 struct MCPUninstall: ParsableCommand {
+    enum Scope {
+        case mcpClients
+        case fullProduct
+    }
+
     static let configuration = CommandConfiguration(commandName: "uninstall", abstract: "Disconnect notescli from an MCP client.")
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
@@ -520,7 +525,8 @@ struct MCPUninstall: ParsableCommand {
         try Self.execute(client: client, options: options, dryRun: dryRun, keepConfig: keepConfig)
     }
 
-    static func execute(client: MCPClient, options: GlobalOptions, dryRun: Bool, keepConfig: Bool) throws {
+    static func execute(client: MCPClient, options: GlobalOptions, dryRun: Bool, keepConfig: Bool,
+                        scope: Scope = .mcpClients) throws {
         let selectedClients = client == .all ? MCPClient.installable : [client]
         var actions: [UninstallAction] = []
         for selected in selectedClients {
@@ -548,7 +554,7 @@ struct MCPUninstall: ParsableCommand {
                     }
                 }
                 actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: "would_remove"))
-                if selected == .tailscale, client != .all {
+                if selected == .tailscale, scope == .mcpClients {
                     let ownedPaths = Set([MCPHTTPPaths.config.path, MCPHTTPPaths.launchAgent.path, MCPHTTPPaths.log.path])
                     for file in try InstallManifest.filesToRemove(keepConfig: keepConfig)
                         where ownedPaths.contains(file.path) {
@@ -583,7 +589,7 @@ struct MCPUninstall: ParsableCommand {
                 actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: result))
             }
         }
-        if client == .all {
+        if scope == .fullProduct {
             if FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path) {
                 guard HostInstallation.validSignature(CapabilityHostPaths.app) else {
                     throw NotesError("uninstall_not_owned", "Refusing to remove a capability host that is not signed by the NotesCLI developer team.")
@@ -621,7 +627,8 @@ struct UninstallCommand: ParsableCommand {
     @Flag(help: "Keep NotesCLI configuration and onboarding state.") var keepConfig = false
 
     func run() throws {
-        try MCPUninstall.execute(client: .all, options: options, dryRun: dryRun, keepConfig: keepConfig)
+        try MCPUninstall.execute(client: .all, options: options, dryRun: dryRun, keepConfig: keepConfig,
+                                 scope: .fullProduct)
     }
 }
 

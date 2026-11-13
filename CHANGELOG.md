@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.6
+
+### Fixed
+
+- `mcp uninstall --client all` now removes only MCP client integrations. The capability host and other NotesCLI files remain until `notescli uninstall` is run.
+
 ## 1.1.5
 
 ### Fixed

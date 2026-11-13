@@ -186,6 +186,63 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: config), modified)
     }
 
+    func testMCPUninstallAllPreservesCapabilityHostAndNonMCPFiles() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+
+        let installed = try run(["mcp", "install", "--client", "codex"], environment: environment)
+        XCTAssertEqual(installed.0, 0, installed.2)
+
+        let app = home.appendingPathComponent("Applications/NotesCLI Capability Host.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI")
+        let onboarding = support.appendingPathComponent("onboarding.json")
+        try Data(#"{"schemaVersion":1,"steps":{}}"#.utf8).write(to: onboarding)
+        let manifest = support.appendingPathComponent("install-manifest.json")
+        var root = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any])
+        var files = root["files"] as? [[String: Any]] ?? []
+        files.append(["path": onboarding.path, "category": "config"])
+        root["files"] = files
+        try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]).write(to: manifest)
+
+        let removed = try run(["mcp", "uninstall", "--client", "all", "--json"], environment: environment)
+        XCTAssertEqual(removed.0, 0, removed.2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: app.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: onboarding.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: manifest.path))
+        XCTAssertFalse(removed.1.contains("capability_host"), removed.1)
+        let config = try String(contentsOf: home.appendingPathComponent(".codex/config.toml"), encoding: .utf8)
+        XCTAssertFalse(config.contains("[mcp_servers.notescli]"))
+    }
+
+    func testMCPUninstallAllDryRunListsTailscaleFiles() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI")
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        let paths = [
+            support.appendingPathComponent("mcp-http.json").path,
+            home.appendingPathComponent("Library/LaunchAgents/com.saikrishnabolla.notescli.mcp-http.plist").path,
+            home.appendingPathComponent("Library/Logs/notescli-mcp-http.log").path,
+        ]
+        let manifest: [String: Any] = [
+            "schemaVersion": 1,
+            "owner": "NotesCLI",
+            "mcpClients": [["client": "tailscale", "readOnly": false, "allowNative": true]],
+            "files": paths.map { ["path": $0, "category": "runtime"] },
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: support.appendingPathComponent("install-manifest.json"))
+
+        let result = try run(["mcp", "uninstall", "--client", "all", "--dry-run", "--json"], environment: environment)
+        XCTAssertEqual(result.0, 0, result.2)
+        let actions = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [[String: Any]])
+        let listed = Set(actions.filter { $0["kind"] as? String == "file" }.compactMap { $0["target"] as? String })
+        XCTAssertEqual(listed, Set(paths))
+        XCTAssertFalse(actions.contains { $0["kind"] as? String == "capability_host" })
+    }
+
     func testLegacyManifestDecodesButCannotAuthorizeMCPEntryRemoval() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -399,7 +456,7 @@ final class CLITests: XCTestCase {
         }
         try writeManifest(path: onboarding.path)
 
-        let kept = try run(["mcp", "uninstall", "--dry-run", "--keep-config", "--json"], environment: environment)
+        let kept = try run(["uninstall", "--dry-run", "--keep-config", "--json"], environment: environment)
         XCTAssertEqual(kept.0, 0, kept.2)
         XCTAssertFalse(kept.1.contains(onboarding.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: onboarding.path))
@@ -407,13 +464,13 @@ final class CLITests: XCTestCase {
         let outside = home.appendingPathComponent("outside.txt")
         try Data("keep".utf8).write(to: outside)
         try writeManifest(path: outside.path)
-        let refused = try run(["mcp", "uninstall", "--json"], environment: environment)
+        let refused = try run(["uninstall", "--json"], environment: environment)
         XCTAssertNotEqual(refused.0, 0)
         XCTAssertTrue(refused.2.contains("uninstall_path_refused"), refused.2)
         XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path))
 
         try writeManifest(path: onboarding.path)
-        let removed = try run(["mcp", "uninstall", "--json"], environment: environment)
+        let removed = try run(["uninstall", "--json"], environment: environment)
         XCTAssertEqual(removed.0, 0, removed.2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: onboarding.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.path))
@@ -422,7 +479,7 @@ final class CLITests: XCTestCase {
         try FileManager.default.createDirectory(at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("log".utf8).write(to: log)
         try writeManifest(path: log.path)
-        let removedLog = try run(["mcp", "uninstall", "--json"], environment: environment)
+        let removedLog = try run(["uninstall", "--json"], environment: environment)
         XCTAssertEqual(removedLog.0, 0, removedLog.2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: log.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: manifest.path))
@@ -476,7 +533,7 @@ final class CLITests: XCTestCase {
         let json = try run(["--backend", "fake", "--json"])
         XCTAssertEqual(json.0, 0, json.2)
         let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
-        XCTAssertEqual(home["version"] as? String, "1.1.5")
+        XCTAssertEqual(home["version"] as? String, "1.1.6")
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },

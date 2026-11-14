@@ -1155,7 +1155,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             try editor.finish(); try save(context, notes: [source])
         }
         catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
-        let read = try links(id(source))
+        let read = try linkRows(source)
         let destinationID = id(destination)
         let expectedParagraphID = paragraph?.id.uuidString
         var native = ["target": destinationID, "linkCount": "\(read.count)", "attachmentID": attachmentID]

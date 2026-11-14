@@ -98,6 +98,18 @@ final class NativeTests: XCTestCase {
         XCTAssertLessThan(committed.lowerBound, move.lowerBound)
     }
 
+    func testNoteLinkVerificationDoesNotReenterWriterLockAcrossContextQueue() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/NotesNative/NativeNotesWriter.swift"),
+                                encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: "public func insertNoteLink("))
+        let end = try XCTUnwrap(source.range(of: "fileprivate enum InlineObjectRequest", range: start.upperBound..<source.endIndex))
+        let implementation = source[start.lowerBound..<end.lowerBound]
+        XCTAssertTrue(implementation.contains("let read = try linkRows(source)"))
+        XCTAssertFalse(implementation.contains("try links(id(source))"))
+    }
+
     func testSnapshotHashtagRevivalAlsoRevivesTheHashtagRecord() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()

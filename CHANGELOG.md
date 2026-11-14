@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.8
+
+### Fixed
+
+- Fake and dry-run native commands no longer depend on private Notes selectors from the current macOS version.
+- Missing scan-edit selectors now disable only the affected scan operation instead of the whole native engine.
+
 ## 1.1.7
 
 ### Added

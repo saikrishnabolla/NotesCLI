@@ -1,8 +1,8 @@
 class Notescli < Formula
   desc "CLI and MCP server for Apple Notes"
   homepage "https://github.com/saikrishnabolla/NotesCLI"
-  url "https://github.com/saikrishnabolla/NotesCLI/releases/download/v1.1.7/notescli-1.1.7-macos-universal.tar.gz"
-  sha256 "57126e8287b69df262a95d9c78cc4ea8427684cce3bacbcc6a4bffef79764056"
+  url "https://github.com/saikrishnabolla/NotesCLI/releases/download/v1.1.8/notescli-1.1.8-macos-universal.tar.gz"
+  sha256 "b61bf2e99710431a8c532a570544f02c248c9dea3507c887911accb66f858507"
   license "MIT"
 
   depends_on macos: :sonoma

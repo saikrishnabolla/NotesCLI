@@ -1,6 +1,6 @@
 # Command reference
 
-This reference follows `notescli --help` from version 1.1.7.
+This reference follows `notescli --help` from version 1.1.8.
 
 ## Global options
 

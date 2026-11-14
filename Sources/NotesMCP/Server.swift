@@ -226,6 +226,7 @@ public final class MCPServer: @unchecked Sendable {
                   ["ref": string, "target": string, "text": string, "paragraph_id": string,
                    "paragraph_name": string, "position": integer], write: true, native: true),
                 t("link_list", "List native note links.", ["ref"], ["ref": string], native: true),
+                t("collaboration_activity", "Export a note's stored collaboration activity events as raw, hashed payloads. Read-only; JSON is shown only when the bytes parse as JSON.", ["ref"], ["ref": string, "limit": ["type": "integer", "minimum": 1, "maximum": CollaborationActivityLimits.maximumEventLimit]], native: true),
                 t("text_find", "Find native UTF-16 text ranges.", ["ref", "text"], ["ref": string, "text": string, "case_insensitive": bool], native: true),
                 t("text_insert", "Insert text at a UTF-16 position.", ["ref", "text", "position"], ["ref": string, "text": string, "position": integer], write: true, native: true),
                 t("text_delete", "Delete a UTF-16 range.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer], write: true, native: true, destructive: true),

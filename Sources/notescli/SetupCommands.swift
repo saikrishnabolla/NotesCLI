@@ -534,6 +534,8 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         position: integer("position"), allowShared: (boolean("allow_shared") ?? false)
     ))
     case "link_list": return try MCPNativeResult(value: writer.links(ref()))
+    case "collaboration_activity":
+        return try MCPNativeResult(value: writer.collaborationActivity(ref(), limits: CollaborationActivityLimits.events(integer("limit"))))
     case "text_find": return try MCPNativeResult(value: writer.searchOffsets(ref(), text: string("text")!, caseInsensitive: boolean("case_insensitive") ?? false))
     case "text_insert": return try result(writer.insertText(ref(), text: string("text")!, position: integer("position")!, allowShared: (boolean("allow_shared") ?? false)))
     case "text_delete": return try result(writer.deleteRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), allowShared: (boolean("allow_shared") ?? false)))

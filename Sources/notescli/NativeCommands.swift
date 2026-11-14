@@ -672,6 +672,22 @@ struct LinkList: ParsableCommand {
     @OptionGroup var options: GlobalOptions; @Argument var ref: String
     func run() throws { try UnifiedNative.read(options, ref: ref) { try NativeNotesWriter().links($0) } }
 }
+struct CollaborationCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "collaboration", abstract: "Read stored collaboration data.",
+                                                    subcommands: [CollaborationActivityCommand.self])
+}
+struct CollaborationActivityCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "activity",
+        abstract: "Export a note's stored collaboration activity events as raw, hashed payloads.")
+    @OptionGroup var options: GlobalOptions; @Argument var ref: String
+    @Option(help: "Maximum events to list (1-\(CollaborationActivityLimits.maximumEventLimit), default \(CollaborationActivityLimits.defaultEventLimit)).")
+    var limit: Int?
+    func run() throws {
+        let limits = try CollaborationActivityLimits.events(limit)
+        try UnifiedNative.read(options, ref: ref) { try NativeNotesWriter().collaborationActivity($0, limits: limits) }
+    }
+}
 struct DeepLink: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "deeplink")
     @OptionGroup var options: GlobalOptions; @Argument var ref: String

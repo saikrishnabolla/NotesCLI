@@ -1334,6 +1334,23 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    /// Read-only export of stored collaboration activity. Never saves; discards any in-memory
+    /// state the NotesShared getters create while decoding.
+    public func collaborationActivity(_ ref: String,
+                                      limits: CollaborationActivityLimits = CollaborationActivityLimits()) throws -> CollaborationActivityExport {
+        try performRead { context in
+            let target = try note(ref, in: context)
+            let wasDirty = target.hasChanges
+            defer { if !wasDirty, target.hasChanges { context.refresh(target, mergeChanges: false) } }
+            let reader = CollaborationActivityRuntimeReader(
+                value: { object, key in NCNotesRuntime.value(forKey: key, of: object) },
+                responds: { object, key in (object as? NSObject)?.responds(to: NSSelectorFromString(key)) ?? false },
+                className: { object in String(cString: object_getClassName(object)) })
+            return CollaborationActivityExporter.export(noteID: id(target), title: title(target),
+                                                        raw: try reader.read(note: target), limits: limits)
+        }
+    }
+
     public func insertText(_ ref: String, text: String, position: Int, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         let expected = text as NSString

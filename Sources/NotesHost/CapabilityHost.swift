@@ -72,7 +72,7 @@ public enum CapabilityHostPolicy {
     private static let allowedCommands: Set<String> = [
         "accounts", "folders", "list", "show", "search", "tags", "recent", "pinned", "capabilities", "help",
         "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "ocr", "map", "scan", "quick-note", "settings", "checklist", "pin",
-        "unpin", "tag", "link", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
+        "unpin", "tag", "link", "collaboration", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
         "write", "fetch", "index", "stats", "count", "show-many", "selection", "backlinks", "raw", "deleted",
         "smart-folders", "prepend", "insert-under-heading", "replace-section", "replace-text", "exists", "history",
         "diff", "undo", "revert", "journal", "smart-folder", "permissions", "mcp", "anchor", "wait-sync",

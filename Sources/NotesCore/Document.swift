@@ -92,6 +92,8 @@ public struct InlineRef: Codable, Sendable, Equatable {
     public var typeUTI: String
     public var displayText: String?
     public var url: String?
+    public var parentAttachmentID: String?
+    public var parentAttachmentCaptured: Bool?
     public init(id: String, typeUTI: String) { self.id = id; self.typeUTI = typeUTI }
 }
 

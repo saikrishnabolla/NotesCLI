@@ -19,7 +19,9 @@ struct StoreRow: Sendable {
 struct StoreLibrary: Sendable {
     let entities: [String: Set<Int64>]
     let objects: [Int64: StoreRow]
+    let locations: [Int64: StoreRow]
     let bodies: [Int64: Data]
+    let bodyRows: [Int64: StoreRow]
     let participants: [Int64: [NoteParticipant]]
     let cloudStates: [Int64: StoreCloudState]
     let storeUUID: String
@@ -133,27 +135,42 @@ enum SQLiteSnapshot {
         }
         guard entities["ICNote"] != nil else { throw NotesError("unsupported_schema", "This database has no ICNote entity.") }
         let objectColumns = try query("PRAGMA table_info(ZICCLOUDSYNCINGOBJECT)").compactMap { $0.string("name") }
-        let exact: Set<String> = ["Z_PK", "Z_ENT", "ZIDENTIFIER", "ZNAME", "ZSNIPPET", "ZWIDGETSNIPPET", "ZFOLDER", "ZPARENT", "ZPARENTATTACHMENT", "ZPARENTATTACHMENT1", "ZOWNER", "ZNOTEDATA", "ZOUTLINESTATEDATA", "ZISPASSWORDPROTECTED", "ZMARKEDFORDELETION", "ZISPINNED", "ZHASCHECKLIST", "ZHASCHECKLISTINPROGRESS", "ZISSYSTEMPAPER", "ZACCOUNTTYPE", "ZFOLDERTYPE", "ZSMARTFOLDERQUERYJSON", "ZISSYSTEMFOLDER", "ZISRECENTLYDELETED", "ZISTRASH", "ZMEDIA", "ZFILENAME", "ZFALLBACKTITLE", "ZFALLBACKIMAGEGENERATION", "ZFALLBACKPDFGENERATION", "ZURLSTRING", "ZREMOTEFILEURLSTRING", "ZOCRSUMMARY", "ZHANDWRITINGSUMMARY", "ZADDITIONALINDEXABLETEXT", "ZIMAGECLASSIFICATIONSUMMARY", "ZSUMMARY", "ZDISPLAYTEXT", "ZALTTEXT", "ZSTANDARDIZEDCONTENT", "ZTOKENCONTENTIDENTIFIER", "ZTYPE", "ZMERGEABLEDATA", "ZMERGEABLEDATA1", "ZMERGEABLEDATA2", "ZDURATION", "ZFILESIZE", "ZNEEDSINITIALFETCHFROMCLOUD", "ZNEEDSTOBEFETCHEDFROMCLOUD", "ZNEEDSTOFETCHUSERSPECIFICRECORDASSETS", "ZNEEDSTOSAVEUSERSPECIFICRECORD", "ZNOTEHASCHANGES", "ZVERSIONOUTOFDATE", "ZCLOUDSTATE", "ZLASTSYNCDATE", "ZLASTOPENEDDATE", "ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE", "ZISSHAREDIRTY", "ZSERVERSHAREDATA", "ZUSERRECORDNAME", "ZUSERTITLE"]
+        let exact: Set<String> = ["Z_PK", "Z_ENT", "ZIDENTIFIER", "ZNAME", "ZSNIPPET", "ZWIDGETSNIPPET", "ZFOLDER", "ZPARENT", "ZPARENTATTACHMENT", "ZPARENTATTACHMENT1", "ZOWNER", "ZNOTEDATA", "ZOUTLINESTATEDATA", "ZISPASSWORDPROTECTED", "ZCRYPTOSALT", "ZCRYPTOITERATIONCOUNT", "ZCRYPTOWRAPPEDKEY", "ZCRYPTOVERIFIER", "ZCRYPTOINITIALIZATIONVECTOR", "ZCRYPTOTAG", "ZENCRYPTEDVALUESJSON", "ZASSETCRYPTOINITIALIZATIONVECTOR", "ZASSETCRYPTOTAG", "ZFALLBACKIMAGECRYPTOINITIALIZATIONVECTOR", "ZFALLBACKIMAGECRYPTOTAG", "ZFALLBACKPDFCRYPTOINITIALIZATIONVECTOR", "ZFALLBACKPDFCRYPTOTAG", "ZUNAPPLIEDENCRYPTEDRECORD", "ZUNAPPLIEDENCRYPTEDRECORDDATA", "ZMARKEDFORDELETION", "ZISPINNED", "ZHASCHECKLIST", "ZHASCHECKLISTINPROGRESS", "ZISSYSTEMPAPER", "ZACCOUNTTYPE", "ZFOLDERTYPE", "ZDATEHEADERSTYPE", "ZSMARTFOLDERQUERYJSON", "ZISSYSTEMFOLDER", "ZISRECENTLYDELETED", "ZISTRASH", "ZMEDIA", "ZLOCATION", "ZFILENAME", "ZFALLBACKTITLE", "ZFALLBACKIMAGEGENERATION", "ZFALLBACKPDFGENERATION", "ZURLSTRING", "ZREMOTEFILEURLSTRING", "ZOCRSUMMARY", "ZHANDWRITINGSUMMARY", "ZADDITIONALINDEXABLETEXT", "ZIMAGECLASSIFICATIONSUMMARY", "ZSUMMARY", "ZDISPLAYTEXT", "ZALTTEXT", "ZSTANDARDIZEDCONTENT", "ZTOKENCONTENTIDENTIFIER", "ZTYPE", "ZMERGEABLEDATA", "ZMERGEABLEDATA1", "ZMERGEABLEDATA2", "ZMARKUPMODELDATA", "ZDURATION", "ZFILESIZE", "ZNEEDSINITIALFETCHFROMCLOUD", "ZNEEDSTOBEFETCHEDFROMCLOUD", "ZNEEDSTOFETCHUSERSPECIFICRECORDASSETS", "ZNEEDSTOSAVEUSERSPECIFICRECORD", "ZNOTEHASCHANGES", "ZVERSIONOUTOFDATE", "ZCLOUDSTATE", "ZLASTSYNCDATE", "ZLASTOPENEDDATE", "ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE", "ZISSHAREDIRTY", "ZSERVERSHAREDATA", "ZUSERRECORDNAME", "ZUSERTITLE", "ZIMAGEFILTERTYPE", "ZORIENTATION", "ZHASMARKUPDATA", "ZCROPPINGQUADBOTTOMLEFTX", "ZCROPPINGQUADBOTTOMLEFTY", "ZCROPPINGQUADBOTTOMRIGHTX", "ZCROPPINGQUADBOTTOMRIGHTY", "ZCROPPINGQUADTOPLEFTX", "ZCROPPINGQUADTOPLEFTY", "ZCROPPINGQUADTOPRIGHTX", "ZCROPPINGQUADTOPRIGHTY"]
         let families = ["ZACCOUNT", "ZTITLE", "ZTYPEUTI", "ZNOTE", "ZATTACHMENT", "ZGENERATION", "ZCREATIONDATE", "ZMODIFICATIONDATE"]
         let selected = objectColumns.filter { name in
             exact.contains(name) || families.contains { prefix in name.hasPrefix(prefix) && name.dropFirst(prefix.count).allSatisfy(\.isNumber) }
         }
         guard ["Z_PK", "Z_ENT", "ZIDENTIFIER"].allSatisfy(selected.contains) else { throw NotesError("unsupported_schema", "Required Notes columns are missing.") }
-        let objectRows = try query("SELECT " + selected.map { "\"\($0)\"" }.joined(separator: ",") + " FROM ZICCLOUDSYNCINGOBJECT")
+        var objectExpressions = selected.map { "\"\($0)\"" }
+        if objectColumns.contains("ZSYNAPSEDATA") {
+            objectExpressions.append("length(\"ZSYNAPSEDATA\") AS \"ZSYNAPSEDATABYTES\"")
+        }
+        if objectColumns.contains("ZLINKPRESENTATIONARCHIVEDMETADATA") {
+            objectExpressions.append("length(\"ZLINKPRESENTATIONARCHIVEDMETADATA\") AS \"ZLINKPRESENTATIONARCHIVEDMETADATABYTES\"")
+        }
+        let objectRows = try query("SELECT " + objectExpressions.joined(separator: ",") + " FROM ZICCLOUDSYNCINGOBJECT")
         var objects: [Int64: StoreRow] = [:]
         for row in objectRows { if let pk = row.int("Z_PK") { objects[pk] = row } }
         let bodyColumns = Set(try query("PRAGMA table_info(ZICNOTEDATA)").compactMap { $0.string("name") })
         guard bodyColumns.contains("ZDATA"), bodyColumns.contains("Z_PK") else { throw NotesError("unsupported_schema", "Note body columns are missing.") }
-        let bodyRows = try query("SELECT Z_PK, ZDATA" + (bodyColumns.contains("ZNOTE") ? ", ZNOTE" : "") + " FROM ZICNOTEDATA")
+        let selectedBodyColumns = ["Z_PK", "ZDATA", "ZNOTE", "ZCRYPTOINITIALIZATIONVECTOR", "ZCRYPTOTAG"]
+            .filter(bodyColumns.contains)
+        let bodyRows = try query("SELECT " + selectedBodyColumns.joined(separator: ",") + " FROM ZICNOTEDATA")
         var bodies: [Int64: Data] = [:]
-        var bodyByPK: [Int64: Data] = [:]
+        var bodyByPK: [Int64: StoreRow] = [:]
+        var bodyRowsByNote: [Int64: StoreRow] = [:]
         for row in bodyRows {
             if let data = row.data("ZDATA") {
-                if let pk = row.int("Z_PK") { bodyByPK[pk] = data }
-                if let note = row.int("ZNOTE") { bodies[note] = data }
+                if let pk = row.int("Z_PK") { bodyByPK[pk] = row }
+                if let note = row.int("ZNOTE") { bodies[note] = data; bodyRowsByNote[note] = row }
             }
         }
-        for (pk, row) in objects { if let body = row.int("ZNOTEDATA"), let data = bodyByPK[body] { bodies[pk] = data } }
+        for (pk, row) in objects {
+            if let body = row.int("ZNOTEDATA"), let bodyRow = bodyByPK[body], let data = bodyRow.data("ZDATA") {
+                bodies[pk] = data
+                bodyRowsByNote[pk] = bodyRow
+            }
+        }
         var participants: [Int64: [NoteParticipant]] = [:]
         let tables = Set(try query("SELECT name FROM sqlite_master WHERE type='table'").compactMap { $0.string("name") })
         if tables.contains("ZICNOTEPARTICIPANT") {
@@ -177,13 +194,24 @@ enum SQLiteSnapshot {
                 }
             }
         }
+        var locations: [Int64: StoreRow] = [:]
+        if tables.contains("ZICLOCATION") {
+            let columns = Set(try query("PRAGMA table_info(ZICLOCATION)").compactMap { $0.string("name") })
+            let selected = ["Z_PK", "ZLATITUDE", "ZLONGITUDE", "ZPLACEUPDATED", "ZPLACEMARKDATA"].filter(columns.contains)
+            if selected.contains("Z_PK") {
+                for row in try query("SELECT " + selected.joined(separator: ",") + " FROM ZICLOCATION") {
+                    if let pk = row.int("Z_PK") { locations[pk] = row }
+                }
+            }
+        }
         let metadataColumns = Set(try query("PRAGMA table_info(Z_METADATA)").compactMap { $0.string("name") })
         var uuid: String?
         if metadataColumns.contains("Z_UUID") { uuid = try query("SELECT Z_UUID FROM Z_METADATA").first?.string("Z_UUID") }
         if uuid == nil, metadataColumns.contains("Z_PLIST"), let data = try query("SELECT Z_PLIST FROM Z_METADATA").first?.data("Z_PLIST"),
            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] { uuid = plist["NSStoreUUID"] as? String }
         guard let uuid, !uuid.isEmpty else { throw NotesError("unsupported_schema", "The Notes store UUID is missing.") }
-        return StoreLibrary(entities: entities, objects: objects, bodies: bodies, participants: participants,
+        return StoreLibrary(entities: entities, objects: objects, locations: locations, bodies: bodies, bodyRows: bodyRowsByNote, participants: participants,
                             cloudStates: cloudStates, storeUUID: uuid)
     }
+
 }

@@ -17,7 +17,15 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
         try self.init(data: data, suggestedName: resolved.lastPathComponent)
     }
 
-    public init(data: Data, suggestedName: String) throws {
+    public convenience init(data: Data, suggestedName: String) throws {
+        try self.init(data: data, suggestedName: suggestedName, verifiedSHA256: nil)
+    }
+
+    convenience init(verifiedData data: Data, suggestedName: String, sha256: String) throws {
+        try self.init(data: data, suggestedName: suggestedName, verifiedSHA256: sha256)
+    }
+
+    private init(data: Data, suggestedName: String, verifiedSHA256: String?) throws {
         guard !data.isEmpty else { throw NotesError("empty_attachment", "The attachment has no bytes.") }
         guard data.count <= Self.maxBytes else { throw NotesError("attachment_too_large", "Attachments are limited to 200 MB.") }
         let fileManager = FileManager.default
@@ -33,7 +41,7 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
             self.directory = directory
             self.url = url
             self.sourceName = name
-            self.sha256 = Self.hash(data)
+            self.sha256 = verifiedSHA256 ?? Self.hash(data)
             self.byteCount = data.count
         } catch {
             try? fileManager.removeItem(at: directory)

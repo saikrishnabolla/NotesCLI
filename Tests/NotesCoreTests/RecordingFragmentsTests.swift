@@ -72,5 +72,9 @@ final class RecordingFragmentsTests: XCTestCase {
         XCTAssertEqual(decoded.fragments, ["83EF01CE-253C-4D2D-8D72-58A2E3C6C645"])
         XCTAssertEqual(decoded.words.map(\.text), ["Notes CLI audio recording test."])
         XCTAssertEqual(decoded.words.map(\.fragment), [0])
+        XCTAssertEqual(decoded.fragmentMetadata.count, 1)
+        XCTAssertEqual(decoded.fragmentMetadata.first?.id, decoded.fragments.first)
+        XCTAssertNotNil(decoded.fragmentMetadata.first?.createdDate)
+        XCTAssertEqual(decoded.fragmentMetadata.first?.transcriptVersion, 1)
     }
 }

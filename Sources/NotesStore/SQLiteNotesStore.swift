@@ -113,7 +113,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
                                      latestVersionSyncedToCloud: cloud?.latestVersionSyncedToCloud,
                                      isInCloud: cloud?.isInCloud)
             if sync.needsInitialFetch == true { placeholders.insert(uuid.lowercased()) }
-            summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID, shortID: "n\(pk)"), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags, hasChecklistInProgress: flag("ZHASCHECKLISTINPROGRESS"), lastOpened: row.date("ZLASTOPENEDDATE"), displayOrder: row.double("ZSORTORDER", "ZCUSTOMNOTESORTTYPEVALUE"), isShared: shared, participants: participantList, syncState: sync, isSystemPaper: flag("ZISSYSTEMPAPER")))
+            summaries.append(NoteSummary(id: NoteID(uuid: uuid, coreDataID: coreDataID, shortID: "n\(pk)"), title: row.string("ZTITLE1", "ZTITLE2", "ZTITLE") ?? "", snippet: row.string("ZSNIPPET", "ZWIDGETSNIPPET") ?? "", folderID: folder?.id, folderPath: folder?.path ?? [], accountID: folder?.accountID.isEmpty == false ? folder!.accountID : account(row), created: row.date("ZCREATIONDATE3", "ZCREATIONDATE1", "ZCREATIONDATE"), modified: row.date("ZMODIFICATIONDATE1", "ZMODIFICATIONDATE"), isPinned: row.int("ZISPINNED") == 1, isLocked: row.int("ZISPASSWORDPROTECTED") == 1, isDeleted: deleted, hasChecklist: row.int("ZHASCHECKLIST") == 1, attachmentCount: attachments.filter { !(($0.string("ZTYPEUTI1", "ZTYPEUTI") ?? "").contains("inlinetextattachment")) }.count, tags: tags, hasChecklistInProgress: flag("ZHASCHECKLISTINPROGRESS"), lastOpened: row.date("ZLASTOPENEDDATE"), displayOrder: nil, isShared: shared, participants: participantList, syncState: sync, isSystemPaper: flag("ZISSYSTEMPAPER")))
             pks[uuid.lowercased()] = pk
             if !deleted, !placeholders.contains(uuid.lowercased()), let folderPK { folderByPK[folderPK]?.noteCount += 1 }
             else if folder?.isRecentlyDeleted == true, row.int("ZMARKEDFORDELETION") != 1, let folderPK { folderByPK[folderPK]?.noteCount += 1 }
@@ -127,6 +127,52 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         self.notePKs = pks
         self.noteRows = noteRows
         self.folderList = folderByPK.values.sorted { $0.path.joined(separator: " > ").localizedStandardCompare($1.path.joined(separator: " > ")) == .orderedAscending }
+    }
+
+    public func attachmentHasStoredLocation(note ref: String, attachmentID: String) throws -> Bool {
+        let summary = try summary(ref)
+        guard let notePK = notePKs[summary.id.uuid.lowercased()] else {
+            throw NotesError("note_not_found", "No note matches the reference.")
+        }
+        guard let row = attachmentRows[notePK]?.first(where: {
+            $0.string("ZIDENTIFIER")?.caseInsensitiveCompare(attachmentID) == .orderedSame
+        }) else {
+            throw NotesError("attachment_not_found", "No attachment matches \(attachmentID).")
+        }
+        return row.int("ZLOCATION").map { $0 != 0 } ?? false
+    }
+
+    public func scanMarkupPayloads(_ ref: String) throws -> [String: Data] {
+        let summary = try summary(ref)
+        guard let notePK = notePKs[summary.id.uuid.lowercased()] else {
+            throw NotesError("note_not_found", "No note matches the reference.")
+        }
+        var result: [String: Data] = [:]
+        for row in attachmentRows[notePK] ?? [] {
+            guard let data = row.data("ZMARKUPMODELDATA"), !data.isEmpty else { continue }
+            guard let id = row.string("ZIDENTIFIER"), !id.isEmpty else {
+                throw NotesError("scan_markup_unavailable", "A scan markup model has no page identifier.")
+            }
+            result[id] = data
+        }
+        return result
+    }
+
+    public func folderDateHeadersType(_ folderID: String) throws -> Int {
+        guard let row = objectsByID[folderID.lowercased()],
+              let value = row.int("ZDATEHEADERSTYPE") else {
+            throw NotesError("folder_not_found", "No folder with stored date-header state matches the identifier.")
+        }
+        return Int(value)
+    }
+
+    public func noteDeletionState(_ ref: String) throws -> (markedForDeletion: Bool, folderType: Int?) {
+        let summary = try resolve(ref)
+        guard let notePK = notePKs[summary.id.uuid.lowercased()], let row = noteRows[notePK] else {
+            throw NotesError("note_not_found", "No note matches the reference.")
+        }
+        let folderType = row.int("ZFOLDER").flatMap { library.objects[$0]?.int("ZFOLDERTYPE", "ZTYPE") }.map(Int.init)
+        return (row.int("ZMARKEDFORDELETION") == 1, folderType)
     }
     public func accounts() throws -> [Account] {
         guard let location = try defaultLocation() else { return accountList }
@@ -203,6 +249,144 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         }
         return Array(result.prefix(query.limit ?? result.count))
     }
+
+    public func notes(_ query: NoteQuery, sort: NoteSort) throws -> [NoteSummary] {
+        var unbounded = query
+        let limit = unbounded.limit
+        unbounded.limit = nil
+        var result = try notes(unbounded)
+        if result.isEmpty { return [] }
+
+        switch sort {
+        case .modified:
+            result.sort { Self.compareDate($0.modified, $1.modified, newestFirst: true, lhsID: $0.id.uuid, rhsID: $1.id.uuid) }
+        case .created:
+            result.sort { Self.compareDate($0.created, $1.created, newestFirst: true, lhsID: $0.id.uuid, rhsID: $1.id.uuid) }
+        case .opened:
+            result.sort {
+                if $0.lastOpened != $1.lastOpened {
+                    return Self.compareDate($0.lastOpened, $1.lastOpened, newestFirst: true, lhsID: $0.id.uuid, rhsID: $1.id.uuid)
+                }
+                return Self.compareDate($0.modified, $1.modified, newestFirst: true, lhsID: $0.id.uuid, rhsID: $1.id.uuid)
+            }
+        case .title:
+            result.sort { Self.compareTitle($0.title, $1.title, ascending: true, lhsID: $0.id.uuid, rhsID: $1.id.uuid) }
+        case .display:
+            let order = try effectiveDisplayOrder(for: unbounded)
+            result.sort { lhs, rhs in
+                if lhs.isPinned != rhs.isPinned { return lhs.isPinned }
+                return order.precedes(lhs, rhs)
+            }
+            for index in result.indices { result[index].displayOrder = Double(index) }
+        }
+
+        return Array(result.prefix(limit ?? result.count))
+    }
+
+    private enum EffectiveDisplayOrder {
+        case modified(newestFirst: Bool)
+        case created(newestFirst: Bool)
+        case title(ascending: Bool, modifiedTieBreak: Bool)
+
+        func precedes(_ lhs: NoteSummary, _ rhs: NoteSummary) -> Bool {
+            switch self {
+            case .modified(let newestFirst):
+                if lhs.modified != rhs.modified {
+                    return SQLiteNotesStore.compareDate(lhs.modified, rhs.modified, newestFirst: newestFirst,
+                                                        lhsID: lhs.id.uuid, rhsID: rhs.id.uuid)
+                }
+                return SQLiteNotesStore.compareTitle(lhs.title, rhs.title, ascending: newestFirst,
+                                                     lhsID: lhs.id.uuid, rhsID: rhs.id.uuid)
+            case .created(let newestFirst):
+                if lhs.created != rhs.created {
+                    return SQLiteNotesStore.compareDate(lhs.created, rhs.created, newestFirst: newestFirst,
+                                                        lhsID: lhs.id.uuid, rhsID: rhs.id.uuid)
+                }
+                return SQLiteNotesStore.compareTitle(lhs.title, rhs.title, ascending: newestFirst,
+                                                     lhsID: lhs.id.uuid, rhsID: rhs.id.uuid)
+            case .title(let ascending, let modifiedTieBreak):
+                let titleOrder = NoteTitleOrder.compare(lhs.title, rhs.title)
+                if titleOrder != .orderedSame {
+                    return ascending ? titleOrder == .orderedAscending : titleOrder == .orderedDescending
+                }
+                guard modifiedTieBreak else { return lhs.id.uuid < rhs.id.uuid }
+                return SQLiteNotesStore.compareDate(lhs.modified, rhs.modified, newestFirst: ascending,
+                                                    lhsID: lhs.id.uuid, rhsID: rhs.id.uuid)
+            }
+        }
+    }
+
+    private func effectiveDisplayOrder(for query: NoteQuery) throws -> EffectiveDisplayOrder {
+        if let folderReference = query.folder {
+            let matches = folderList.filter {
+                $0.id.caseInsensitiveCompare(folderReference) == .orderedSame ||
+                $0.name == folderReference ||
+                $0.path.joined(separator: " > ") == folderReference
+            }
+            if matches.count > 1 {
+                throw NotesError("ambiguous_folder", "More than one folder matches the display-order reference.")
+            }
+            if matches.count == 1,
+               let folderID = matches.first?.id,
+               let storedValue = objectsByID[folderID.lowercased()]?.int("ZCUSTOMNOTESORTTYPEVALUE") {
+                switch storedValue {
+                case 0: break
+                case 10: return .modified(newestFirst: true)
+                case 11: return .modified(newestFirst: false)
+                case 20: return .created(newestFirst: true)
+                case 21: return .created(newestFirst: false)
+                case 30: return .title(ascending: true, modifiedTieBreak: true)
+                case 31: return .title(ascending: false, modifiedTieBreak: true)
+                default:
+                    throw NotesError("unsupported_display_order", "The folder has an unknown Apple Notes sort value: \(storedValue).")
+                }
+            }
+        }
+        return try globalDisplayOrder()
+    }
+
+    private func globalDisplayOrder() throws -> EffectiveDisplayOrder {
+        let url = container.appendingPathComponent("Library/Preferences/group.com.apple.notes.plist")
+        let raw: Any?
+        if let data = try? Data(contentsOf: url),
+           let preferences = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+            raw = preferences["kICSettingsNoteListSortTypeKey"]
+        } else {
+            raw = nil
+        }
+        guard let raw else { return .modified(newestFirst: true) }
+        let value: Int?
+        if let number = raw as? NSNumber { value = number.intValue }
+        else if let string = raw as? String { value = Int(string) }
+        else { value = nil }
+        switch value {
+        case 0: return .modified(newestFirst: true)
+        case 1: return .created(newestFirst: true)
+        case 2: return .title(ascending: true, modifiedTieBreak: false)
+        default:
+            throw NotesError("unsupported_display_order", "Apple Notes has an unknown global sort value.")
+        }
+    }
+
+    private static func compareDate(_ lhs: Date?, _ rhs: Date?, newestFirst: Bool,
+                                    lhsID: String, rhsID: String) -> Bool {
+        switch (lhs, rhs) {
+        case let (left?, right?) where left != right:
+            return newestFirst ? left > right : left < right
+        case (_?, nil): return true
+        case (nil, _?): return false
+        default:
+            // Apple does not publish its secondary key. UUID is NotesCLI's stable pagination key.
+            return lhsID < rhsID
+        }
+    }
+
+    private static func compareTitle(_ lhs: String, _ rhs: String, ascending: Bool,
+                                     lhsID: String, rhsID: String) -> Bool {
+        let order = NoteTitleOrder.compare(lhs, rhs)
+        guard order != .orderedSame else { return lhsID < rhsID }
+        return ascending ? order == .orderedAscending : order == .orderedDescending
+    }
     public func summary(_ ref: String) throws -> NoteSummary { try resolve(ref) }
     public func note(_ ref: String) throws -> Note {
         let summary = try resolve(ref)
@@ -211,12 +395,116 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         guard let pk = notePKs[summary.id.uuid.lowercased()], let data = library.bodies[pk], !data.isEmpty else {
             throw NotesError("body_unavailable", "The note body is not downloaded in this snapshot.", hint: "run notescli fetch")
         }
+        return try decodedNote(summary: summary, notePK: pk, data: data, includeAttachments: true)
+    }
+
+    public func note(_ ref: String, password: String) throws -> Note {
+        let opened = try openLockedNote(ref, password: password)
+        return try decodedNote(summary: opened.summary, notePK: opened.notePK,
+                               data: opened.data, includeAttachments: false)
+    }
+
+    public func withPasswordUnlockedNote(_ ref: String, password: String,
+                                         _ body: (Note) throws -> Void) throws {
+        let opened = try openLockedNote(ref, password: password)
+        var note = try decodedNote(summary: opened.summary, notePK: opened.notePK,
+                                   data: opened.data, includeAttachments: false)
+        let attachmentEntities = (library.entities["ICAttachment"] ?? [])
+            .union(library.entities["ICInlineAttachment"] ?? [])
+        var rowsByPK = Dictionary(uniqueKeysWithValues: (attachmentRows[opened.notePK] ?? []).compactMap { row in
+            row.int("Z_PK").map { ($0, row) }
+        })
+        let knownIDs = Set(rowsByPK.values.compactMap { $0.string("ZIDENTIFIER")?.lowercased() })
+        for reference in note.document?.runs.compactMap(\.attachment) ?? []
+            where !knownIDs.contains(reference.id.lowercased()) {
+            guard let row = objectsByID[reference.id.lowercased()], let pk = row.int("Z_PK"),
+                  attachmentEntities.contains(row.int("Z_ENT") ?? -1) else { continue }
+            rowsByPK[pk] = row
+        }
+        var foundChild = true
+        while foundChild {
+            foundChild = false
+            let known = Set(rowsByPK.keys)
+            for row in library.objects.values where row.int("ZMARKEDFORDELETION") != 1 {
+                guard let pk = row.int("Z_PK"), rowsByPK[pk] == nil,
+                      attachmentEntities.contains(row.int("Z_ENT") ?? -1),
+                      let parent = row.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1"),
+                      known.contains(parent) else { continue }
+                rowsByPK[pk] = row
+                foundChild = true
+            }
+        }
+        let rows = Array(rowsByPK.values)
+        guard !rows.isEmpty else { try body(note); return }
+        let scope = try LockedAttachmentExtractionScope()
+        defer { scope.cleanup() }
+        let extractor = LockedAttachmentExtractor(
+            library: library, container: container, accountID: opened.summary.accountID,
+            password: password, scope: scope)
+        var extractedByPK: [Int64: LockedAttachmentResult] = [:]
+        for row in rows {
+            guard let pk = row.int("Z_PK") else { continue }
+            extractedByPK[pk] = try extractor.extract(row)
+        }
+        func build(_ pk: Int64, visited: Set<Int64>) -> Attachment? {
+            guard !visited.contains(pk), let extracted = extractedByPK[pk] else { return nil }
+            var attachment = makeAttachment(
+                extracted.row,
+                accountID: opened.summary.accountID,
+                filenameOverride: extracted.filename,
+                filePathOverride: extracted.filePath)
+            let childPKs = extractedByPK.compactMap { key, value in
+                value.row.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") == pk ? key : nil
+            }
+            let children = childPKs.sorted().compactMap { build($0, visited: visited.union([pk])) }
+            if !children.isEmpty {
+                attachment.childAttachmentIDs = children.map(\.id)
+                attachment.childAttachments = children
+                attachment.pageImagePaths = children.compactMap(\.filePath)
+            }
+            return attachment
+        }
+        let roots = extractedByPK.compactMap { pk, value -> Int64? in
+            guard let parent = value.row.int("ZPARENTATTACHMENT", "ZPARENTATTACHMENT1") else { return pk }
+            return extractedByPK[parent] == nil ? pk : nil
+        }
+        note.attachments = roots.sorted().compactMap { build($0, visited: []) }
+        try body(note)
+    }
+
+    private func openLockedNote(_ ref: String, password: String) throws
+        -> (summary: NoteSummary, notePK: Int64, data: Data) {
+        let summary = try resolve(ref)
+        guard summary.isLocked else { throw NotesError("note_not_locked", "The note is not locked.") }
+        guard let pk = notePKs[summary.id.uuid.lowercased()], let encrypted = library.bodies[pk], !encrypted.isEmpty else {
+            throw NotesError("cloud_pending", "The locked note body is not downloaded on this Mac.", hint: "Open it in Notes, wait for it to download, then retry.")
+        }
+        let noteRow = noteRows[pk]
+        let bodyRow = library.bodyRows[pk]
+        let legacy: LockedNoteCrypto.Parameters?
+        if let salt = noteRow?.data("ZCRYPTOSALT"),
+           let iterations = noteRow?.int("ZCRYPTOITERATIONCOUNT").map(Int.init),
+           let wrapped = noteRow?.data("ZCRYPTOWRAPPEDKEY", "ZCRYPTOVERIFIER"),
+           let iv = bodyRow?.data("ZCRYPTOINITIALIZATIONVECTOR"),
+           let tag = bodyRow?.data("ZCRYPTOTAG") {
+            legacy = .init(salt: salt, iterations: iterations, wrappedKey: wrapped, iv: iv, tag: tag,
+                           ciphertext: encrypted, authenticatedData: nil)
+        } else { legacy = nil }
+        let (data, _) = try LockedNoteCrypto.open(password: password, encryptedBody: encrypted, legacy: legacy)
+        return (summary, pk, data)
+    }
+
+    private func decodedNote(summary: NoteSummary, notePK pk: Int64, data: Data,
+                             includeAttachments: Bool) throws -> Note {
         var document: NoteDocument
         do { document = try NotesDecoder.decode(data) }
         catch let error as DecodeError { throw NotesError("decode_\(error.rawValue)", "Cannot decode the note body.") }
         if let outlineData = noteRows[pk]?.data("ZOUTLINESTATEDATA"), !outlineData.isEmpty {
             do { document.applyCollapsedParagraphIDs(try NotesOutlineDecoder.decode(outlineData)) }
             catch let error as DecodeError { throw NotesError("outline_\(error.rawValue)", "Cannot decode the note outline state.") }
+        }
+        guard includeAttachments else {
+            return Note(summary: summary, document: document, attachments: [])
         }
         var rows = attachmentRows[pk] ?? []
         let known = Set(rows.compactMap { $0.string("ZIDENTIFIER")?.lowercased() })
@@ -226,28 +514,53 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         var attachments: [Attachment] = [], seen: Set<String> = []
         for row in rows {
             guard let id = row.string("ZIDENTIFIER"), seen.insert(id).inserted else { continue }
-            let attachment = makeAttachment(row, accountID: summary.accountID)
-            attachments.append(attachment)
+            var attachment = makeAttachment(row, accountID: summary.accountID)
             if attachment.typeUTI == "com.apple.notes.table", let tableData = row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") {
                 do {
                     if document.tables == nil { document.tables = [:] }
                     if document.tableCells == nil { document.tableCells = [:] }
-                    let cells = try NotesTableDecoder.decodeDocuments(tableData) { ref in
+                    let decoded = try NotesTableDecoder.decodeTable(tableData) { ref in
                         self.objectsByID[ref.id.lowercased()]?.string("ZALTTEXT", "ZDISPLAYTEXT", "ZTITLE", "ZFALLBACKTITLE", "ZFILENAME")
                     }
+                    let cells = decoded.cells
+                    attachment.tableRightToLeft = decoded.rightToLeft
                     document.tableCells?[id] = cells
                     document.tables?[id] = cells.map { $0.map { $0.document.plainText() } }
                 } catch let error as DecodeError { throw NotesError("table_\(error.rawValue)", "Cannot decode an embedded table.") }
             }
+            attachments.append(attachment)
         }
-        for i in document.runs.indices {
-            guard var ref = document.runs[i].attachment, let row = objectsByID[ref.id.lowercased()] else { continue }
+        func hydrate(_ original: InlineRef) -> InlineRef {
+            var ref = original
+            guard let row = objectsByID[ref.id.lowercased()] else { return ref }
             ref.typeUTI = row.string("ZTYPEUTI1", "ZTYPEUTI") ?? ref.typeUTI
             ref.displayText = row.string("ZALTTEXT", "ZDISPLAYTEXT", "ZTITLE", "ZFALLBACKTITLE")
             if ref.typeUTI == "com.apple.notes.inlinetextattachment.link", let target = row.string("ZTOKENCONTENTIDENTIFIER") {
                 ref.url = target.hasPrefix("applenotes:") ? target : "applenotes://showNote?identifier=\(target)"
             } else { ref.url = row.string("ZURLSTRING") }
-            document.runs[i].attachment = ref
+            ref.parentAttachmentCaptured = true
+            ref.parentAttachmentID = row.int("ZPARENTATTACHMENT1", "ZPARENTATTACHMENT")
+                .flatMap { library.objects[$0]?.string("ZIDENTIFIER") }
+            return ref
+        }
+        for i in document.runs.indices {
+            guard let ref = document.runs[i].attachment else { continue }
+            document.runs[i].attachment = hydrate(ref)
+        }
+        if var tables = document.tableCells {
+            for tableID in tables.keys {
+                guard var rows = tables[tableID] else { continue }
+                for rowIndex in rows.indices {
+                    for columnIndex in rows[rowIndex].indices {
+                        for runIndex in rows[rowIndex][columnIndex].runs.indices {
+                            guard let ref = rows[rowIndex][columnIndex].runs[runIndex].attachment else { continue }
+                            rows[rowIndex][columnIndex].runs[runIndex].attachment = hydrate(ref)
+                        }
+                    }
+                }
+                tables[tableID] = rows
+            }
+            document.tableCells = tables
         }
         let deep = try self.attachments(summary.id.uuid)
         func attachmentIDs(_ values: [Attachment]) -> Set<String> {
@@ -311,8 +624,11 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             let mergeable = noteRows[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") ?? library.objects[parentPK]?.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA")
             // A recording lists its audio fragments in order; transcript fragment indices follow that order.
             let recordingData = parent.typeUTI.contains("audio") ? row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA") : nil
-            let fragmentOrder = (recordingData.flatMap { try? NotesRecordingDecoder.decode($0) }?.fragments ?? []).filter(childIDs.contains)
-            let ordered = fragmentOrder.isEmpty ? galleryOrder(mergeable, available: childIDs) : fragmentOrder
+            let decodedRecording = recordingData.flatMap { try? NotesRecordingDecoder.decode($0) }
+            let completeFragmentOrder = decodedRecording?.fragments ?? []
+            let fragmentOrder = completeFragmentOrder.filter(childIDs.contains)
+            let storedGalleryOrder = galleryOrder(mergeable, available: childIDs)
+            let ordered = fragmentOrder.isEmpty ? storedGalleryOrder : fragmentOrder
             let byID = Dictionary(uniqueKeysWithValues: childRows.compactMap { row -> (String, StoreRow)? in row.string("ZIDENTIFIER").map { ($0, row) } })
             let orderedRows = ordered.compactMap { byID[$0] } + childRows.filter { row in
                 guard let id = row.string("ZIDENTIFIER") else { return true }; return !ordered.contains(id)
@@ -321,6 +637,18 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             let childAttachments = orderedRows.compactMap { $0.int("Z_PK").flatMap { build($0, visited: nextVisited) } }
             parent.childAttachmentIDs = childAttachments.map(\.id)
             parent.childAttachments = childAttachments
+            if !completeFragmentOrder.isEmpty {
+                let availableIndices = Dictionary(uniqueKeysWithValues: childAttachments.enumerated().map { ($0.element.id, $0.offset) })
+                parent.transcriptWords = parent.transcriptWords?.compactMap { word in
+                    let oldIndex = word.fragment ?? 0
+                    guard completeFragmentOrder.indices.contains(oldIndex),
+                          let newIndex = availableIndices[completeFragmentOrder[oldIndex]] else { return nil }
+                    var word = word
+                    word.fragment = newIndex
+                    return word
+                }
+                parent.transcriptText = parent.transcriptWords.map(NotesRecordingDecoder.joined)
+            }
             parent.pageImagePaths = childAttachments.compactMap(\.filePath)
             if parent.filePath == nil, let original = childAttachments.first(where: { $0.kind == "audio" || $0.filename != nil }) {
                 parent.filePath = original.filePath; parent.filename = parent.filename ?? original.filename
@@ -382,10 +710,11 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         return counts
     }
 
-    private func makeAttachment(_ row: StoreRow, accountID: String) -> Attachment {
+    private func makeAttachment(_ row: StoreRow, accountID: String,
+                                filenameOverride: String? = nil, filePathOverride: String? = nil) -> Attachment {
         let media = row.int("ZMEDIA").flatMap { library.objects[$0] }
         let id = row.string("ZIDENTIFIER") ?? ""
-        let filename = media?.string("ZFILENAME") ?? row.string("ZFILENAME")
+        let filename = filenameOverride ?? media?.string("ZFILENAME") ?? row.string("ZFILENAME")
         let mediaID = media?.string("ZIDENTIFIER")
         let generation = media?.string("ZGENERATION1", "ZGENERATION") ?? row.string("ZGENERATION1", "ZGENERATION")
         var candidates: [URL] = []
@@ -408,20 +737,26 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             candidates += [root.appendingPathComponent("FallbackPDFs/\(id).pdf"), pdf.appendingPathComponent("FallbackPDF.pdf")]
         }
         let boundary = container.resolvingSymlinksInPath().standardizedFileURL.path + "/"
-        let path = candidates.first { url in
+        let resolvedPath = candidates.first { url in
             let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
             var isDirectory: ObjCBool = false
             return resolved.hasPrefix(boundary) && FileManager.default.fileExists(atPath: resolved, isDirectory: &isDirectory) && !isDirectory.boolValue
         }?.path
+        let path = filePathOverride ?? resolvedPath
         let uti = row.string("ZTYPEUTI1", "ZTYPEUTI") ?? "public.data"
         let recognized = row.string("ZOCRSUMMARY"), handwriting = row.string("ZHANDWRITINGSUMMARY"), extra = row.string("ZADDITIONALINDEXABLETEXT")
         let raster = uti.lowercased().contains("drawing") || uti.lowercased().contains("paper") ? path : nil
         let pdfText: String? = uti.lowercased().contains("pdf") ? path.flatMap { PDFDocument(url: URL(fileURLWithPath: $0))?.string } : nil
-        var words: [TranscriptWord]?, recording: RecordingMetadata?, transcript: String?
-        if let blob = row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA"), let decoded = try? NotesRecordingDecoder.decode(blob), !decoded.words.isEmpty || decoded.metadata.summary != nil || decoded.metadata.topLineSummary != nil {
-            words = decoded.words; recording = decoded.metadata; transcript = NotesRecordingDecoder.joined(decoded.words)
+        var words: [TranscriptWord]?, recording: RecordingMetadata?, recordingFragments: [RecordingFragmentMetadata]?, transcript: String?
+        if let blob = row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA"), let decoded = try? NotesRecordingDecoder.decode(blob),
+           !decoded.words.isEmpty || !decoded.fragmentMetadata.isEmpty || decoded.metadata.summary != nil || decoded.metadata.topLineSummary != nil {
+            words = decoded.words; recording = decoded.metadata; recordingFragments = decoded.fragmentMetadata
+            transcript = NotesRecordingDecoder.joined(decoded.words)
         }
         let lower = uti.lowercased(), token = row.string("ZTOKENCONTENTIDENTIFIER")
+        let parentAttachment = row.int("ZPARENTATTACHMENT1", "ZPARENTATTACHMENT").flatMap { library.objects[$0] }
+        let parentUTI = parentAttachment?.string("ZTYPEUTI1", "ZTYPEUTI")?.lowercased()
+        let isScanPage = lower.contains("scan") || parentUTI?.contains("gallery") == true || parentUTI?.contains("scan") == true
         let notePK = row.int("ZNOTE1", "ZNOTE")
         let participant = notePK.flatMap { library.participants[$0] }?.first {
             $0.participantID?.caseInsensitiveCompare(token ?? "") == .orderedSame ||
@@ -431,22 +766,59 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         let display = row.string("ZALTTEXT", "ZDISPLAYTEXT", "ZSTANDARDIZEDCONTENT", "ZFALLBACKTITLE")
         let participantName = lower.contains("mention") ? (display ?? row.string("ZUSERTITLE") ?? participant?.displayName) : nil
         let participantEmail = participant?.email ?? (participantName?.contains("@") == true ? participantName : nil)
-        let drawingSVG = lower.contains("drawing") ? row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA").flatMap { ClassicDrawingSVG.decode($0) ?? NotesDrawingDecoder.svg($0) } : nil
+        let drawingSVG = (lower.contains("drawing") || lower.contains("paper"))
+            ? row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA").flatMap { ClassicDrawingSVG.decode($0) ?? NotesDrawingDecoder.svg($0) }
+            : nil
+        let cropValues = ["ZCROPPINGQUADBOTTOMLEFTX", "ZCROPPINGQUADBOTTOMLEFTY",
+                          "ZCROPPINGQUADBOTTOMRIGHTX", "ZCROPPINGQUADBOTTOMRIGHTY",
+                          "ZCROPPINGQUADTOPLEFTX", "ZCROPPINGQUADTOPLEFTY",
+                          "ZCROPPINGQUADTOPRIGHTX", "ZCROPPINGQUADTOPRIGHTY"].map { row.double($0) }
+        let scanCrop: ScanCrop?
+        if isScanPage, cropValues.allSatisfy({ $0 != nil }), !cropValues.allSatisfy({ $0 == 0 }) {
+            scanCrop = ScanCrop(
+                bottomLeft: ScanPoint(x: cropValues[0]!, y: cropValues[1]!),
+                bottomRight: ScanPoint(x: cropValues[2]!, y: cropValues[3]!),
+                topLeft: ScanPoint(x: cropValues[4]!, y: cropValues[5]!),
+                topRight: ScanPoint(x: cropValues[6]!, y: cropValues[7]!))
+        } else { scanCrop = nil }
+        let location = row.int("ZLOCATION").flatMap { library.locations[$0] }
+        let tableRightToLeft = uti == "com.apple.notes.table"
+            ? row.data("ZMERGEABLEDATA1", "ZMERGEABLEDATA").flatMap { try? NotesTableDecoder.decodeTable($0).rightToLeft }
+            : nil
+        let linkTarget = lower.contains("link") ? AppleNotesLinkTarget.parse(token) : nil
         return Attachment(id: id, typeUTI: uti, filename: filename, filePath: path,
-                          title: row.string("ZTITLE", "ZFALLBACKTITLE", "ZALTTEXT", "ZDISPLAYTEXT"),
-                          url: row.string("ZURLSTRING", "ZREMOTEFILEURLSTRING"), ocrText: recognized,
+                          title: row.string("ZTITLE", "ZFALLBACKTITLE", "ZALTTEXT", "ZDISPLAYTEXT", "ZUSERTITLE"),
+                          url: row.string("ZURLSTRING", "ZREMOTEFILEURLSTRING"),
+                          synapseDataBytes: row.int("ZSYNAPSEDATABYTES").map(Int.init),
+                          linkPreviewMetadataBytes: row.int("ZLINKPRESENTATIONARCHIVEDMETADATABYTES").map(Int.init),
+                          hasMapLocation: location != nil,
+                          mapLatitude: location?.double("ZLATITUDE"), mapLongitude: location?.double("ZLONGITUDE"),
+                          mapAddress: lower.contains("url") ? row.string("ZSUMMARY") : nil,
+                          mapPlaceUpdated: location?.date("ZPLACEUPDATED"),
+                          ocrText: recognized,
                           handwritingText: handwriting, additionalIndexableText: extra,
                           imageClassification: row.string("ZIMAGECLASSIFICATIONSUMMARY"), imageSummary: row.string("ZSUMMARY"),
                           pdfText: pdfText, transcriptText: transcript, transcriptWords: words, recording: recording,
+                          recordingFragments: recordingFragments,
                           duration: row.double("ZDURATION"), fallbackRasterPath: raster, displayText: display,
                           participantID: lower.contains("mention") ? (participant?.participantID ?? token) : nil,
                           participantName: participantName, participantEmail: participantEmail,
                           participantUserID: lower.contains("mention") ? participant?.userID : nil,
-                          targetNoteID: lower.contains("link") ? token : nil,
+                          targetNoteID: linkTarget?.identifier,
+                          targetParagraphID: linkTarget?.paragraphID,
+                          targetParagraphName: nil,
                           mathExpression: isCalculation || lower.contains("graph") ? row.string("ZSTANDARDIZEDCONTENT", "ZALTTEXT") : nil,
                           mathResult: isCalculation ? row.string("ZDISPLAYTEXT", "ZFALLBACKTITLE") : nil,
                           graphExpression: lower.contains("graph") ? row.string("ZSTANDARDIZEDCONTENT", "ZALTTEXT") : nil,
-                          isDivider: lower.contains("divider") ? true : nil, drawingSVG: drawingSVG)
+                          isDivider: lower.contains("divider") ? true : nil, drawingSVG: drawingSVG,
+                          markupDataBytes: row.data("ZMARKUPMODELDATA").map(\.count),
+                          hasEmbeddedMarkup: row.int("ZHASMARKUPDATA").map { $0 != 0 },
+                          scanFilter: isScanPage ? row.int("ZIMAGEFILTERTYPE").map(Int.init) : nil,
+                          scanOrientation: isScanPage ? row.int("ZORIENTATION").map(Int.init) : nil,
+                          scanCrop: scanCrop,
+                          scanHasMarkup: isScanPage ? (row.data("ZMARKUPMODELDATA")?.isEmpty == false) : nil,
+                          scanHasEmbeddedMarkup: isScanPage ? row.int("ZHASMARKUPDATA").map { $0 != 0 } : nil,
+                          tableRightToLeft: tableRightToLeft)
     }
 
     private static func scriptedDefaultLocation() -> DefaultNotesLocation? {
@@ -467,13 +839,13 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         guard let data, let root0 = try? ProtobufMessage(NotesInflate.decompressIfNeeded(data)) else { return [] }
         let root = ((root0.fields[3] ?? []).isEmpty ? (try? root0.message(2)?.message(3)) ?? nil : root0) ?? root0
         guard let entries = try? root.messages(3) else { return [] }
-        var pairs: [(Int, String)] = [], currentID: String?, currentOrder: Int?
+        var pairs: [(Int64, String)] = [], currentID: String?, currentOrder: Int64?
         for entry in entries {
             if let map = try? entry.message(13),
                let items = try? map.messages(3), let item = items.first,
                let value = try? item.message(2),
                let id = value.string(4), available.contains(id) { currentID = id }
-            if let order = try? entry.message(9)?.message(1)?.int(2) { currentOrder = order }
+            if let order = try? entry.message(9)?.message(1)?.uint(2) { currentOrder = Int64(bitPattern: order) }
             if let id = currentID, let order = currentOrder { pairs.append((order, id)); currentID = nil; currentOrder = nil }
         }
         return pairs.sorted { $0.0 < $1.0 }.map(\.1)
@@ -531,8 +903,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             case .mention: actual = note.attachments.contains { $0.kind == "mention" }
             case .tagged: actual = !note.summary.tags.isEmpty
             case .quickNote:
-                actual = note.summary.folderID?.localizedCaseInsensitiveContains("quick") == true ||
-                    note.summary.folderPath.last?.localizedCaseInsensitiveContains("quick note") == true
+                actual = note.summary.isSystemPaper == true
             }
             return actual == expected
         case .tag(let tag): return note.summary.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame }

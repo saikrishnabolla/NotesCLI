@@ -135,6 +135,27 @@ struct LinkAddURL: ParsableCommand {
     }
 }
 
+struct LinkCapture: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "capture", abstract: "Insert the native rich link Notes uses for shared web content.")
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Argument var ref: String
+    @Argument var url: String
+    @Option var title: String?
+    @Option var position: Int?
+
+    func run() throws {
+        guard let parsed = URL(string: url) else { throw NotesError("invalid_url", "The URL is invalid.") }
+        let resolvedTitle = title ?? parsed.host ?? parsed.absoluteString
+        try UnifiedNative.noteWrite(options: options, write: write, ref: ref, operation: "linkCapture",
+                                    arguments: ["url": url, "title": resolvedTitle,
+                                                "position": position.map(String.init) ?? ""], native: { stableRef in
+            NativeActionResult(try NativeNotesWriter().insertSynapseLink(
+                stableRef, url: parsed, title: resolvedTitle, position: position, allowShared: write.allowShared))
+        })
+    }
+}
+
 enum SmartFolderMatch: String, ExpressibleByArgument { case any, all }
 
 struct SmartFolderCommand: ParsableCommand {

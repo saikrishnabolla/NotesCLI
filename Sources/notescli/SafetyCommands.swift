@@ -76,7 +76,9 @@ enum SafetyExecutor {
     }
 
     static func run(options: WriteOptions, operation: String, arguments: [String: String], note: Note? = nil,
-                    allowedPaths: [[String]] = [], destructive: Bool = false, plan: DryRunPlan, emitDryRun: Bool = true,
+                    allowedPaths: [[String]] = [], destructive: Bool = true, plan: DryRunPlan, emitDryRun: Bool = true,
+                    capturePrivatePayloads: Bool = true,
+                    finishArguments: (() -> [String: String])? = nil,
                     action: () throws -> WriteResult) throws -> WriteResult? {
         let guardrail = allowlist(options)
         if guardrail.isRestricted && allowedPaths.isEmpty {
@@ -100,7 +102,6 @@ enum SafetyExecutor {
             }
             return nil
         }
-        if destructive, let note { _ = try SnapshotStore().save(note) }
         var recordedArguments = arguments.merging(["operation": operation]) { current, _ in current }
         if let note { recordedArguments["stable_id"] = note.summary.id.uuid }
         let data = try JSONSerialization.data(withJSONObject: recordedArguments, options: .sortedKeys)
@@ -115,9 +116,50 @@ enum SafetyExecutor {
             throw NotesError("idempotent_write_failed", begun.entry.message ?? "The recorded write failed.")
         }
         do {
+            if destructive, let note {
+                let drawingPayloads = capturePrivatePayloads && plan.engine == "native" && note.attachments.contains(where: { $0.kind == "drawing" })
+                    ? try NativeNotesWriter().snapshotDrawingPayloads(note.summary.id.uuid) : [:]
+                let scanMarkupPayloads = capturePrivatePayloads && plan.engine == "native"
+                    && note.attachments.contains(where: { $0.kind == "scan" || ($0.markupDataBytes ?? 0) > 0 })
+                    ? try SQLiteNotesStore(refresh: true).scanMarkupPayloads(note.summary.id.uuid) : [:]
+                let paperBundlePayloads = capturePrivatePayloads && plan.engine == "native"
+                    && note.attachments.contains(where: { $0.typeUTI.lowercased().contains("paper") })
+                    ? try NativeNotesWriter().snapshotPaperBundlePayloads(note.summary.id.uuid) : [:]
+                let linkPayloads = capturePrivatePayloads && plan.engine == "native"
+                    && note.attachments.contains(where: {
+                        $0.url != nil || ($0.synapseDataBytes ?? 0) > 0 || ($0.linkPreviewMetadataBytes ?? 0) > 0
+                    }) ? try NativeNotesWriter().snapshotLinkPayloads(note.summary.id.uuid) : [:]
+                recordedArguments["snapshot_id"] = try SnapshotStore().save(
+                    note, drawingPayloads: drawingPayloads, paperBundlePayloads: paperBundlePayloads,
+                    linkPayloads: linkPayloads,
+                    scanMarkupPayloads: scanMarkupPayloads
+                ).id
+                let snapshotArguments = try JSONSerialization.data(withJSONObject: recordedArguments, options: .sortedKeys)
+                try journal.updateRecordedArguments(begun.entry.id, arguments: snapshotArguments)
+            }
             let started = Date().addingTimeInterval(-1)
             var result = try action()
+            var undoMetadataChanged = false
+            if let extra = finishArguments?(), !extra.isEmpty {
+                recordedArguments.merge(extra) { _, new in new }
+                undoMetadataChanged = true
+            }
+            if let note,
+               let current = try? SQLiteNotesStore(refresh: true).note(note.summary.id.uuid) {
+                recordedArguments["post_revision"] = ConcurrencyGuard.revision(current)
+                undoMetadataChanged = true
+            }
+            if undoMetadataChanged {
+                do {
+                    let finalArguments = try JSONSerialization.data(withJSONObject: recordedArguments, options: .sortedKeys)
+                    try journal.updateRecordedArguments(begun.entry.id, arguments: finalArguments)
+                } catch {
+                    let warning = "The write succeeded, but its undo metadata could not be completed."
+                    result.message = [result.message, warning].compactMap { $0 }.joined(separator: " ")
+                }
+            }
             if result.operationID == nil { result.operationID = begun.entry.id }
+            result.journalID = begun.entry.id
             if options.waitSync, result.outcome == .verified, let noteID = result.noteID?.uuid, !noteID.isEmpty {
                 result.syncPending = !((try? NoteSyncWaiter.wait(noteID: noteID, modifiedAfter: started, timeout: options.syncTimeout)) ?? false)
             }
@@ -304,24 +346,41 @@ struct DiffCommand: ParsableCommand {
         let note = try options.backends().reader.note(ref)
         let old = try SnapshotStore().load(note.summary.id.uuid, snapshot: snapshot).markdown
         let current = note.document?.markdown(attachments: note.attachments) ?? ""
-        if old == current { print("No changes") }
-        else {
-            print("--- snapshot\n+++ current")
-            for line in old.split(separator: "\n", omittingEmptySubsequences: false) { print("-" + line) }
-            for line in current.split(separator: "\n", omittingEmptySubsequences: false) { print("+" + line) }
-        }
+        print(SnapshotLineDiff.unified(snapshot: old, current: current))
     }
 }
 
 private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions, write: WriteOptions) throws {
     let backend = try options.writable()
-    if let entry = try WriteJournal.openReadOnlyIfExists()?.entry(id: ref), let action = try entry.restoreAction() {
+    var targetRef = ref
+    var selectedSnapshotID = snapshotID
+    if let entry = try WriteJournal.openReadOnlyIfExists()?.entry(id: ref) {
         guard snapshotID == nil else { throw NotesError("invalid_revert", "A journal operation ID cannot be combined with a snapshot ID.") }
-        try restore(entry: entry, action: action, options: options, write: write)
-        return
+        guard entry.outcome == .verified else {
+            throw NotesError("unsafe_undo", "Only a verified journal operation can be undone automatically.")
+        }
+        if let action = try entry.restoreAction() {
+            try restore(entry: entry, action: action, options: options, write: write)
+            return
+        }
+        guard let noteID = entry.noteID ?? entry.stableDispatchIdentity, !noteID.isEmpty else {
+            throw NotesError("journal_preimage_missing", "Journal operation \(entry.id) has no note identity.")
+        }
+        guard let snapshotID = entry.snapshotID else {
+            throw NotesError("journal_snapshot_missing", "Journal operation \(entry.id) is not paired with an exact snapshot; refusing a broader undo.")
+        }
+        guard let postRevision = entry.postRevision else {
+            throw NotesError("journal_post_state_missing", "Journal operation \(entry.id) has no verified post-write revision; refusing unsafe undo.")
+        }
+        let current = try backend.reader.note(noteID)
+        guard ConcurrencyGuard.revision(current) == postRevision else {
+            throw NotesError("undo_conflict", "The note changed after journal operation \(entry.id); refusing to overwrite later edits.")
+        }
+        targetRef = noteID
+        selectedSnapshotID = snapshotID
     }
-    let current = try backend.reader.note(ref)
-    let snapshot = try SnapshotStore().load(current.summary.id.uuid, snapshot: snapshotID)
+    let current = try backend.reader.note(targetRef)
+    let snapshot = try SnapshotStore().loadRestorable(current.summary.id.uuid, snapshot: selectedSnapshotID)
     let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
     if selected == .scripting {
         try SnapshotRestorePolicy.requireScriptingRestoreAllowed(snapshot.note, allowDowngrade: write.allowDowngrade)
@@ -358,7 +417,14 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
         action: {
             switch selected {
             case .native:
-                let value = try NativeNotesWriter().restoreSnapshot(target, snapshot: snapshot.note, allowShared: write.allowShared)
+                let value = try NativeNotesWriter().restoreSnapshot(
+                    target,
+                    snapshot: snapshot.note,
+                    material: try SnapshotStore().restoreMaterial(for: snapshot),
+                    expectedRevision: ConcurrencyGuard.revision(current),
+                    expectedModified: current.summary.modified,
+                    allowShared: write.allowShared
+                )
                 capturedNative = value
                 return value.writeResult
             case .scripting:
@@ -393,18 +459,33 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
     }
 }
 
+private func unsafeJournalExpectation(_ entry: JournalEntry) -> NotesError {
+    NotesError("journal_postimage_missing",
+               "Journal operation \(entry.id) has no valid recorded result state; refusing an unsafe undo.")
+}
+
 private func restore(entry: JournalEntry, action: JournalRestoreAction, options: GlobalOptions, write: WriteOptions) throws {
     let backend = try options.writable()
     _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
     let writer = NativeNotesWriter()
+    let expectation = try entry.restoreExpectation()
     let target: String
     let paths: [[String]]
     switch action {
-    case .checklistAutoSort:
+    case .checklistAutoSort, .defaultParagraphStyle, .globalNoteSort, .globalDateGrouping,
+         .defaultTextSize, .resumeLastQuickNote, .autoConvertToTags:
         target = "Notes settings"; paths = []
     case .defaultAccount(let identifier):
         target = identifier; paths = []
-    case .folderSort(let folderID, _, _), .smartFolderQuery(let folderID, _):
+    case .quickNote(let noteID, _):
+        let note = try backend.reader.note(noteID)
+        target = note.summary.id.uuid; paths = [note.summary.folderPath]
+    case .scanFilter(let noteID, _, _, _, _), .scanOrientation(let noteID, _, _, _, _),
+         .scanCrop(let noteID, _, _, _, _), .scanMove(let noteID, _, _, _, _),
+         .scanUndelete(let noteID, _, _, _, _), .scanDeletePages(let noteID, _, _, _):
+        let note = try backend.reader.note(noteID)
+        target = note.summary.id.uuid; paths = [note.summary.folderPath]
+    case .folderSort(let folderID, _, _), .folderDateGrouping(let folderID, _), .smartFolderQuery(let folderID, _):
         let folder = try SafetyExecutor.folder(folderID, reader: backend.reader)
         guard let folder else { throw NotesError("folder_not_found", "The journal target folder was not found.") }
         target = folder.id; paths = [folder.path]
@@ -417,17 +498,103 @@ private func restore(entry: JournalEntry, action: JournalRestoreAction, options:
         let value: NativeWriteResult
         switch action {
         case .checklistAutoSort(let enabled):
-            value = try writer.setChecklistAutoSort(enabled)
+            guard case .checklistAutoSort(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setChecklistAutoSort(enabled, expectedCurrent: expected)
         case .folderSort(let folderID, let orderName, let directionName):
             guard let order = NativeFolderSortOrder(rawValue: orderName), let direction = NativeFolderSortDirection(rawValue: directionName) else {
                 throw NotesError("invalid_journal", "The recorded folder sort preimage is invalid.")
             }
-            value = try writer.setFolderSort(folderID, order: order, direction: direction)
+            guard case .folderSort(let expectedOrderName, let expectedDirectionName)? = expectation,
+                  let expectedOrder = NativeFolderSortOrder(rawValue: expectedOrderName),
+                  let expectedDirection = NativeFolderSortDirection(rawValue: expectedDirectionName) else {
+                throw unsafeJournalExpectation(entry)
+            }
+            value = try writer.setFolderSort(folderID, order: order, direction: direction,
+                                             expectedOrder: expectedOrder, expectedDirection: expectedDirection)
+        case .folderDateGrouping(let folderID, let type):
+            guard case .folderDateGrouping(let expectedType)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setFolderDateGrouping(folderID, type: type, expectedCurrentType: expectedType,
+                                                      allowShared: write.allowShared)
+        case .defaultParagraphStyle(let styleName):
+            guard let style = NativeDefaultParagraphStyle(rawValue: styleName) else {
+                throw NotesError("invalid_journal", "The recorded default paragraph style preimage is invalid.")
+            }
+            guard case .defaultParagraphStyle(let expectedName)? = expectation,
+                  let expected = NativeDefaultParagraphStyle(rawValue: expectedName) else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setDefaultParagraphStyle(style, expectedCurrent: expected)
+        case .globalNoteSort(let sortName):
+            guard let sort = NativeGlobalNoteSort(rawValue: sortName) else {
+                throw NotesError("invalid_journal", "The recorded global note sort preimage is invalid.")
+            }
+            guard case .globalNoteSort(let expectedName)? = expectation,
+                  let expected = NativeGlobalNoteSort(rawValue: expectedName) else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setGlobalNoteSort(sort, expectedCurrent: expected)
+        case .globalDateGrouping(let enabled):
+            guard case .globalDateGrouping(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setGlobalDateGrouping(enabled, expectedCurrent: expected)
+        case .defaultTextSize(let points):
+            guard case .defaultTextSize(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setDefaultTextSize(points, expectedCurrent: expected)
+        case .resumeLastQuickNote(let enabled):
+            guard case .resumeLastQuickNote(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setResumeLastQuickNote(enabled, expectedCurrent: expected)
+        case .autoConvertToTags(let enabled):
+            guard case .autoConvertToTags(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setAutoConvertToTags(enabled, expectedCurrent: expected)
+        case .quickNote(let noteID, let enabled):
+            guard case .quickNote(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setQuickNote(noteID, enabled: enabled, expectedCurrent: expected,
+                                            allowShared: write.allowShared)
         case .defaultAccount(let identifier):
-            value = try writer.setDefaultAccount(identifier)
+            guard case .defaultAccount(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setDefaultAccount(identifier, expectedCurrent: expected)
         case .smartFolderQuery(let folderID, let queryJSON):
             try SmartFolderQueryGrammar.validate(queryJSON)
-            value = try writer.editSmartFolderRules(folderID, queryJSON: queryJSON, expectedCount: 1)
+            guard case .smartFolderQuery(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
+            value = try writer.editSmartFolderRules(folderID, queryJSON: queryJSON, expectedCount: 1,
+                                                     expectedCurrentQuery: expected)
+        case .scanFilter(let noteID, let attachmentID, let pageID, let filterName, let expectedName):
+            guard let filter = NativeScanFilter(rawValue: filterName) else {
+                throw NotesError("invalid_journal", "The recorded scan-filter preimage is invalid.")
+            }
+            let expected = try expectedName.map { value in
+                guard let parsed = NativeScanFilter(rawValue: value) else {
+                    throw NotesError("invalid_journal", "The recorded scan-filter result is invalid.")
+                }
+                return parsed
+            }
+            value = try writer.setScanFilter(noteID, attachmentID: attachmentID, pageID: pageID,
+                                             filter: filter, expectedCurrent: expected,
+                                             allowShared: write.allowShared)
+        case .scanOrientation(let noteID, let attachmentID, let pageID, let orientationName, let expectedName):
+            guard let orientation = NativeScanOrientation(rawValue: orientationName) else {
+                throw NotesError("invalid_journal", "The recorded scan-orientation preimage is invalid.")
+            }
+            let expected = try expectedName.map { value in
+                guard let parsed = NativeScanOrientation(rawValue: value) else {
+                    throw NotesError("invalid_journal", "The recorded scan-orientation result is invalid.")
+                }
+                return parsed
+            }
+            value = try writer.setScanOrientation(noteID, attachmentID: attachmentID, pageID: pageID,
+                                                  orientation: orientation, expectedCurrent: expected,
+                                                  allowShared: write.allowShared)
+        case .scanCrop(let noteID, let attachmentID, let pageID, let crop, let expected):
+            value = try writer.setScanCrop(noteID, attachmentID: attachmentID, pageID: pageID,
+                                           crop: crop, expectedCurrent: expected,
+                                           allowShared: write.allowShared)
+        case .scanMove(let noteID, let attachmentID, let pageID, let index, let expectedPageIDs):
+            value = try writer.moveScanPage(noteID, attachmentID: attachmentID, pageID: pageID,
+                                            toIndex: index, expectedPageIDs: expectedPageIDs,
+                                            allowShared: write.allowShared)
+        case .scanUndelete(let noteID, let attachmentID, let pageID, let index, let expectedPageIDs):
+            value = try writer.restoreScanPage(noteID, attachmentID: attachmentID, pageID: pageID,
+                                               toIndex: index, expectedPageIDs: expectedPageIDs,
+                                               allowShared: write.allowShared)
+        case .scanDeletePages(let noteID, let attachmentID, let pageIDs, let expectedPageIDs):
+            value = try writer.deleteScanPages(noteID, attachmentID: attachmentID, pageIDs: pageIDs,
+                                               expectedPageIDs: expectedPageIDs,
+                                               allowShared: write.allowShared)
         }
         captured = value
         return value.writeResult

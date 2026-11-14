@@ -5,6 +5,7 @@ import NotesAutomation
 import NotesCore
 @testable import NotesNative
 import NotesNativeObjC
+import NotesSafety
 import NotesStore
 
 private final class FakePrivateTable: NSObject {
@@ -21,6 +22,27 @@ private final class FakeChangeTracked: NSObject {
 }
 
 final class NativeTests: XCTestCase {
+    private static func varint(_ value: Int) -> Data {
+        var value = value
+        var data = Data()
+        repeat {
+            let byte = UInt8(value & 0x7f)
+            value >>= 7
+            data.append(value == 0 ? byte : byte | 0x80)
+        } while value != 0
+        return data
+    }
+
+    private static func field(_ number: Int, bytes: Data) -> Data {
+        varint(number << 3 | 2) + varint(bytes.count) + bytes
+    }
+
+    private static func bodyData(text: String, runLength: Int) -> Data {
+        let run = varint(1 << 3) + varint(runLength)
+        let note = field(2, bytes: Data(text.utf8)) + field(5, bytes: run)
+        return field(2, bytes: field(3, bytes: note))
+    }
+
     func testLoadingNativeRuntimeDisablesCoreDataDebugStderr() {
         unsetenv("com.apple.CoreData.SQLDebug")
         unsetenv("com.apple.CoreData.Logging.stderr")
@@ -62,6 +84,34 @@ final class NativeTests: XCTestCase {
         XCTAssertTrue(result.writeResult.message?.contains("operation_id=operation-123") == true)
     }
 
+    func testRestoreMarksAnUnmarkSaveCommittedBeforeMoving() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/NotesNative/NativeNotesWriter.swift"),
+                                encoding: .utf8)
+        let restoreStart = try XCTUnwrap(source.range(of: "public func restore("))
+        let restoreEnd = try XCTUnwrap(source.range(of: "public func moveFolder(", range: restoreStart.upperBound..<source.endIndex))
+        let restore = source[restoreStart.lowerBound..<restoreEnd.lowerBound]
+        let save = try XCTUnwrap(restore.range(of: "try NCNotesRuntime.save(context)"))
+        let committed = try XCTUnwrap(restore.range(of: "operation?.committed = true", range: save.upperBound..<restore.endIndex))
+        let move = try XCTUnwrap(restore.range(of: "try appleMove(note, to: target)"))
+        XCTAssertLessThan(committed.lowerBound, move.lowerBound)
+    }
+
+    func testSnapshotHashtagRevivalAlsoRevivesTheHashtagRecord() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/NotesNative/NativeNotesWriter.swift"),
+                                encoding: .utf8)
+        let restoreStart = try XCTUnwrap(source.range(of: "public func restoreSnapshot("))
+        let restoreEnd = try XCTUnwrap(source.range(of: "private static func prepareSnapshotFiles", range: restoreStart.upperBound..<source.endIndex))
+        let restore = source[restoreStart.lowerBound..<restoreEnd.lowerBound]
+        let unmark = try XCTUnwrap(restore.range(of: "try NCNotesRuntime.unmarkForDeletion(attachment)"))
+        let revive = try XCTUnwrap(restore.range(of: "try NCNotesRuntime.reviveTagAttachment(attachment)",
+                                                 range: unmark.upperBound..<restore.endIndex))
+        XCTAssertLessThan(unmark.lowerBound, revive.lowerBound)
+    }
+
     func testNativeTransactionRunsManagedObjectWorkOnContextQueue() throws {
         let context = try inMemoryContext()
         var writer: NativeNotesWriter!
@@ -82,6 +132,43 @@ final class NativeTests: XCTestCase {
             try context.count(for: NSFetchRequest(entityName: "Item"))
         }
         XCTAssertEqual(count, 1)
+    }
+
+    func testWriteResetsRegisteredObjectsBeforeTransaction() throws {
+        let context = try inMemoryContext()
+        try context.performAndWait {
+            let object = NSEntityDescription.insertNewObject(forEntityName: "Item", into: context)
+            object.setValue("cached", forKey: "value")
+            try context.save()
+            XCTAssertFalse(context.registeredObjects.isEmpty)
+        }
+        let writer = NativeNotesWriter(operationID: { "operation-reset" }, contextProvider: { context })
+
+        _ = try writer.performWrite { context in
+            XCTAssertTrue(context.registeredObjects.isEmpty)
+            return NativeWriteResult(
+                writeResult: WriteResult(outcome: .verified),
+                verification: NativeVerification(nativeReadback: ["reset": "true"], sqliteReadback: nil)
+            )
+        }
+
+        XCTAssertEqual(try context.performAndWait {
+            try context.count(for: NSFetchRequest(entityName: "Item"))
+        }, 1)
+    }
+
+    func testBodyIntegrityRejectsInvalidRunsAndStaleText() throws {
+        let valid = Self.bodyData(text: "body", runLength: 4)
+        XCTAssertNoThrow(try NativeBodyIntegrity.validate(serialized: valid, expectedText: "body"))
+        XCTAssertThrowsError(try NativeBodyIntegrity.validate(
+            serialized: Self.bodyData(text: "body", runLength: 5),
+            expectedText: "body"
+        )) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "native_body_inconsistent")
+        }
+        XCTAssertThrowsError(try NativeBodyIntegrity.validate(serialized: valid, expectedText: "new body")) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "native_body_inconsistent")
+        }
     }
 
     func testCommittedChecklistReadbackRunsInFreshContextTurn() throws {
@@ -129,6 +216,12 @@ final class NativeTests: XCTestCase {
         let link = NativeNoteLink(sourceID: "source", targetID: "target", text: "Target", attachmentID: "new-link", range: nil)
         XCTAssertTrue(NativeVerificationRules.exactLink([link], attachmentID: "new-link", targetID: "target"))
         XCTAssertFalse(NativeVerificationRules.exactLink([link], attachmentID: "other-link", targetID: "target"))
+        let section = NativeNoteLink(sourceID: "source", targetID: "target",
+                                     targetParagraphID: "11111111-2222-3333-4444-555555555555",
+                                     text: "Target → Section", attachmentID: "new-section", range: nil)
+        XCTAssertTrue(NativeVerificationRules.exactLink([section], attachmentID: "new-section", targetID: "target",
+                                                        paragraphID: "11111111-2222-3333-4444-555555555555"))
+        XCTAssertFalse(NativeVerificationRules.exactLink([section], attachmentID: "new-section", targetID: "target"))
 
         XCTAssertTrue(NativeVerificationRules.exactTable([["a", "b"]], expected: [["a", "b"]]))
         XCTAssertFalse(NativeVerificationRules.exactTable([["a", "wrong"]], expected: [["a", "b"]]))
@@ -163,10 +256,29 @@ final class NativeTests: XCTestCase {
         XCTAssertFalse(NativeVerificationRules.sameMarkerMultiset(before, [("mention", "mention"), ("tag", "other"), ("tag", "hashtag")]))
     }
 
+    func testMentionTargetsRequireParticipantsAndResolveAll() throws {
+        let participants = [
+            NoteParticipant(participantID: "participant-1", userID: "user-1"),
+            NoteParticipant(participantID: "participant-2", userID: nil),
+        ]
+        XCTAssertEqual(try NativeMentionTarget.resolve("user-1", participants: participants, allIdentity: nil), "user-1")
+        XCTAssertEqual(try NativeMentionTarget.resolve("PARTICIPANT-1", participants: participants, allIdentity: nil), "user-1")
+        XCTAssertEqual(try NativeMentionTarget.resolve("participant-2", participants: participants, allIdentity: nil), "participant-2")
+        XCTAssertEqual(try NativeMentionTarget.resolve("@All", participants: participants, allIdentity: "all-users"), "all-users")
+        XCTAssertThrowsError(try NativeMentionTarget.resolve("stranger", participants: participants, allIdentity: nil)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "mention_participant_not_found")
+        }
+        XCTAssertThrowsError(try NativeMentionTarget.resolve("all", participants: participants, allIdentity: nil)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "mention_all_unavailable")
+        }
+    }
+
     func testSnapshotVerificationMatchesStructureAcrossEquivalentRunSplits() throws {
         var expected = try InMemoryNotes.sample().note("welcome")
-        var checklist = ParagraphStyle(kind: .checklist, checked: true, checklistID: "old-item")
-        checklist.id = "old-paragraph"
+        let paragraphID = "11111111-2222-3333-4444-555555555555"
+        let checklistID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        var checklist = ParagraphStyle(kind: .checklist, checked: true, checklistID: checklistID)
+        checklist.id = paragraphID
         expected.document = NoteDocument(text: "task", runs: [
             AttributeRun(length: 4, paragraph: checklist, font: FontStyle(bold: true),
                          link: "https://example.com", highlight: .mint),
@@ -174,16 +286,35 @@ final class NativeTests: XCTestCase {
 
         var actual = expected
         actual.document = NoteDocument(text: "task", runs: [
-            AttributeRun(length: 2, paragraph: ParagraphStyle(kind: .checklist, checked: true, checklistID: "new-item"),
+            AttributeRun(length: 2, paragraph: ParagraphStyle(kind: .checklist, checked: true, checklistID: checklistID),
                          font: FontStyle(bold: true), link: "https://example.com", highlight: .mint),
-            AttributeRun(length: 2, paragraph: ParagraphStyle(kind: .checklist, checked: true, checklistID: "new-item"),
+            AttributeRun(length: 2, paragraph: ParagraphStyle(kind: .checklist, checked: true, checklistID: checklistID),
                          font: FontStyle(bold: true), link: "https://example.com", highlight: .mint),
         ])
-        actual.document?.runs[0].paragraph?.id = "new-paragraph"
-        actual.document?.runs[1].paragraph?.id = "new-paragraph"
+        actual.document?.runs[0].paragraph?.id = paragraphID
+        actual.document?.runs[1].paragraph?.id = paragraphID
 
         XCTAssertTrue(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
+        actual.document?.runs[1].paragraph?.checklistID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
+        actual.document?.runs[1].paragraph?.checklistID = checklistID
         actual.document?.runs[1].highlight = .purple
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
+    }
+
+    func testSnapshotVerificationIgnoresRegeneratedRecordingMarkerDisplayText() throws {
+        var expected = try InMemoryNotes.sample().note("welcome")
+        var expectedReference = InlineRef(id: "recording", typeUTI: "com.apple.m4a-audio")
+        expectedReference.displayText = "New Recording"
+        expected.document = NoteDocument(text: "\u{fffc}", runs: [
+            AttributeRun(length: 1, attachment: expectedReference),
+        ])
+        expected.attachments = [Attachment(id: "recording", typeUTI: "com.apple.m4a-audio")]
+        var actual = expected
+        actual.document?.runs[0].attachment?.displayText = nil
+
+        XCTAssertTrue(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
+        actual.document?.runs[0].attachment?.typeUTI = "public.mpeg-4-audio"
         XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: actual))
     }
 
@@ -232,6 +363,14 @@ final class NativeTests: XCTestCase {
         XCTAssertNoThrow(try NativeSharedWriteGuard.require(isShared: true, allowShared: true, isReadOnly: false))
     }
 
+    func testNativeDeletionRequiresRecentlyDeletedState() {
+        XCTAssertFalse(NativeDeleteVerification.isDeleted(markedForDeletion: true, folderType: 0))
+        XCTAssertFalse(NativeDeleteVerification.isDeleted(markedForDeletion: true, folderType: 1))
+        XCTAssertTrue(NativeDeleteVerification.isDeleted(markedForDeletion: false, folderType: 1))
+        XCTAssertFalse(NativeDeleteVerification.isDeleted(markedForDeletion: false, folderType: 0))
+        XCTAssertFalse(NativeDeleteVerification.isDeleted(markedForDeletion: false, folderType: nil))
+    }
+
     func testDefaultNativeDestinationUsesStoreFolderID() throws {
         let location = DefaultNotesLocation(accountID: "account-a", accountName: "iCloud", folderID: "stable-folder-id",
                                             folderName: "Notes", folderPath: ["Notes"])
@@ -260,10 +399,23 @@ final class NativeTests: XCTestCase {
         let version = ProcessInfo.processInfo.operatingSystemVersion
         XCTAssertEqual(report.macOS, "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)")
         XCTAssertTrue(report.frameworkLoaded, report.error ?? "framework did not load")
+        XCTAssertEqual(report.classes["ICHashtagController"]?.selectors["+shouldAutoConvertToTag"], true)
+        XCTAssertEqual(report.classes["ICHashtagController"]?.selectors["+setShouldAutoConvertToTag:"], true)
+        XCTAssertEqual(report.classes["Calculate"]?.selectors["+evaluate:options:error:"], true)
+        XCTAssertEqual(report.classes["CalculateResult"]?.selectors["-formattedResult"], true)
         XCTAssertTrue(report.missingCore.isEmpty, report.missingCore.joined(separator: ", "))
         XCTAssertTrue(report.usable)
         if version.majorVersion >= 27 {
             XCTAssertTrue(report.missing.isEmpty, report.missing.joined(separator: ", "))
+        }
+    }
+
+    func testCalculateEvaluationMatchesNotesPlainTextRepresentation() throws {
+        let value = try NativeNotesWriter().evaluateMath("2+2=")
+        XCTAssertEqual(value, NativeCalculation(expression: "2+2", formattedExpression: "2+2",
+                                                result: "4", renderedText: "2+2=4"))
+        XCTAssertThrowsError(try NativeNotesWriter().evaluateMath("2+")) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "math_evaluation_failed")
         }
     }
 
@@ -276,6 +428,11 @@ final class NativeTests: XCTestCase {
         let core = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2", missing: ["-[ICNote saveNoteData]"], error: nil, classes: [:])
         XCTAssertFalse(core.usable)
         XCTAssertEqual(core.missingCore, ["-[ICNote saveNoteData]"])
+        let paragraphIdentity = "-[ICTTParagraphStyle setUuid:]"
+        let identityCore = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2",
+                                              missing: [paragraphIdentity], error: nil, classes: [:])
+        XCTAssertFalse(identityCore.usable)
+        XCTAssertEqual(identityCore.missingCore, [paragraphIdentity])
     }
 
     func testStyleNumbersMatchNotes() {
@@ -297,11 +454,276 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(format.fontSize, 17.5)
         XCTAssertEqual(format.highlight, .mint)
         XCTAssertEqual(format.highlight?.notesValue, 4)
+        XCTAssertEqual(NativeDefaultParagraphStyle.title.value, 0)
+        XCTAssertEqual(NativeDefaultParagraphStyle.body.value, 3)
+        XCTAssertEqual(NativeDefaultParagraphStyle(value: 4), .monospaced)
+    }
+
+    func testGlobalNoteSortParsesNamesAndNotesValues() throws {
+        let cases: [(NativeGlobalNoteSort, Int, String)] = [
+            (.modified, 0, "modified"),
+            (.created, 1, "created"),
+            (.title, 2, "title"),
+        ]
+
+        XCTAssertEqual(NativeGlobalNoteSort.allCases, cases.map(\.0))
+        for (sort, value, name) in cases {
+            XCTAssertEqual(sort.value, value)
+            XCTAssertEqual(NativeGlobalNoteSort(value: value), sort)
+            XCTAssertEqual(NativeGlobalNoteSort(rawValue: name), sort)
+            XCTAssertEqual(String(decoding: try JSONEncoder().encode(sort), as: UTF8.self), "\"\(name)\"")
+        }
+        XCTAssertNil(NativeGlobalNoteSort(value: -1))
+        XCTAssertNil(NativeGlobalNoteSort(value: 3))
+        XCTAssertNil(NativeGlobalNoteSort(rawValue: "alphabetical"))
+        XCTAssertNil(NativeGlobalNoteSort(rawValue: "Modified"))
+    }
+
+    func testNativeNotesSettingsRoundTripsItsPublicJSONShape() throws {
+        let settings = NativeNotesSettings(sort: .title, groupsByDate: false,
+                                           defaultTextSize: 24, resumesLastQuickNote: true,
+                                           autoConvertsToTags: false)
+        let data = try JSONEncoder().encode(settings)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(object["sort"] as? String, "title")
+        XCTAssertEqual(object["groupsByDate"] as? Bool, false)
+        XCTAssertEqual(object["defaultTextSize"] as? Int, 24)
+        XCTAssertEqual(object["resumesLastQuickNote"] as? Bool, true)
+        XCTAssertEqual(object["autoConvertsToTags"] as? Bool, false)
+        XCTAssertEqual(try JSONDecoder().decode(NativeNotesSettings.self, from: data), settings)
+    }
+
+    func testMapURLRequiresAppleMapsHTTPS() throws {
+        XCTAssertNoThrow(try NativeMapURL.validate(URL(string: "https://maps.apple.com/?q=Apple+Park")!))
+        for value in ["http://maps.apple.com/?q=x", "https://example.com/map", "maps://maps.apple.com"] {
+            XCTAssertThrowsError(try NativeMapURL.validate(URL(string: value)!)) { error in
+                XCTAssertEqual((error as? NotesError)?.code, "invalid_map_url")
+            }
+        }
     }
 
     func testUTF16RangeCountsSurrogatePairs() {
         XCTAssertEqual(("a😀b" as NSString).length, 4)
         XCTAssertEqual(UTF16Range(location: 1, length: 2), UTF16Range(location: 1, length: 2))
+    }
+
+    func testSavedParagraphLinkTargetRequiresOneLinkableHeading() throws {
+        let bodyID = UUID().uuidString
+        let headingID = UUID().uuidString
+        let body = ParagraphStyle(kind: .body)
+        var bodyWithID = body
+        bodyWithID.id = bodyID
+        var heading = ParagraphStyle(kind: .heading)
+        heading.id = headingID
+        let document = NoteDocument(
+            text: "body\nheading\n",
+            runs: [
+                AttributeRun(length: 5, paragraph: bodyWithID),
+                AttributeRun(length: 8, paragraph: heading),
+            ]
+        )
+        let writer = NativeNotesWriter()
+        XCTAssertThrowsError(try writer.paragraphLinkTarget(bodyID, in: document)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "paragraph_not_linkable")
+        }
+        let resolved = try writer.paragraphLinkTarget(headingID, in: document)
+        XCTAssertEqual(resolved.id.uuidString.lowercased(), headingID.lowercased())
+        XCTAssertEqual(resolved.name, "heading")
+
+        var secondHeading = heading
+        secondHeading.id = headingID
+        let duplicate = NoteDocument(
+            text: "one\ntwo\n",
+            runs: [
+                AttributeRun(length: 4, paragraph: heading),
+                AttributeRun(length: 4, paragraph: secondHeading),
+            ]
+        )
+        XCTAssertThrowsError(try writer.paragraphLinkTarget(headingID, in: duplicate)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "ambiguous_paragraph_id")
+        }
+    }
+
+    func testLiveSnapshotRecreatesNativeObjectFamilies() throws {
+        guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_SNAPSHOT_TESTS"] == "1" else {
+            throw XCTSkip("Set NOTESCLI_LIVE_SNAPSHOT_TESTS=1; this test writes one disposable notescli-test note.")
+        }
+        let runner = OSAScriptRunner()
+        let native = NativeNotesWriter()
+        let scripting = ScriptingNotesWriter(timeout: 20, resolver: { ref in
+            try SQLiteNotesStore(refresh: true).note(ref).summary.id.coreDataID
+        })
+        let title = "notescli-test-table-restore-\(UUID().uuidString.lowercased())"
+        let create = "function run(argv) { const app = Application('Notes'); const account = app.defaultAccount(); const note = app.make({new: 'note', at: account, withProperties: {name: argv[0], body: '<h1>' + argv[0] + '</h1><p>body</p>'}}); const target = app.make({new: 'note', at: account, withProperties: {name: argv[0] + '-target', body: '<h1>Target</h1>'}}); return JSON.stringify({note: note.id(), target: target.id()}); }"
+        let reply = try runner.run(source: create, language: .javaScript, arguments: [title], timeout: 20)
+        guard !reply.timedOut, reply.status == 0 else {
+            throw NotesError("unknown_write", "Disposable table-restore fixture creation failed: \(reply.stderr)")
+        }
+        let fixtureData = try XCTUnwrap(reply.stdout.data(using: .utf8))
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: fixtureData) as? [String: String])
+        let scriptingID = try XCTUnwrap(fixture["note"])
+        let targetScriptingID = try XCTUnwrap(fixture["target"])
+        var ref: String?, targetRef: String?
+        for attempt in 0..<40 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.25) }
+            if let note = try? SQLiteNotesStore(refresh: true).note(scriptingID) {
+                ref = note.summary.id.uuid
+            }
+            if let note = try? SQLiteNotesStore(refresh: true).note(targetScriptingID) { targetRef = note.summary.id.uuid }
+            if ref != nil, targetRef != nil { break }
+        }
+        let noteID = try XCTUnwrap(ref)
+        let targetID = try XCTUnwrap(targetRef)
+        defer {
+            _ = try? scripting.deleteNote(noteID)
+            _ = try? scripting.deleteNote(targetID)
+        }
+
+        let beforeRefusedSave = try SQLiteNotesStore(refresh: true).note(noteID)
+        let refusedTag = "refused\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
+        do {
+            setenv("NOTESCLI_TEST_CORRUPT_PENDING_BODY", noteID, 1)
+            defer { unsetenv("NOTESCLI_TEST_CORRUPT_PENDING_BODY") }
+            XCTAssertThrowsError(try native.addTag(noteID, tag: refusedTag, position: nil, allowShared: false)) { error in
+                XCTAssertEqual((error as? NotesError)?.code, "native_body_inconsistent")
+            }
+        }
+        let afterRefusedSave = try SQLiteNotesStore(refresh: true).note(noteID)
+        XCTAssertEqual(afterRefusedSave.document?.text, beforeRefusedSave.document?.text)
+        XCTAssertFalse(afterRefusedSave.summary.tags.contains { $0.caseInsensitiveCompare(refusedTag) == .orderedSame })
+
+        let created = try native.createTable(
+            noteID,
+            rows: [["alpha", "beta"], ["gamma", "delta"]],
+            position: nil,
+            allowShared: false
+        )
+        XCTAssertEqual(created.writeResult.outcome, .verified)
+        let oldTableID = try XCTUnwrap(created.verification.nativeReadback["tableID"])
+        let linkURL = URL(string: "https://example.com/notescli-restore")!
+        let link = try native.insertSynapseLink(
+            noteID,
+            url: linkURL,
+            title: "NotesCLI restore link",
+            position: nil,
+            allowShared: false
+        )
+        XCTAssertEqual(link.writeResult.outcome, .verified)
+        let oldLinkID = try XCTUnwrap(link.verification.nativeReadback["attachmentID"])
+        let drawing = try SVGDrawingConverter.drawing(from: Data("""
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+          <path d="M10 10 L50 70 L90 20" fill="none" stroke="#336699" stroke-width="4"/>
+        </svg>
+        """.utf8))
+        let drawingWrite = try native.insertDrawing(noteID, drawing: drawing, position: nil, allowShared: false)
+        XCTAssertEqual(drawingWrite.write.writeResult.outcome, .verified)
+        let oldDrawingID = drawingWrite.attachmentID
+        let tagName = "restore\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
+        XCTAssertEqual(try native.addTag(noteID, tag: tagName, position: nil, allowShared: false).writeResult.outcome, .verified)
+        let tagged = try SQLiteNotesStore(refresh: true).note(noteID)
+        let oldTagID = try XCTUnwrap(tagged.attachments.first(where: {
+            $0.kind == "hashtag" && ($0.displayText?.localizedCaseInsensitiveContains(tagName) == true ||
+                                      $0.title?.localizedCaseInsensitiveContains(tagName) == true)
+        })?.id)
+        let divider = try native.insertDivider(noteID, position: nil, allowShared: false)
+        let oldDividerID = try XCTUnwrap(divider.verification.nativeReadback["attachmentID"])
+        let math = try native.insertMathExpression(noteID, expression: "2+2", position: nil, allowShared: false)
+        let oldMathID = try XCTUnwrap(math.verification.nativeReadback["attachmentID"])
+        let noteLink = try native.insertNoteLink(noteID, target: targetID, text: "Restore target",
+                                                position: nil, allowShared: false)
+        let oldNoteLinkID = try XCTUnwrap(noteLink.verification.nativeReadback["attachmentID"])
+        let snapshot = try SQLiteNotesStore(refresh: true).note(noteID)
+        XCTAssertEqual(
+            snapshot.attachments.first(where: { $0.id == oldNoteLinkID })?.targetNoteID?.lowercased(),
+            targetID.lowercased()
+        )
+        let drawingPayloads = try native.snapshotDrawingPayloads(noteID)
+        let drawingPayload = try XCTUnwrap(drawingPayloads[oldDrawingID])
+        XCTAssertFalse(drawingPayload.isEmpty)
+        XCTAssertFalse(try JSONDecoder().decode([PaperStrokeRecord].self, from: drawingPayload).isEmpty)
+        let linkPayloads = try native.snapshotLinkPayloads(noteID)
+        let originalLinkPayload = try XCTUnwrap(linkPayloads[oldLinkID])
+        XCTAssertFalse(originalLinkPayload.synapseData?.isEmpty ?? true)
+        let snapshotRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notescli-snapshot-live-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: snapshotRoot) }
+        let snapshotStore = SnapshotStore(rootURL: snapshotRoot)
+        let saved = try snapshotStore.save(
+            snapshot,
+            drawingPayloads: drawingPayloads,
+            linkPayloads: linkPayloads
+        )
+        let loaded = try snapshotStore.loadRestorable(noteID, snapshot: saved.id)
+
+        XCTAssertEqual(try native.setPinned(noteID, pinned: true, allowShared: false).writeResult.outcome, .verified)
+        let changed = try native.replaceText(
+            noteID,
+            find: title,
+            replacement: "\(title)-changed",
+            allowShared: false
+        )
+        XCTAssertEqual(changed.writeResult.outcome, .verified, changed.writeResult.message ?? "no detail")
+        XCTAssertEqual(try SQLiteNotesStore(refresh: true).note(noteID).summary.title, "\(title)-changed")
+
+        setenv("NOTESCLI_TEST_TREAT_ABSENT", [oldTableID, oldLinkID, oldDrawingID, oldTagID,
+                                               oldDividerID, oldMathID, oldNoteLinkID].joined(separator: ","), 1)
+        defer { unsetenv("NOTESCLI_TEST_TREAT_ABSENT") }
+        let restored = try native.restoreSnapshot(
+            noteID,
+            snapshot: loaded.note,
+            material: try snapshotStore.restoreMaterial(for: loaded),
+            expectedRevision: nil,
+            expectedModified: nil,
+            allowShared: false
+        )
+
+        XCTAssertEqual(restored.writeResult.outcome, .verified, restored.writeResult.message ?? "no detail")
+        let idMapData = try XCTUnwrap(restored.verification.nativeReadback["attachmentIDMap"]?.data(using: .utf8))
+        let idMap = try XCTUnwrap(JSONSerialization.jsonObject(with: idMapData) as? [String: String])
+        let newTableID = try XCTUnwrap(idMap[oldTableID])
+        let newLinkID = try XCTUnwrap(idMap[oldLinkID])
+        let newDrawingID = try XCTUnwrap(idMap[oldDrawingID])
+        let newTagID = try XCTUnwrap(idMap[oldTagID])
+        let newDividerID = try XCTUnwrap(idMap[oldDividerID])
+        let newMathID = try XCTUnwrap(idMap[oldMathID])
+        let newNoteLinkID = try XCTUnwrap(idMap[oldNoteLinkID])
+        XCTAssertNotEqual(newTableID, oldTableID)
+        XCTAssertNotEqual(newLinkID, oldLinkID)
+        XCTAssertNotEqual(newDrawingID, oldDrawingID)
+        let readback = try SQLiteNotesStore(refresh: true).note(noteID)
+        XCTAssertEqual(readback.summary.title, title)
+        XCTAssertFalse(readback.summary.isPinned)
+        XCTAssertEqual(readback.document?.tables?[newTableID], [["alpha", "beta"], ["gamma", "delta"]])
+        XCTAssertNil(readback.document?.tables?[oldTableID])
+        XCTAssertEqual(readback.attachments.first(where: { $0.id == newLinkID })?.url, linkURL.absoluteString)
+        let restoredLinkPayload = try XCTUnwrap(try native.snapshotLinkPayloads(noteID)[newLinkID])
+        XCTAssertEqual(restoredLinkPayload.synapseData, originalLinkPayload.synapseData)
+        XCTAssertEqual(restoredLinkPayload.linkPresentationMetadata, originalLinkPayload.linkPresentationMetadata)
+        XCTAssertFalse(readback.attachments.contains(where: { $0.id == oldLinkID }))
+        XCTAssertFalse(try native.paperDrawings(noteID, attachmentID: newDrawingID).first?.drawings.first?.strokes.isEmpty ?? true)
+        XCTAssertTrue(readback.attachments.contains(where: { $0.id == newTagID && $0.kind == "hashtag" }))
+        XCTAssertTrue(readback.attachments.contains(where: { $0.id == newDividerID && $0.isDivider == true }))
+        XCTAssertTrue(readback.attachments.contains(where: {
+            $0.id == newMathID && ($0.mathExpression == "2+2" || $0.graphExpression == "2+2")
+        }))
+        XCTAssertTrue(readback.attachments.contains(where: {
+            $0.id == newNoteLinkID && $0.targetNoteID?.caseInsensitiveCompare(targetID) == .orderedSame
+        }))
+
+        let edited = try native.editTable(
+            noteID,
+            attachmentID: newTableID,
+            row: 1,
+            column: 1,
+            text: "edited-after-restore",
+            allowShared: false
+        )
+        XCTAssertEqual(edited.writeResult.outcome, .verified)
+        XCTAssertEqual(
+            try SQLiteNotesStore(refresh: true).note(noteID).document?.tables?[newTableID]?[1][1],
+            "edited-after-restore"
+        )
     }
 
     func testLiveNativeCapabilities() throws {

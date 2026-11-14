@@ -7,7 +7,7 @@ notescli mcp
 notescli mcp install --client tailscale
 ```
 
-The default server exposes 52 tools. Read-only mode exposes 29 read tools. `notescli mcp --allow-native` exposes 106 tools in total.
+The default server exposes 54 tools. Read-only mode exposes 31 read tools. `notescli mcp --allow-native` exposes 135 tools in total.
 
 ## Tools
 
@@ -15,6 +15,7 @@ Read tools:
 
 ```text
 list_accounts  list_folders  list_notes  search_notes  query_notes
+history  diff
 get_note  get_notes  list_tags  list_attachments  list_backlinks
 get_deeplink  list_smart_folders  list_deleted  recent_notes  today_notes
 pinned_notes  count_notes  get_stats  get_capabilities  get_raw_note
@@ -43,7 +44,7 @@ Tools added by `--allow-native`:
 checklist_list  checklist_add  checklist_toggle  checklist_check_all
 checklist_uncheck_all  checklist_clear_done  pin_note  unpin_note
 tag_add  tag_remove  tag_rename  tag_delete  link_add  link_list
-attach_pasteboard  add_url
+attach_pasteboard  add_url  link_capture  undo  revert
 smart_folder_create  smart_folder_rename  smart_folder_delete
 text_find  text_insert  text_delete  text_replace
 format_paragraph  format_inline  attach_file  diagram_add  delete_attachment
@@ -51,6 +52,7 @@ drawing_add  drawing_create  drawing_export
 table_create  table_set  table_add_row  table_add_column
 table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
 recording_add  recording_create  recording_transcribe
+get_notes_settings  set_auto_convert_tags  evaluate_math  insert_math_result
 ```
 
 The recording write tools accept `transcript_path` for timed transcript JSON produced by `notescli recording transcribe-file`. Use it instead of `transcribe`.
@@ -129,6 +131,8 @@ Every MCP write tool accepts `dry_run: true`. A real write returns an `outcome`:
 Use a folder named `notescli-test` and titles beginning with `notescli-test-` for agent experiments. Delete moves items to Recently Deleted.
 
 Every Notes write uses the folder allowlist, concurrency checks, journal, snapshots, and fresh readback. `--write-folders` sets a hard ceiling for the Tailscale server; `write_folders` on a call can narrow that ceiling but cannot broaden it. Read-only mode hides filesystem write tools as well as Notes write tools.
+
+`history` and `diff` read the exact pre-write snapshots created by NotesCLI. Native `undo` and `revert` can recreate missing scans, recordings, drawings, rich links, maps, tables, table-cell inline objects, Paper documents, and generic files, then verify the restored topology and bytes.
 
 Native tools stay hidden unless the server starts with `--allow-native`. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
 

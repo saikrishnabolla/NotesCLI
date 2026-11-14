@@ -3,18 +3,32 @@ import Foundation
 import NotesCore
 import NotesNative
 import NotesSafety
+import NotesStore
 
 extension NativeParagraphStyle: ExpressibleByArgument {}
 extension NativeParagraphAlignment: ExpressibleByArgument {}
 extension NativeWritingDirection: ExpressibleByArgument {}
 extension NativeFolderSortOrder: ExpressibleByArgument {}
 extension NativeFolderSortDirection: ExpressibleByArgument {}
+extension NativeDefaultParagraphStyle: ExpressibleByArgument {}
+extension NativeGlobalNoteSort: ExpressibleByArgument {}
 extension HighlightColor: ExpressibleByArgument {}
+extension NativeScanFilter: ExpressibleByArgument {}
+extension NativeScanOrientation: ExpressibleByArgument {}
+extension ScanPoint: ExpressibleByArgument {
+    public init?(argument: String) {
+        let values = argument.split(separator: ",", omittingEmptySubsequences: false)
+        guard values.count == 2, let x = Double(values[0]), let y = Double(values[1]),
+              x.isFinite, y.isFinite, (0...1).contains(x), (0...1).contains(y) else { return nil }
+        self.init(x: x, y: y)
+    }
+}
 
 struct EngineWriteResponse: Encodable {
     var engine: String
     var result: WriteResult
     var operationID: String? = nil
+    var journalID: String? = nil
     var syncPending: Bool? = nil
     var verification: NativeVerification? = nil
     var details: [String: String]? = nil
@@ -40,12 +54,45 @@ struct NativeActionResult {
         details = ["attachment_id": value.attachmentID, "fragment_ids": value.childAttachmentIDs.joined(separator: ","),
                    "duration": String(value.duration), "transcript_segments": String(value.transcriptSegments)]
     }
+    init(_ value: NativeScanResult) {
+        result = value.write.writeResult; operationID = value.write.operationID; verification = value.write.verification
+        details = ["attachment_id": value.attachmentID, "page_ids": value.pageAttachmentIDs.joined(separator: ","),
+                   "page_count": String(value.pageAttachmentIDs.count), "position": String(value.position)]
+    }
+    init(_ value: NativeMathResult) {
+        result = value.write.writeResult
+        operationID = value.write.operationID
+        verification = value.write.verification
+        details = ["expression": value.calculation.expression,
+                   "formatted_expression": value.calculation.formattedExpression,
+                   "result": value.calculation.result,
+                   "rendered_text": value.calculation.renderedText,
+                   "position": String(value.position)]
+    }
+    init(_ value: NativeHandwritingResult) {
+        let write = value.write!
+        result = write.writeResult
+        operationID = write.operationID
+        verification = write.verification
+        details = ["attachment_id": value.attachmentID, "text": value.text,
+                   "raw_text": value.rawText, "model_text": value.modelText,
+                   "score": String(value.score), "stroke_count": String(value.strokeCount),
+                   "point_count": String(value.pointCount), "persisted": String(value.persisted)]
+    }
+    init(_ value: NativeFallbackPDFResult) {
+        result = value.write.writeResult
+        operationID = value.write.operationID
+        verification = value.write.verification
+        details = ["attachment_id": value.attachmentID, "byte_count": String(value.byteCount),
+                   "path": value.path]
+    }
     init(_ value: WriteResult) { result = value; operationID = nil; verification = nil; details = nil }
 }
 
 func outputEngineWrite(_ input: EngineWriteResponse, options: GlobalOptions) throws {
     var response = input
     response.operationID = response.operationID ?? response.result.operationID
+    response.journalID = response.journalID ?? response.result.journalID
     response.syncPending = response.syncPending ?? response.result.syncPending
     if response.result.outcome == .unknown {
         if options.json { try Output.json(response) }
@@ -152,7 +199,8 @@ enum UnifiedNative {
         var captured: NativeActionResult?
         let result = try SafetyExecutor.run(options: write, operation: operation,
             arguments: arguments.merging(["ref": note.summary.id.uuid, "engine": selected.rawValue]) { $1 },
-            note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan) {
+            note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan,
+            capturePrivatePayloads: !backend.isFake) {
                 switch selected {
                 case .native: let value = try native(note.summary.id.uuid); captured = value; return value.result
                 case .scripting: let value = try scripting!(note.summary.id.uuid); captured = NativeActionResult(value); return value
@@ -171,7 +219,20 @@ enum UnifiedNative {
         var captured: NativeActionResult?
         let result = try SafetyExecutor.run(options: write, operation: operation,
             arguments: arguments.merging(["engine": selected.rawValue]) { $1 }, allowedPaths: notes.map(\.summary.folderPath), plan: plan) {
-                for note in notes { _ = try SnapshotStore().save(note) }
+                for note in notes {
+                    let payloads = note.attachments.contains(where: { $0.kind == "drawing" })
+                        ? try NativeNotesWriter().snapshotDrawingPayloads(note.summary.id.uuid) : [:]
+                    let scanMarkupPayloads = try SQLiteNotesStore(refresh: true).scanMarkupPayloads(note.summary.id.uuid)
+                    let paperBundlePayloads = note.attachments.contains(where: { $0.typeUTI.lowercased().contains("paper") })
+                        ? try NativeNotesWriter().snapshotPaperBundlePayloads(note.summary.id.uuid) : [:]
+                    let linkPayloads = note.attachments.contains(where: {
+                        $0.url != nil || ($0.synapseDataBytes ?? 0) > 0 || ($0.linkPreviewMetadataBytes ?? 0) > 0
+                    }) ? try NativeNotesWriter().snapshotLinkPayloads(note.summary.id.uuid) : [:]
+                    _ = try SnapshotStore().save(note, drawingPayloads: payloads,
+                                                 paperBundlePayloads: paperBundlePayloads,
+                                                 linkPayloads: linkPayloads,
+                                                 scanMarkupPayloads: scanMarkupPayloads)
+                }
                 let value = try native(); captured = value; return value.result
             }
         guard let result else { return }
@@ -226,10 +287,16 @@ enum UnifiedNative {
             return NativeActionResult(try delete ? writer.deleteTag(tag, expectedCount: expected, allowShared: w.allowShared) : writer.renameTag(tag, to: to!, expectedCount: expected, allowShared: w.allowShared))
         }
     }
-    static func linkAdd(_ o: GlobalOptions, _ w: WriteOptions, ref: String, target: String, text: String?, position: Int?) throws {
+    static func linkAdd(_ o: GlobalOptions, _ w: WriteOptions, ref: String, target: String, text: String?,
+                        paragraphID: String? = nil, paragraphName: String? = nil, position: Int?) throws {
         let stableTarget = try o.backends().reader.summary(target).id.uuid
-        try noteWrite(options: o, write: w, ref: ref, operation: "linkAdd", arguments: ["target": stableTarget, "text": text ?? "", "position": position.map(String.init) ?? ""]) { stableRef in
-            NativeActionResult(try NativeNotesWriter().insertNoteLink(stableRef, target: stableTarget, text: text, position: position, allowShared: w.allowShared))
+        try noteWrite(options: o, write: w, ref: ref, operation: "linkAdd",
+                      arguments: ["target": stableTarget, "text": text ?? "", "paragraph_id": paragraphID ?? "",
+                                  "paragraph_name": paragraphName ?? "", "position": position.map(String.init) ?? ""]) { stableRef in
+            NativeActionResult(try NativeNotesWriter().insertNoteLink(
+                stableRef, target: stableTarget, text: text, paragraphID: paragraphID,
+                paragraphName: paragraphName, position: position, allowShared: w.allowShared
+            ))
         }
     }
     static func dividerInsert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, position: Int?) throws {
@@ -240,6 +307,139 @@ enum UnifiedNative {
     static func mathInsert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, expression: String, position: Int?) throws {
         try noteWrite(options: o, write: w, ref: ref, operation: "insertMath", arguments: ["expression": expression, "position": position.map(String.init) ?? ""]) { stableRef in
             NativeActionResult(try NativeNotesWriter().insertMathExpression(stableRef, expression: expression, position: position, allowShared: w.allowShared))
+        }
+    }
+    static func mathResultInsert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, expression: String, position: Int?) throws {
+        try noteWrite(options: o, write: w, ref: ref, operation: "insertMathResult",
+                      arguments: ["expression": expression, "position": position.map(String.init) ?? ""]) { stableRef in
+            NativeActionResult(try NativeNotesWriter().insertMathResult(stableRef, expression: expression,
+                                                                         position: position, allowShared: w.allowShared))
+        }
+    }
+    static func scanFilter(_ o: GlobalOptions, _ w: WriteOptions, ref: String, attachmentID: String,
+                           pageID: String, filter: NativeScanFilter) throws {
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let previous = backend.isFake ? NativeScanPageState(
+            noteID: try backend.reader.summary(ref).id.uuid, attachmentID: attachmentID, pageID: pageID,
+            pageIDs: [pageID], filter: .photo, orientation: .upright, crop: nil, hasMarkup: false
+        ) : try NativeNotesWriter().scanPageState(ref, attachmentID: attachmentID, pageID: pageID)
+        try noteWrite(options: o, write: w, ref: ref, operation: "scanFilter",
+                      arguments: ["attachment_id": attachmentID, "page_id": pageID,
+                                  "filter": filter.rawValue, "previous_filter": previous.filter.rawValue]) { stableRef in
+            if backend.isFake {
+                return NativeActionResult(WriteResult(outcome: .unverified, noteID: NoteID(uuid: stableRef),
+                                                      message: "The fake backend does not store scan filters; Apple Notes was not changed."))
+            }
+            return NativeActionResult(try NativeNotesWriter().setScanFilter(stableRef, attachmentID: attachmentID,
+                                                                             pageID: pageID, filter: filter,
+                                                                             expectedCurrent: previous.filter,
+                                                                             allowShared: w.allowShared))
+        }
+    }
+    static func scanOrientation(_ o: GlobalOptions, _ w: WriteOptions, ref: String, attachmentID: String,
+                                pageID: String, orientation: NativeScanOrientation) throws {
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let previous = backend.isFake ? NativeScanPageState(
+            noteID: try backend.reader.summary(ref).id.uuid, attachmentID: attachmentID, pageID: pageID,
+            pageIDs: [pageID], filter: .photo, orientation: .upright, crop: nil, hasMarkup: false
+        ) : try NativeNotesWriter().scanPageState(ref, attachmentID: attachmentID, pageID: pageID)
+        try noteWrite(options: o, write: w, ref: ref, operation: "scanOrientation",
+                      arguments: ["attachment_id": attachmentID, "page_id": pageID,
+                                  "orientation": orientation.rawValue,
+                                  "previous_orientation": previous.orientation.rawValue]) { stableRef in
+            if backend.isFake {
+                return NativeActionResult(WriteResult(outcome: .unverified, noteID: NoteID(uuid: stableRef),
+                                                      message: "The fake backend does not store scan orientation; Apple Notes was not changed."))
+            }
+            return NativeActionResult(try NativeNotesWriter().setScanOrientation(stableRef, attachmentID: attachmentID,
+                                                                                  pageID: pageID, orientation: orientation,
+                                                                                  expectedCurrent: previous.orientation,
+                                                                                  allowShared: w.allowShared))
+        }
+    }
+    static func scanMove(_ o: GlobalOptions, _ w: WriteOptions, ref: String, attachmentID: String,
+                         pageID: String, toIndex: Int) throws {
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let previous = backend.isFake ? NativeScanPageState(
+            noteID: try backend.reader.summary(ref).id.uuid, attachmentID: attachmentID, pageID: pageID,
+            pageIDs: [pageID], filter: .photo, orientation: .upright, crop: nil, hasMarkup: false
+        ) : try NativeNotesWriter().scanPageState(ref, attachmentID: attachmentID, pageID: pageID)
+        guard let previousIndex = previous.pageIDs.firstIndex(of: pageID) else {
+            throw NotesError("scan_page_not_found", "The page is absent from the gallery order.")
+        }
+        guard previous.pageIDs.indices.contains(toIndex) else {
+            throw NotesError("invalid_scan_page_index", "Destination index must be between 0 and \(previous.pageIDs.count - 1).")
+        }
+        var appliedOrder = previous.pageIDs
+        appliedOrder.remove(at: previousIndex)
+        appliedOrder.insert(pageID, at: toIndex)
+        try noteWrite(options: o, write: w, ref: ref, operation: "scanMove",
+                      arguments: ["attachment_id": attachmentID, "page_id": pageID,
+                                  "to_index": String(toIndex), "previous_index": String(previousIndex),
+                                  "previous_page_order": previous.pageIDs.joined(separator: ","),
+                                  "applied_page_order": appliedOrder.joined(separator: ",")]) { stableRef in
+            if backend.isFake {
+                return NativeActionResult(WriteResult(outcome: .unverified, noteID: NoteID(uuid: stableRef),
+                                                      message: "The fake backend does not store scan page order; Apple Notes was not changed."))
+            }
+            return NativeActionResult(try NativeNotesWriter().moveScanPage(stableRef, attachmentID: attachmentID,
+                                                                            pageID: pageID, toIndex: toIndex,
+                                                                            expectedPageIDs: previous.pageIDs,
+                                                                            allowShared: w.allowShared))
+        }
+    }
+    static func scanCrop(_ o: GlobalOptions, _ w: WriteOptions, ref: String, attachmentID: String,
+                         pageID: String, crop: ScanCrop) throws {
+        func encode(_ value: ScanCrop) -> String {
+            "\(value.bottomLeft.x),\(value.bottomLeft.y);\(value.bottomRight.x),\(value.bottomRight.y);\(value.topLeft.x),\(value.topLeft.y);\(value.topRight.x),\(value.topRight.y)"
+        }
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let previous = backend.isFake ? NativeScanPageState(
+            noteID: try backend.reader.summary(ref).id.uuid, attachmentID: attachmentID, pageID: pageID,
+            pageIDs: [pageID], filter: .photo, orientation: .upright,
+            crop: ScanCrop(bottomLeft: ScanPoint(x: 0, y: 1), bottomRight: ScanPoint(x: 1, y: 1),
+                           topLeft: ScanPoint(x: 0, y: 0), topRight: ScanPoint(x: 1, y: 0)), hasMarkup: false
+        ) : try NativeNotesWriter().scanPageState(ref, attachmentID: attachmentID, pageID: pageID)
+        guard let previousCrop = previous.crop else {
+            throw NotesError("scan_crop_unavailable", "The scanned page has no readable crop quadrilateral.")
+        }
+        try noteWrite(options: o, write: w, ref: ref, operation: "scanCrop",
+                      arguments: ["attachment_id": attachmentID, "page_id": pageID,
+                                  "crop": encode(crop), "previous_crop": encode(previousCrop)]) { stableRef in
+            if backend.isFake {
+                return NativeActionResult(WriteResult(outcome: .unverified, noteID: NoteID(uuid: stableRef),
+                                                      message: "The fake backend does not store scan crops; Apple Notes was not changed."))
+            }
+            return NativeActionResult(try NativeNotesWriter().setScanCrop(
+                stableRef, attachmentID: attachmentID, pageID: pageID, crop: crop,
+                expectedCurrent: previousCrop, allowShared: w.allowShared))
+        }
+    }
+    static func scanDelete(_ o: GlobalOptions, _ w: WriteOptions, ref: String,
+                           attachmentID: String, pageID: String) throws {
+        let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
+        let previous = backend.isFake ? NativeScanPageState(
+            noteID: try backend.reader.summary(ref).id.uuid, attachmentID: attachmentID, pageID: pageID,
+            pageIDs: [pageID, "fake-page-2"], filter: .photo, orientation: .upright,
+            crop: nil, hasMarkup: false
+        ) : try NativeNotesWriter().scanPageState(ref, attachmentID: attachmentID, pageID: pageID)
+        guard previous.pageIDs.count > 1,
+              let previousIndex = previous.pageIDs.firstIndex(of: pageID) else {
+            throw NotesError("scan_last_page_refused", "Refusing to delete the only page in a scanned document.")
+        }
+        let appliedOrder = previous.pageIDs.filter { $0 != pageID }
+        try noteWrite(options: o, write: w, ref: ref, operation: "scanDelete",
+                      arguments: ["attachment_id": attachmentID, "page_id": pageID,
+                                  "previous_index": String(previousIndex),
+                                  "previous_page_order": previous.pageIDs.joined(separator: ","),
+                                  "applied_page_order": appliedOrder.joined(separator: ",")]) { stableRef in
+            if backend.isFake {
+                return NativeActionResult(WriteResult(outcome: .unverified, noteID: NoteID(uuid: stableRef),
+                                                      message: "The fake backend does not store scan pages; Apple Notes was not changed."))
+            }
+            return NativeActionResult(try NativeNotesWriter().deleteScanPage(
+                stableRef, attachmentID: attachmentID, pageID: pageID,
+                expectedPageIDs: previous.pageIDs, allowShared: w.allowShared))
         }
     }
     static func mentionInsert(_ o: GlobalOptions, _ w: WriteOptions, ref: String, text: String, userRecordName: String, position: Int?) throws {
@@ -333,7 +533,20 @@ func unifiedNativeFolderMove(options: GlobalOptions, write: WriteOptions, ref: S
     var captured: NativeActionResult?
     let result = try SafetyExecutor.run(options: write, operation: "moveFolder", arguments: ["ref": source.id, "parent": destination?.id ?? "", "engine": "native", "stable_id": source.id, "stable_parent_id": destination?.id ?? ""],
         allowedPaths: [source.path, targetPath], plan: plan) {
-            for note in notes { _ = try SnapshotStore().save(note) }
+            for note in notes {
+                let payloads = note.attachments.contains(where: { $0.kind == "drawing" })
+                    ? try NativeNotesWriter().snapshotDrawingPayloads(note.summary.id.uuid) : [:]
+                let scanMarkupPayloads = try SQLiteNotesStore(refresh: true).scanMarkupPayloads(note.summary.id.uuid)
+                let paperBundlePayloads = note.attachments.contains(where: { $0.typeUTI.lowercased().contains("paper") })
+                    ? try NativeNotesWriter().snapshotPaperBundlePayloads(note.summary.id.uuid) : [:]
+                let linkPayloads = note.attachments.contains(where: {
+                    $0.url != nil || ($0.synapseDataBytes ?? 0) > 0 || ($0.linkPreviewMetadataBytes ?? 0) > 0
+                }) ? try NativeNotesWriter().snapshotLinkPayloads(note.summary.id.uuid) : [:]
+                _ = try SnapshotStore().save(note, drawingPayloads: payloads,
+                                             paperBundlePayloads: paperBundlePayloads,
+                                             linkPayloads: linkPayloads,
+                                             scanMarkupPayloads: scanMarkupPayloads)
+            }
             let value = NativeActionResult(try NativeNotesWriter().moveFolder(source.id, parent: destination?.id, allowShared: write.allowShared))
             captured = value
             return value.result
@@ -445,11 +658,14 @@ struct TagDelete: ParsableCommand {
     func run() throws { try UnifiedNative.tagGlobal(options, write, tag: tag, to: nil, expected: expectedCount, delete: true) }
 }
 
-struct LinkCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "link", subcommands: [LinkAdd.self, LinkAddURL.self, LinkList.self]) }
+struct LinkCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "link", subcommands: [LinkAdd.self, LinkAddURL.self, LinkCapture.self, LinkList.self]) }
 struct LinkAdd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "add")
-    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var target: String; @Option var text: String?; @Option var position: Int?
-    func run() throws { try UnifiedNative.linkAdd(options, write, ref: ref, target: target, text: text, position: position) }
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var target: String
+    @Option var text: String?; @Option var paragraphID: String?; @Option var paragraphName: String?; @Option var position: Int?
+    func run() throws { try UnifiedNative.linkAdd(options, write, ref: ref, target: target, text: text,
+                                                   paragraphID: paragraphID, paragraphName: paragraphName,
+                                                   position: position) }
 }
 struct LinkList: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list")
@@ -644,10 +860,13 @@ enum LegacyLinkAction: String, ExpressibleByArgument { case add, list, backlinks
 struct NativeLink: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "native-link", shouldDisplay: false)
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
-    @Argument var action: LegacyLinkAction; @Argument var ref: String; @Option var target: String?; @Option var text: String?; @Option var position: Int?
+    @Argument var action: LegacyLinkAction; @Argument var ref: String; @Option var target: String?; @Option var text: String?
+    @Option var paragraphID: String?; @Option var paragraphName: String?; @Option var position: Int?
     func run() throws {
         switch action {
-        case .add: try UnifiedNative.linkAdd(options, write, ref: ref, target: try required(target, "--target"), text: text, position: position)
+        case .add: try UnifiedNative.linkAdd(options, write, ref: ref, target: try required(target, "--target"),
+                                              text: text, paragraphID: paragraphID,
+                                              paragraphName: paragraphName, position: position)
         case .list:
             try UnifiedNative.requireNative(options)
             try Output.json(NativeNotesWriter().links(ref))

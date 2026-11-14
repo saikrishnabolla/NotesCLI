@@ -1,13 +1,134 @@
 import AppKit
+import AVFoundation
 import CoreData
+import CryptoKit
+import Darwin
+import Dispatch
 import Foundation
+import ImageIO
 import NotesCore
 import NotesNativeObjC
 import NotesStore
+import PDFKit
 import PencilKit
 
 fileprivate struct UnsafeSendableBox<Value>: @unchecked Sendable {
     let value: Value
+}
+
+fileprivate struct PaperCleanupScope {
+    let accountID: String
+    let rootURL: URL
+    let bundleNamesBefore: Set<String>
+}
+
+fileprivate struct PaperCleanupCandidate {
+    let identifier: String
+    let accountID: String
+    let rootURL: URL
+    let fileURLs: [URL]
+}
+
+final class NativeWriteLease {
+    private static let processLock = NSRecursiveLock()
+    private let descriptor: Int32
+    private var active = true
+
+    private init(descriptor: Int32) { self.descriptor = descriptor }
+
+    static func acquire(directory suppliedDirectory: URL? = nil, timeout: TimeInterval = 30) throws -> NativeWriteLease {
+        let started = DispatchTime.now().uptimeNanoseconds
+        guard processLock.lock(before: Date(timeIntervalSinceNow: timeout)) else {
+            throw NotesError("native_write_busy", "Another native Notes write did not finish within 30 seconds.")
+        }
+        do {
+            let directory = suppliedDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/NotesCLI", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            guard mkdir(directory.path, 0o700) == 0 || errno == EEXIST else {
+                throw NotesError("native_write_lock_failed", "Could not create the native write lock directory.")
+            }
+            let directoryDescriptor = open(directory.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)
+            guard directoryDescriptor >= 0 else {
+                throw NotesError("native_write_lock_failed", "Could not open the native write lock directory.")
+            }
+            defer { close(directoryDescriptor) }
+            var directoryMetadata = stat()
+            guard fstat(directoryDescriptor, &directoryMetadata) == 0,
+                  directoryMetadata.st_mode & S_IFMT == S_IFDIR,
+                  directoryMetadata.st_uid == geteuid(),
+                  fchmod(directoryDescriptor, 0o700) == 0 else {
+                throw NotesError("native_write_lock_failed", "The native write lock directory is unsafe.")
+            }
+            let descriptor = openat(directoryDescriptor, "native-write.lock",
+                                    O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+            guard descriptor >= 0 else {
+                throw NotesError("native_write_lock_failed", "Could not open the native write lock.")
+            }
+            var metadata = stat()
+            guard fstat(descriptor, &metadata) == 0,
+                  metadata.st_mode & S_IFMT == S_IFREG,
+                  metadata.st_uid == geteuid(), metadata.st_nlink == 1,
+                  fchmod(descriptor, 0o600) == 0 else {
+                close(descriptor)
+                throw NotesError("native_write_lock_failed", "The native write lock file is unsafe.")
+            }
+            while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+                if errno == EINTR { continue }
+                if errno == EWOULDBLOCK {
+                    let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000_000
+                    if elapsed < timeout {
+                        usleep(50_000)
+                        continue
+                    }
+                    close(descriptor)
+                    throw NotesError("native_write_busy", "Another native Notes write did not finish within 30 seconds.")
+                }
+                close(descriptor)
+                throw NotesError("native_write_lock_failed", "Could not acquire the native write lock.")
+            }
+            return NativeWriteLease(descriptor: descriptor)
+        } catch {
+            processLock.unlock()
+            throw error
+        }
+    }
+
+    func release() {
+        guard active else { return }
+        active = false
+        _ = flock(descriptor, LOCK_UN)
+        close(descriptor)
+        Self.processLock.unlock()
+    }
+
+    deinit { release() }
+}
+
+enum NativeDeleteVerification {
+    static func isDeleted(markedForDeletion: Bool, folderType: Int?) -> Bool {
+        !markedForDeletion && folderType == 1
+    }
+}
+
+enum NativeBodyIntegrity {
+    static func validate(serialized data: Data, expectedText: String) throws {
+        let decoded: NoteDocument
+        do { decoded = try NotesDecoder.decode(data) }
+        catch {
+            throw NotesError(
+                "native_body_inconsistent",
+                "Notes generated an invalid body. The Core Data save was refused."
+            )
+        }
+        guard decoded.text == expectedText else {
+            throw NotesError(
+                "native_body_inconsistent",
+                "Notes generated stale body text. The Core Data save was refused."
+            )
+        }
+    }
 }
 
 public final class NativeNotesWriter: NotesNativeWriting {
@@ -20,18 +141,28 @@ public final class NativeNotesWriter: NotesNativeWriting {
         var attachmentID: String?
         var attachmentType: String?
         var attachmentPosition: Int?
+        var childAttachmentIDs: [String] = []
     }
     var operation: Operation?
     var createdNoteCleanup = CreatedNoteCleanup.notes
     fileprivate let operationID: () -> String
     fileprivate let contextProvider: () throws -> NSManagedObjectContext
+    fileprivate let serializesProductionWrites: Bool
 
     public convenience init() {
-        self.init(operationID: { UUID().uuidString.lowercased() }, contextProvider: { try NCNotesRuntime.sharedContext() })
+        self.init(operationID: { UUID().uuidString.lowercased() },
+                  contextProvider: { try NCNotesRuntime.sharedContext() },
+                  serializesProductionWrites: true)
     }
-    init(operationID: @escaping () -> String, contextProvider: @escaping () throws -> NSManagedObjectContext) {
+    init(operationID: @escaping () -> String, contextProvider: @escaping () throws -> NSManagedObjectContext,
+         serializesProductionWrites: Bool = false) {
         self.operationID = operationID
         self.contextProvider = contextProvider
+        self.serializesProductionWrites = serializesProductionWrites
+    }
+
+    fileprivate func writeLease() throws -> NativeWriteLease? {
+        try serializesProductionWrites ? NativeWriteLease.acquire() : nil
     }
 
     public func doctor() -> NativeDoctorReport {
@@ -67,15 +198,32 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return try performContext(body)
     }
 
+    fileprivate func prepareOperationContext(_ context: NSManagedObjectContext) {
+        context.automaticallyMergesChangesFromParent = true
+        context.reset()
+    }
+
+    fileprivate func requireUndoState<T: Equatable>(_ current: T, expected: T?, label: String) throws {
+        guard expected == nil || current == expected else {
+            throw NotesError("undo_conflict", "\(label) changed after the recorded operation; refusing to overwrite the newer value.")
+        }
+    }
+
+    fileprivate func requireUndoIdentifier(_ current: String, expected: String?, label: String) throws {
+        guard expected == nil || current.caseInsensitiveCompare(expected!) == .orderedSame else {
+            throw NotesError("undo_conflict", "\(label) changed after the recorded operation; refusing to overwrite the newer value.")
+        }
+    }
+
     func performWrite(_ body: (NSManagedObjectContext) throws -> NativeWriteResult) throws -> NativeWriteResult {
+        let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
         operation = Operation(id: operationID())
         defer { operation = nil }
         do {
             return try performContext { context in
-                context.automaticallyMergesChangesFromParent = true
-                context.refreshAllObjects()
+                prepareOperationContext(context)
                 return try body(context)
             }
         } catch {
@@ -85,7 +233,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
                     folderID: operation.folderID,
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -98,19 +246,18 @@ public final class NativeNotesWriter: NotesNativeWriting {
         transaction: (NSManagedObjectContext) throws -> Receipt,
         readback: (NSManagedObjectContext, Receipt) throws -> NativeWriteResult
     ) throws -> NativeWriteResult {
+        let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
         operation = Operation(id: operationID())
         defer { operation = nil }
         do {
             let receipt = try performContext { context in
-                context.automaticallyMergesChangesFromParent = true
-                context.refreshAllObjects()
+                prepareOperationContext(context)
                 return try transaction(context)
             }
             return try performContext { context in
-                context.automaticallyMergesChangesFromParent = true
-                context.refreshAllObjects()
+                prepareOperationContext(context)
                 return try readback(context, receipt)
             }
         } catch {
@@ -120,7 +267,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
                     folderID: operation.folderID,
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -130,14 +277,14 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     fileprivate func performAttachmentWrite(_ body: (NSManagedObjectContext) throws -> NativeAttachmentResult) throws -> NativeAttachmentResult {
+        let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
         operation = Operation(id: operationID())
         defer { operation = nil }
         do {
             return try performContext { context in
-                context.automaticallyMergesChangesFromParent = true
-                context.refreshAllObjects()
+                prepareOperationContext(context)
                 return try body(context)
             }
         } catch {
@@ -146,7 +293,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 writeResult: WriteResult(
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -159,14 +306,14 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     fileprivate func performRecordingWrite(duration: Double,
                                             _ body: (NSManagedObjectContext) throws -> NativeRecordingResult) throws -> NativeRecordingResult {
+        let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
         operation = Operation(id: operationID())
         defer { operation = nil }
         do {
             return try performContext { context in
-                context.automaticallyMergesChangesFromParent = true
-                context.refreshAllObjects()
+                prepareOperationContext(context)
                 return try body(context)
             }
         } catch {
@@ -175,7 +322,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 writeResult: WriteResult(
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(error.localizedDescription)",
+                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -183,6 +330,44 @@ public final class NativeNotesWriter: NotesNativeWriting {
             )
             return NativeRecordingResult(attachmentID: operation.attachmentID ?? "", childAttachmentIDs: [],
                                          duration: duration, transcriptSegments: 0, write: write)
+        }
+    }
+
+    fileprivate func performScanWrite<Receipt>(
+        transaction: (NSManagedObjectContext) throws -> Receipt,
+        readback: (NSManagedObjectContext, Receipt) throws -> NativeScanResult
+    ) throws -> NativeScanResult {
+        let lease = try writeLease(); defer { lease?.release() }
+        lock.lock(); defer { lock.unlock() }
+        precondition(operation == nil)
+        operation = Operation(id: operationID())
+        defer { operation = nil }
+        do {
+            let receipt = try performContext { context in
+                prepareOperationContext(context)
+                return try transaction(context)
+            }
+            return try performContext { context in
+                prepareOperationContext(context)
+                return try readback(context, receipt)
+            }
+        } catch {
+            guard let operation, operation.committed else { throw error }
+            let detail = (error as? NotesError)?.message ?? error.localizedDescription
+            let write = NativeWriteResult(
+                writeResult: WriteResult(
+                    outcome: .unknown,
+                    noteID: operation.noteID.map { NoteID(uuid: $0) },
+                    message: "The scan may have committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(detail)",
+                    operationID: operation.id
+                ),
+                verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
+                operationID: operation.id
+            )
+            return NativeScanResult(attachmentID: operation.attachmentID ?? "",
+                                    pageAttachmentIDs: operation.childAttachmentIDs,
+                                    position: operation.attachmentPosition ?? 0,
+                                    write: write)
         }
     }
 
@@ -306,6 +491,17 @@ public final class NativeNotesWriter: NotesNativeWriting {
         try NativeSharedWriteGuard.require(isShared: isSharedFolder(folder), allowShared: allowShared, isReadOnly: sharedRole)
     }
 
+    fileprivate func requireQuickNoteAccount(_ accountID: String) throws {
+        guard let account = try SQLiteNotesStore(refresh: true).accounts().first(where: {
+            $0.id.caseInsensitiveCompare(accountID) == .orderedSame
+        }) else {
+            throw NotesError("account_not_found", "The Quick Note account was not found.")
+        }
+        guard account.kind == "icloud" else {
+            throw NotesError("quick_note_requires_icloud", "Quick Notes require an iCloud Notes account.")
+        }
+    }
+
     fileprivate func guardFolderSelectors(_ folder: NSManagedObject) throws {
         var current: NSManagedObject? = folder
         while let item = current {
@@ -374,17 +570,46 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
     public func checklistAutoSortEnabled() -> Bool { NCNotesRuntime.checklistAutoSortEnabled() }
     public func setChecklistAutoSort(_ enabled: Bool) throws -> NativeWriteResult {
+        try setChecklistAutoSort(enabled, expectedCurrent: nil)
+    }
+    public func setChecklistAutoSort(_ enabled: Bool, expectedCurrent: Bool?) throws -> NativeWriteResult {
         try performWrite { _ in
+            try requireUndoState(NCNotesRuntime.checklistAutoSortEnabled(), expected: expectedCurrent,
+                                 label: "Checklist auto-sort")
             do { try NCNotesRuntime.setChecklistAutoSort(enabled); operation?.committed = true }
+            catch let error as NotesError { throw error }
             catch { throw nativeError(error) }
             let readback = NCNotesRuntime.checklistAutoSortEnabled()
             return globalResult(native: ["enabled": String(readback)], nativeVerified: readback == enabled)
         }
     }
 
+    fileprivate func validateBodiesBeforeSave(_ notes: [NSManagedObject]) throws {
+        for note in notes where value(note, "isPasswordProtected") as? Bool != true {
+            guard let noteData = value(note, "noteData") as? NSManagedObject else { continue }
+#if DEBUG
+            if ProcessInfo.processInfo.environment["NOTESCLI_TEST_CORRUPT_PENDING_BODY"] == id(note) {
+                noteData.setValue(Data([0xff]), forKey: "data")
+            }
+#endif
+            guard noteData.changedValues().keys.contains("data"),
+                  let pendingData = value(noteData, "data") as? Data,
+                  !pendingData.isEmpty else { continue }
+            try NativeBodyIntegrity.validate(serialized: pendingData, expectedText: try body(note).string)
+        }
+    }
+
     fileprivate func save(_ context: NSManagedObjectContext, notes: [NSManagedObject]) throws {
-        do { try NCNotesRuntime.save(context) }
-        catch { context.rollback(); throw nativeError(error) }
+        do {
+            try validateBodiesBeforeSave(notes)
+            try NCNotesRuntime.save(context)
+        } catch let error as NotesError {
+            context.rollback()
+            throw error
+        } catch {
+            context.rollback()
+            throw nativeError(error)
+        }
         operation?.committed = true
         operation?.noteID = notes.first.map(id)
         for note in notes { try sync(note) }
@@ -445,7 +670,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let id = operation?.id
             return NativeWriteResult(
                 writeResult: WriteResult(outcome: .unknown, noteID: noteID.map { NoteID(uuid: $0) },
-                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError?.localizedDescription ?? "unknown error")",
+                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError.map(String.init(describing:)) ?? "unknown error")",
                                          operationID: id),
                 verification: NativeVerification(nativeReadback: native, sqliteReadback: nil), operationID: id
             )
@@ -479,7 +704,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let id = operation?.id
             return NativeWriteResult(
                 writeResult: WriteResult(outcome: .unknown, folderID: folderID,
-                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError?.localizedDescription ?? "unknown error")",
+                                         message: "The save committed, but readback failed. Do not retry. operation_id=\(id ?? "unknown"): \(sqliteError.map(String.init(describing:)) ?? "unknown error")",
                                          operationID: id),
                 verification: NativeVerification(nativeReadback: native, sqliteReadback: nil), operationID: id
             )
@@ -637,6 +862,25 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func setQuickNote(_ ref: String, enabled: Bool, allowShared: Bool) throws -> NativeWriteResult {
+        try setQuickNote(ref, enabled: enabled, expectedCurrent: nil, allowShared: allowShared)
+    }
+
+    public func setQuickNote(_ ref: String, enabled: Bool, expectedCurrent: Bool?, allowShared: Bool) throws -> NativeWriteResult {
+        try requireQuickNoteAccount(try SQLiteNotesStore(refresh: true).summary(ref).accountID)
+        return try performWrite { context in
+        let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note, protectsBody: false)
+        try requireUndoState(value(note, "isSystemPaper") as? Bool == true, expected: expectedCurrent,
+                             label: "Quick Note state")
+        do { try NCNotesRuntime.setSystemPaper(enabled, note: note); try save(context, notes: [note]) }
+        catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+        let fresh = try self.note(id(note), in: context), state = value(fresh, "isSystemPaper") as? Bool
+        return result(id(note), native: ["isSystemPaper": String(state == true)], nativeVerified: state == enabled,
+                      sqlite: { $0.summary.isSystemPaper == enabled ? ["isSystemPaper": String(enabled)] : nil },
+                      mismatch: "The persisted Quick Note state did not match.")
+        }
+    }
+
     fileprivate func normalizedTag(_ tag: String) throws -> String {
         let value = tag.hasPrefix("#") ? String(tag.dropFirst()) : tag
         guard !value.isEmpty, !value.contains(where: { $0.isWhitespace || $0 == "#" }) else { throw NotesError("invalid_tag", "A tag must be one word without #.") }
@@ -666,7 +910,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["insert"])
             let attachmentID = try NCNotesRuntime.makeTag(name, in: note)
             try insertMarker(editor, original: editor.original, id: attachmentID, type: "com.apple.notes.inlinetextattachment.hashtag", position: position)
-            try editor.finish(); try NCNotesRuntime.save(context); operation?.committed = true; operation?.noteID = id(note)
+            try editor.finish()
+            try validateBodiesBeforeSave([note])
+            try NCNotesRuntime.save(context); operation?.committed = true; operation?.noteID = id(note)
             if let attachment = try fetch("ICInlineAttachment", predicate: NSPredicate(format: "identifier == %@", attachmentID), in: context, limit: 1).first { try NCNotesRuntime.reviveTagAttachment(attachment) }
             _ = try hashtag(name, context: context)
             try save(context, notes: [note])
@@ -798,18 +1044,134 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
-    public func insertNoteLink(_ ref: String, target: String, text: String?, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+    private func paragraphLinkTarget(_ rawID: String, in target: NSManagedObject) throws -> (id: UUID, name: String?) {
+        try paragraphLinkTarget(rawID, in: body(target), requireLinkableStyle: true)
+    }
+
+    private func paragraphLinkTarget(_ rawID: String, in targetBody: NSAttributedString,
+                                     requireLinkableStyle: Bool) throws -> (id: UUID, name: String?) {
+        guard let paragraphID = UUID(uuidString: rawID) else {
+            throw NotesError("invalid_paragraph_id", "Paragraph ID must be a UUID.")
+        }
+        let source = targetBody.string as NSString
+        var ranges: [NSRange] = []
+        var linkableRanges: [NSRange] = []
+        var seen: Set<String> = []
+        var seenLinkable: Set<String> = []
+        targetBody.enumerateAttribute(.init("TTStyle"), in: NSRange(location: 0, length: targetBody.length)) { raw, range, _ in
+            guard let raw = raw as AnyObject?,
+                  let found = value(raw, "uuid") as? UUID,
+                  found.uuidString.caseInsensitiveCompare(paragraphID.uuidString) == .orderedSame else { return }
+            var cursor = range.location
+            let limit = NSMaxRange(range)
+            while cursor < limit {
+                let paragraphRange = source.paragraphRange(for: NSRange(location: cursor, length: 0))
+                let key = "\(paragraphRange.location):\(paragraphRange.length)"
+                if seen.insert(key).inserted { ranges.append(paragraphRange) }
+                if (!requireLinkableStyle || value(raw, "supportsSectionLinks") as? Bool == true),
+                   seenLinkable.insert(key).inserted {
+                    linkableRanges.append(paragraphRange)
+                }
+                let next = NSMaxRange(paragraphRange)
+                guard next > cursor else { break }
+                cursor = next
+            }
+        }
+        guard ranges.count == 1, let range = ranges.first else {
+            let missing = ranges.isEmpty
+            throw NotesError(missing ? "paragraph_not_found" : "ambiguous_paragraph_id", missing
+                ? "The target note has no paragraph with ID \(paragraphID.uuidString)."
+                : "The target note uses paragraph ID \(paragraphID.uuidString) more than once.")
+        }
+        guard linkableRanges.count == 1 else {
+            throw NotesError("paragraph_not_linkable", "The target paragraph is not a linkable heading or subheading.")
+        }
+        let name = source.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (paragraphID, name.isEmpty ? nil : name)
+    }
+
+    func paragraphLinkTarget(_ rawID: String, in document: NoteDocument) throws -> (id: UUID, name: String?) {
+        guard let paragraphID = UUID(uuidString: rawID) else {
+            throw NotesError("invalid_paragraph_id", "Paragraph ID must be a UUID.")
+        }
+        let source = document.text as NSString
+        var offset = 0
+        var ranges: [NSRange] = []
+        var linkableRanges: [NSRange] = []
+        var seen: Set<String> = []
+        var seenLinkable: Set<String> = []
+        for run in document.runs {
+            defer { offset += run.length }
+            guard run.length >= 0, offset + run.length <= source.length,
+                  run.paragraph?.id?.caseInsensitiveCompare(paragraphID.uuidString) == .orderedSame else { continue }
+            let range = source.paragraphRange(for: NSRange(location: offset, length: 0))
+            let key = "\(range.location):\(range.length)"
+            if seen.insert(key).inserted { ranges.append(range) }
+            if let kind = run.paragraph?.kind, [.heading, .subheading].contains(kind),
+               seenLinkable.insert(key).inserted {
+                linkableRanges.append(range)
+            }
+        }
+        guard ranges.count == 1, let range = ranges.first else {
+            let missing = ranges.isEmpty
+            throw NotesError(missing ? "paragraph_not_found" : "ambiguous_paragraph_id", missing
+                ? "The saved note has no paragraph with ID \(paragraphID.uuidString)."
+                : "The saved note uses paragraph ID \(paragraphID.uuidString) more than once.")
+        }
+        guard linkableRanges.count == 1 else {
+            throw NotesError("paragraph_not_linkable", "The saved target paragraph is not a linkable heading or subheading.")
+        }
+        let name = source.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (paragraphID, name.isEmpty ? nil : name)
+    }
+
+    public func insertNoteLink(_ ref: String, target: String, text: String?, paragraphID: String? = nil,
+                               paragraphName: String? = nil, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         let source = try note(ref, in: context), destination = try note(target, in: context); try guardWritable(source, allowShared: allowShared); try refreshIfStale(source)
-        guard id(source) != id(destination) else { throw NotesError("invalid_note_link", "A note cannot link to itself.") }
+        if paragraphID == nil {
+            guard paragraphName == nil else { throw NotesError("invalid_paragraph_name", "paragraph_name requires paragraph_id.") }
+            guard id(source) != id(destination) else { throw NotesError("invalid_note_link", "A note can link to itself only when paragraph_id is provided.") }
+        }
+        let paragraph = try paragraphID.map { try paragraphLinkTarget($0, in: destination) }
+        let resolvedParagraphName = paragraphName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if paragraphName != nil && resolvedParagraphName?.isEmpty != false {
+            throw NotesError("invalid_paragraph_name", "Paragraph name cannot be empty.")
+        }
         var attachmentID = ""
-        do { let editor = try NCBodyEditor(note: source); try editor.prepare(["insert"]); attachmentID = try NCNotesRuntime.makeNoteLink(to: destination, from: source, text: text ?? title(destination)); try insertMarker(editor, original: editor.original, id: attachmentID, type: "com.apple.notes.inlinetextattachment.link", position: position); try editor.finish(); try save(context, notes: [source]) }
+        do {
+            let editor = try NCBodyEditor(note: source); try editor.prepare(["insert"])
+            if let paragraph {
+                attachmentID = try NCNotesRuntime.makeParagraphLink(
+                    to: destination, paragraphName: resolvedParagraphName ?? paragraph.name,
+                    paragraphID: paragraph.id, from: source, text: text ?? "", parent: nil
+                )
+            } else {
+                attachmentID = try NCNotesRuntime.makeNoteLink(to: destination, from: source,
+                                                               text: text ?? title(destination))
+            }
+            try insertMarker(editor, original: editor.original, id: attachmentID,
+                             type: "com.apple.notes.inlinetextattachment.link", position: position)
+            try editor.finish(); try save(context, notes: [source])
+        }
         catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
         let read = try links(id(source))
         let destinationID = id(destination)
-        return result(id(source), native: ["target": destinationID, "linkCount": "\(read.count)", "attachmentID": attachmentID], nativeVerified: NativeVerificationRules.exactLink(read, attachmentID: attachmentID, targetID: destinationID), sqlite: { n in
-            n.document?.runs.filter { $0.attachment?.id == attachmentID && $0.attachment?.url?.localizedCaseInsensitiveContains(destinationID) == true }.count == 1 ? ["target": destinationID, "attachmentID": attachmentID] : nil
-        }, mismatch: "Attachment \(attachmentID) did not point to note \(destinationID) exactly once.")
+        let expectedParagraphID = paragraph?.id.uuidString
+        var native = ["target": destinationID, "linkCount": "\(read.count)", "attachmentID": attachmentID]
+        if let expectedParagraphID { native["paragraphID"] = expectedParagraphID }
+        return result(id(source), native: native,
+                      nativeVerified: NativeVerificationRules.exactLink(read, attachmentID: attachmentID,
+                                                                         targetID: destinationID,
+                                                                         paragraphID: expectedParagraphID), sqlite: { n in
+            guard let found = n.attachments.first(where: { $0.id == attachmentID }),
+                  found.targetNoteID?.caseInsensitiveCompare(destinationID) == .orderedSame,
+                  (expectedParagraphID == nil && found.targetParagraphID == nil ||
+                   expectedParagraphID != nil && found.targetParagraphID?.caseInsensitiveCompare(expectedParagraphID!) == .orderedSame) else { return nil }
+            var values = ["target": destinationID, "attachmentID": attachmentID]
+            if let expectedParagraphID { values["paragraphID"] = expectedParagraphID }
+            return values
+        }, mismatch: "Attachment \(attachmentID) did not preserve its exact note and paragraph target.")
         }
     }
 
@@ -822,14 +1184,30 @@ public final class NativeNotesWriter: NotesNativeWriting {
     fileprivate func insertInlineObject(_ ref: String, request: InlineObjectRequest, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
-        if case .mention = request {
+        var resolvedRequest = request
+        if case .mention = resolvedRequest {
             guard isShared(note) else { throw NotesError("mention_requires_shared_note", "Mentions are supported only in shared notes.") }
             guard allowShared else { throw NotesError("shared_write_refused", "Creating a mention changes a shared note. Pass --allow-shared.") }
+        }
+        if case .mention(let text, let requestedIdentity) = resolvedRequest {
+            let summary = try SQLiteNotesStore(refresh: true).summary(id(note))
+            let allIdentity: String?
+            if requestedIdentity.caseInsensitiveCompare("all") == .orderedSame ||
+                requestedIdentity.caseInsensitiveCompare("@all") == .orderedSame {
+                do { allIdentity = try NCNotesRuntime.allMentionUserRecordName() }
+                catch { throw nativeError(error) }
+            } else {
+                allIdentity = nil
+            }
+            let identity = try NativeMentionTarget.resolve(requestedIdentity,
+                                                           participants: summary.participants ?? [],
+                                                           allIdentity: allIdentity)
+            resolvedRequest = .mention(text: text, userRecordName: identity)
         }
         var attachmentID = "", kind: NSString?
         do {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["insert"])
-            switch request {
+            switch resolvedRequest {
             case .divider: attachmentID = try NCNotesRuntime.makeDivider(in: note, type: &kind)
             case .math(let expression):
                 guard !expression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw NotesError("invalid_math_expression", "Math expression cannot be empty.") }
@@ -845,7 +1223,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return result(id(note), native: ["attachmentID": attachmentID, "type": kind as String? ?? ""], nativeVerified: placements.count == 1,
                       sqlite: { decoded in
             guard let attachment = decoded.attachments.first(where: { $0.id == attachmentID }) else { return nil }
-            switch request {
+            switch resolvedRequest {
             case .divider: return attachment.isDivider == true ? ["attachmentID": attachmentID, "type": attachment.typeUTI] : nil
             case .math(let expression): return attachment.mathExpression == expression || attachment.graphExpression == expression ? ["attachmentID": attachmentID, "expression": expression] : nil
             case .mention(_, let userRecordName): return attachment.participantUserID == userRecordName || attachment.participantID == userRecordName ? ["attachmentID": attachmentID, "userRecordName": userRecordName] : nil
@@ -860,6 +1238,54 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func insertMathExpression(_ ref: String, expression: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
         try insertInlineObject(ref, request: .math(expression), position: position, allowShared: allowShared)
     }
+    public func evaluateMath(_ expression: String) throws -> NativeCalculation {
+        do {
+            let value = try NCNotesRuntime.evaluateMathExpression(expression)
+            guard let source = value["expression"],
+                  let formatted = value["formattedExpression"],
+                  let result = value["result"],
+                  let rendered = value["renderedText"] else {
+                throw NotesError("invalid_math_result", "Notes returned an incomplete math result.")
+            }
+            return NativeCalculation(expression: source, formattedExpression: formatted,
+                                     result: result, renderedText: rendered)
+        } catch let error as NotesError {
+            throw error
+        } catch {
+            throw NotesError("math_evaluation_failed", error.localizedDescription)
+        }
+    }
+    public func insertMathResult(_ ref: String, expression: String, position: Int?, allowShared: Bool) throws -> NativeMathResult {
+        let calculation = try evaluateMath(expression)
+        var insertionPosition = 0
+        let write = try performWrite { context in
+            let expected = calculation.renderedText as NSString
+            let (note, after) = try mutateBody(ref, context: context, allowShared: allowShared) { _, editor, original in
+                insertionPosition = position ?? original.length
+                guard (0...original.length).contains(insertionPosition) else {
+                    throw NotesError("invalid_range", "Position exceeds note length.")
+                }
+                try editor.begin(["insert"])
+                try editor.insert(NSAttributedString(string: calculation.renderedText), at: UInt(insertionPosition))
+            }
+            let nativeExact = NativeVerificationRules.exactText(after.string, text: calculation.renderedText,
+                                                                location: insertionPosition)
+            return result(id(note), native: ["expression": calculation.expression,
+                                             "result": calculation.result,
+                                             "renderedText": calculation.renderedText,
+                                             "location": "\(insertionPosition)"],
+                          nativeVerified: nativeExact, sqlite: { decoded in
+                guard let value = decoded.document?.text as NSString?,
+                      insertionPosition + expected.length <= value.length,
+                      value.substring(with: NSRange(location: insertionPosition, length: expected.length)) == calculation.renderedText else {
+                    return nil
+                }
+                return ["expression": calculation.expression, "result": calculation.result,
+                        "renderedText": calculation.renderedText, "location": "\(insertionPosition)"]
+            }, mismatch: "Expected the evaluated math text at UTF-16 location \(insertionPosition).")
+        }
+        return NativeMathResult(calculation: calculation, position: insertionPosition, write: write)
+    }
     public func insertMention(_ ref: String, text: String, userRecordName: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
         try insertInlineObject(ref, request: .mention(text: text, userRecordName: userRecordName), position: position, allowShared: allowShared)
     }
@@ -868,10 +1294,20 @@ public final class NativeNotesWriter: NotesNativeWriting {
         guard let context = source.managedObjectContext else { throw NotesError("native_read_failed", "The note is detached from its native context.") }
         return try inlineMatches(source, type: "com.apple.notes.inlinetextattachment.link", label: nil).map { attachment, range in
             let token = value(attachment, "tokenContentIdentifier") as? String ?? ""
+            let components = URLComponents(string: token)
+            let queryID = components?.queryItems?.first(where: {
+                $0.name.caseInsensitiveCompare("identifier") == .orderedSame
+            })?.value
             let match = token.range(of: #"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"#, options: .regularExpression)
-            let candidate = match.map { String(token[$0]) }
+            let candidate = queryID ?? match.map { String(token[$0]) }
             let target = try candidate.flatMap { try fetch("ICNote", predicate: NSPredicate(format: "identifier ==[c] %@", $0), in: context, limit: 1).first.map(id) } ?? token
-            return NativeNoteLink(sourceID: id(source), targetID: target, text: value(attachment, "altText") as? String ?? "", attachmentID: id(attachment), range: UTF16Range(location: range.location, length: range.length))
+            let paragraphID = components?.queryItems?.first(where: {
+                $0.name.caseInsensitiveCompare("paragraphID") == .orderedSame
+            })?.value
+            let label = value(attachment, "altText") as? String ?? ""
+            return NativeNoteLink(sourceID: id(source), targetID: target, targetParagraphID: paragraphID,
+                                  targetParagraphName: nil, text: label,
+                                  attachmentID: id(attachment), range: UTF16Range(location: range.location, length: range.length))
         }
     }
     public func links(_ ref: String) throws -> [NativeNoteLink] { try performRead { c in try linkRows(note(ref, in: c)) } }
@@ -886,7 +1322,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
                   value(source, "markedForDeletion") as? Bool != true else { return nil }
             let attachmentID = id(attachment)
             guard let range = attachmentMarkers(try body(source)).first(where: { $0.2 == attachmentID })?.0 else { return nil }
-            return NativeNoteLink(sourceID: id(source), targetID: target, text: value(attachment, "altText") as? String ?? "",
+            let token = value(attachment, "tokenContentIdentifier") as? String ?? ""
+            let paragraphID = URLComponents(string: token)?.queryItems?.first(where: {
+                $0.name.caseInsensitiveCompare("paragraphID") == .orderedSame
+            })?.value
+            let label = value(attachment, "altText") as? String ?? ""
+            return NativeNoteLink(sourceID: id(source), targetID: target, targetParagraphID: paragraphID,
+                                  targetParagraphName: nil, text: label,
                                   attachmentID: attachmentID, range: UTF16Range(location: range.location, length: range.length))
         }
         }
@@ -908,7 +1350,11 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func replaceRange(_ ref: String, range: UTF16Range, text: String, allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
         let expected = text as NSString
-        let (note, after) = try mutateBody(ref, context: context, allowShared: allowShared) { _, editor, original in let r = try self.valid(range, length: original.length); try editor.begin(["delete", "insert"]); try editor.delete(r); try editor.insert(NSAttributedString(string: text), at: UInt(r.location)) }
+        let (note, after) = try mutateBody(ref, context: context, allowShared: allowShared) { _, editor, original in
+            let target = try self.valid(range, length: original.length)
+            try editor.begin(["replace"])
+            try editor.replace(target, with: NSAttributedString(string: text))
+        }
         let nativeExact = NativeVerificationRules.exactText(after.string, text: text, location: range.location)
         return result(id(note), native: ["length": "\(after.length)", "location": "\(range.location)", "text": text], nativeVerified: nativeExact, sqlite: { note in
             guard let value = note.document?.text as NSString?, range.location + expected.length <= value.length,
@@ -1141,15 +1587,97 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func insertLegacyDrawing(_ ref: String, records: [LegacyDrawingStrokeRecord], position: Int?,
+                                    allowShared: Bool) throws -> NativeAttachmentResult {
+        try LegacyDrawingStrokeRecord.validate(records)
+        let data = try JSONEncoder().encode(records)
+        return try performAttachmentWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            var attachmentID = "", kind: NSString?, at = 0
+            do {
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                at = position ?? editor.original.length
+                attachmentID = try NCNotesRuntime.addLegacyDrawing(strokesData: data, to: note, type: &kind)
+                operation?.attachmentID = attachmentID
+                operation?.attachmentType = kind as String? ?? "com.apple.notes.sketch"
+                operation?.attachmentPosition = at
+                try insertMarker(editor, original: editor.original, id: attachmentID,
+                                 type: kind as String? ?? "com.apple.notes.sketch", position: position)
+                try editor.finish()
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            let fresh = try self.note(id(note), in: context)
+            let placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID }.count
+            let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@", attachmentID),
+                                       in: context, limit: 1).first
+            let decoded = try attachment.map { try readBackLegacyStrokes($0, identifier: attachmentID) } ?? []
+            let mismatch = LegacyDrawingStrokeRecord.mismatch(expected: records, actual: decoded)
+            let type = kind as String? ?? "com.apple.notes.sketch"
+            let native = ["attachmentID": attachmentID, "typeUTI": type, "placements": String(placements),
+                          "strokeCount": String(decoded.count), "strokes": mismatch ?? "match"]
+            let write = result(id(note), native: native,
+                               nativeVerified: placements == 1 && type == "com.apple.notes.sketch" && mismatch == nil,
+                               sqlite: { note in
+                guard note.attachments.filter({ $0.id == attachmentID && $0.typeUTI == type }).count == 1 else { return nil }
+                return ["attachmentID": attachmentID, "typeUTI": type, "placements": "1",
+                        "strokeCount": String(decoded.count)]
+            }, mismatch: "The legacy Notes sketch or its editable strokes did not match the input drawing.")
+            return NativeAttachmentResult(attachmentID: attachmentID, typeUTI: type, position: at, write: write)
+        }
+    }
+
     fileprivate func storedAttachmentHash(noteID: String, attachmentID: String, expected: String) -> String? {
         for attempt in 0..<12 {
             if attempt > 0 { Thread.sleep(forTimeInterval: 0.5) }
-            guard let attachment = try? SQLiteNotesStore(refresh: true).attachments(noteID).first(where: { $0.id == attachmentID }),
+            func find(_ id: String, in attachments: [Attachment]) -> Attachment? {
+                for attachment in attachments {
+                    if attachment.id == id { return attachment }
+                    if let found = find(id, in: attachment.childAttachments ?? []) { return found }
+                }
+                return nil
+            }
+            guard let attachments = try? SQLiteNotesStore(refresh: true).attachments(noteID),
+                  let attachment = find(attachmentID, in: attachments),
                   let path = attachment.filePath,
                   let hash = try? FrozenAttachmentInput.hash(file: URL(fileURLWithPath: path)) else { continue }
             if hash == expected { return hash }
         }
         return nil
+    }
+
+    private func stagedAttachmentHash(_ attachment: NSManagedObject, expected: String) throws -> String {
+        let url: URL
+        do { url = try NCNotesRuntime.mediaFileURL(for: attachment) }
+        catch {
+            throw NotesError(
+                "snapshot_attachment_bytes_unavailable",
+                "Notes did not expose the staged attachment bytes before save: \(error.localizedDescription)"
+            )
+        }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw NotesError("snapshot_attachment_bytes_unavailable", "The staged attachment file does not exist before save.")
+        }
+        let actual = try FrozenAttachmentInput.hash(file: url)
+        guard actual == expected else {
+            throw NotesError("snapshot_attachment_hash_mismatch", "The staged attachment bytes do not match the snapshot; the restore was rolled back.")
+        }
+        return actual
+    }
+
+    private func corruptStagedAttachmentIfRequested(_ attachment: NSManagedObject, savedID: String) throws {
+        #if DEBUG
+        let requested = Set((ProcessInfo.processInfo.environment["NOTESCLI_TEST_CORRUPT_STAGED_RESTORE"] ?? "")
+            .split(separator: ",").map(String.init))
+        guard requested.contains(savedID) else { return }
+        let url = try NCNotesRuntime.mediaFileURL(for: attachment)
+        try Data("notescli-corrupt-staged-restore".utf8).write(to: url, options: .atomic)
+        #endif
     }
 
     public func insertFrozenFile(_ ref: String, frozen: FrozenAttachmentInput, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult {
@@ -1181,6 +1709,884 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    struct ScanPageEvidence: Sendable {
+        var width: Int
+        var height: Int
+        var samples: [UInt8]
+        var rasterSHA256: String
+
+        func visuallyMatches(_ other: ScanPageEvidence) -> Bool {
+            guard width == other.width, height == other.height, samples.count == other.samples.count else { return false }
+            if rasterSHA256 == other.rasterSHA256 { return true }
+            guard samples.count == 256 * 256 * 4 else { return false }
+            var totalDifference = 0
+            var changedPixels = 0
+            var blockDifferences = [Int](repeating: 0, count: 64 * 64)
+            for pixel in 0..<(256 * 256) {
+                let offset = pixel * 4
+                let red = abs(Int(samples[offset]) - Int(other.samples[offset]))
+                let green = abs(Int(samples[offset + 1]) - Int(other.samples[offset + 1]))
+                let blue = abs(Int(samples[offset + 2]) - Int(other.samples[offset + 2]))
+                let difference = red + green + blue
+                totalDifference += difference
+                if max(red, green, blue) > 24 { changedPixels += 1 }
+                let x = pixel % 256
+                let y = pixel / 256
+                blockDifferences[(y / 4) * 64 + (x / 4)] += difference
+            }
+            let channelCount = 256 * 256 * 3
+            let averageDifference = Double(totalDifference) / Double(channelCount)
+            let maximumBlockAverage = Double(blockDifferences.max() ?? 0) / Double(4 * 4 * 3)
+            return averageDifference <= 3.0 &&
+                changedPixels <= (256 * 256) / 500 &&
+                maximumBlockAverage <= 18.0
+        }
+    }
+
+    private struct ScanReceipt: Sendable {
+        var noteID: String
+        var attachmentID: String
+        var pageAttachmentIDs: [String]
+        var pageTypeUTIs: [String]
+        var position: Int
+        var sourcePages: [ScanPageEvidence]
+        var existingPageIDs: [String] = []
+    }
+
+    public static let maximumScanPages = 100
+    public static let maximumScanBytes = 200 * 1024 * 1024
+
+    private static func scanPageEvidence(_ page: FrozenAttachmentInput) throws -> ScanPageEvidence {
+        try scanPageEvidence(url: page.url, name: page.sourceName)
+    }
+
+    static func scanPageEvidence(url: URL, name: String) throws -> ScanPageEvidence {
+        guard let image = NSImage(contentsOf: url),
+              !image.representations.contains(where: { $0 is NSPDFImageRep }),
+              let representation = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw NotesError("invalid_scan_image", "Every scan page must be a readable image: \(name)")
+        }
+        return try rasterEvidence(representation, width: representation.width,
+                                  height: representation.height, name: name)
+    }
+
+    private static func rasterEvidence(_ representation: CGImage, width: Int, height: Int,
+                                       name: String) throws -> ScanPageEvidence {
+        var samples = [UInt8](repeating: 0, count: 256 * 256 * 4)
+        let rendered = samples.withUnsafeMutableBytes { bytes -> Bool in
+            guard let base = bytes.baseAddress,
+                  let context = CGContext(data: base, width: 256, height: 256, bitsPerComponent: 8,
+                                          bytesPerRow: 256 * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            context.setFillColor(CGColor(gray: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: 256, height: 256))
+            context.interpolationQuality = .high
+            context.draw(representation, in: CGRect(x: 0, y: 0, width: 256, height: 256))
+            return true
+        }
+        guard rendered else { throw NotesError("invalid_scan_image", "The scan page could not be sampled: \(name)") }
+        let hash = SHA256.hash(data: Data(samples)).map { String(format: "%02x", $0) }.joined()
+        return ScanPageEvidence(width: width, height: height,
+                                samples: samples, rasterSHA256: hash)
+    }
+
+    private static func pdfPageEvidence(_ url: URL) throws -> [ScanPageEvidence] {
+        guard let document = PDFDocument(url: url), document.pageCount > 0 else {
+            throw NotesError("snapshot_integrity_failed", "The saved Paper fallback PDF is unreadable.")
+        }
+        return try (0..<document.pageCount).map { index in
+            guard let page = document.page(at: index) else {
+                throw NotesError("snapshot_integrity_failed", "The saved Paper fallback PDF has a missing page.")
+            }
+            let bounds = page.bounds(for: .mediaBox)
+            let thumbnail = page.thumbnail(of: NSSize(width: 512, height: 512), for: .mediaBox)
+            guard let image = thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+                throw NotesError("snapshot_integrity_failed", "A Paper fallback PDF page could not be rendered.")
+            }
+            let aspect = bounds.height == 0 ? 0 : bounds.width / bounds.height
+            return try rasterEvidence(image, width: Int((aspect * 10_000).rounded()),
+                                      height: 10_000, name: "Paper page \(index + 1)")
+        }
+    }
+
+    static func validateScanInputs(_ pages: [FrozenAttachmentInput]) throws {
+        guard (1...maximumScanPages).contains(pages.count) else {
+            throw NotesError("invalid_scan_page_count", "A scanned document requires between 1 and \(maximumScanPages) image pages.")
+        }
+        guard pages.reduce(0, { $0 + $1.byteCount }) <= maximumScanBytes else {
+            throw NotesError("scan_too_large", "Scanned documents are limited to 200 MB across all pages.")
+        }
+        _ = try pages.map(scanPageEvidence)
+    }
+
+    public func insertScan(_ ref: String, pages: [FrozenAttachmentInput], position: Int?, allowShared: Bool) throws -> NativeScanResult {
+        try Self.validateScanInputs(pages)
+        let sourcePages = try pages.map(Self.scanPageEvidence)
+        let preparation: NCPreparedScan
+        do { preparation = try NCNotesRuntime.prepareScan(imageURLs: pages.map(\.url)) }
+        catch { throw nativeError(error) }
+        defer { preparation.invalidate() }
+        do { try NCNotesRuntime.validateScanPopulation(preparation) }
+        catch { throw nativeError(error) }
+
+        return try performScanWrite(transaction: { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            let noteID = id(note)
+            let attachmentID = UUID().uuidString.lowercased()
+            var at = 0
+            do {
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                at = position ?? editor.original.length
+                guard (0...editor.original.length).contains(at) else {
+                    throw NotesError("invalid_range", "Position exceeds the note length.")
+                }
+                let gallery = try NCNotesRuntime.newScanGallery(in: note, identifier: attachmentID)
+                let type = value(gallery, "typeUTI") as? String ?? ""
+                guard type == "com.apple.notes.gallery" else {
+                    throw NotesError("scan_gallery_invalid", "Notes created an unexpected scan container type: \(type)")
+                }
+                operation?.noteID = noteID
+                operation?.attachmentID = attachmentID
+                operation?.attachmentType = type
+                operation?.attachmentPosition = at
+                try insertMarker(editor, original: editor.original, id: attachmentID, type: type, position: position)
+                try editor.finish()
+                try validateBodiesBeforeSave([note])
+
+                // The gallery utility saves the Core Data context internally. Everything after this line
+                // must be treated as committed even when the helper throws or returns partial data.
+                operation?.committed = true
+                let populated = try NCNotesRuntime.populateScanGallery(gallery, preparation: preparation, context: context)
+                guard let pageIDs = populated["pageIDs"] as? [String],
+                      let pageTypes = populated["pageTypes"] as? [String],
+                      pageIDs.count == pages.count, pageTypes.count == pages.count else {
+                    throw NotesError("scan_incomplete", "Notes did not create every scanned document page.")
+                }
+                operation?.childAttachmentIDs = pageIDs
+                try save(context, notes: [note])
+                return ScanReceipt(noteID: noteID, attachmentID: attachmentID,
+                                   pageAttachmentIDs: pageIDs, pageTypeUTIs: pageTypes,
+                                   position: at, sourcePages: sourcePages)
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+        }, readback: { context, receipt in
+            let fresh = try self.note(receipt.noteID, in: context)
+            let markers = attachmentMarkers(try body(fresh)).filter { $0.2 == receipt.attachmentID }
+            let parents = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@ AND note == %@", receipt.attachmentID, fresh), in: context)
+            let children = try fetch("ICAttachment", predicate: NSPredicate(format: "parentAttachment.identifier == %@", receipt.attachmentID), in: context)
+            let nativeChildIDs = children.map(id)
+            let nativePageOrder: [String]
+            if let parent = parents.first {
+                do { nativePageOrder = try NCNotesRuntime.galleryPageIdentifiers(in: parent) }
+                catch { throw nativeError(error) }
+            } else { nativePageOrder = [] }
+            let parentType = parents.first.flatMap { value($0, "typeUTI") as? String } ?? ""
+            let parentDeleted = parents.first.flatMap { value($0, "markedForDeletion") as? Bool } ?? true
+            let expectedPageOrder = receipt.existingPageIDs + receipt.pageAttachmentIDs
+            let nativeVerified = markers.count == 1 && markers.first?.3 == "com.apple.notes.gallery" &&
+                parents.count == 1 && parentType == "com.apple.notes.gallery" && !parentDeleted &&
+                Set(nativeChildIDs) == Set(expectedPageOrder) &&
+                nativePageOrder == expectedPageOrder && nativeChildIDs.count == expectedPageOrder.count
+            let native = ["attachmentID": receipt.attachmentID,
+                          "typeUTI": parentType,
+                          "placements": String(markers.count),
+                          "pageIDs": receipt.pageAttachmentIDs.joined(separator: ","),
+                          "storedPageOrder": nativePageOrder.joined(separator: ","),
+                          "pageCount": String(nativeChildIDs.count)]
+            let write = result(receipt.noteID, native: native, nativeVerified: nativeVerified, sqlite: { storedNote in
+                guard let gallery = storedNote.attachments.first(where: { $0.id == receipt.attachmentID }),
+                      gallery.typeUTI == "com.apple.notes.gallery",
+                      gallery.childAttachmentIDs == expectedPageOrder,
+                      let children = gallery.childAttachments,
+                      children.count == expectedPageOrder.count else { return nil }
+                let childrenByID = Dictionary(uniqueKeysWithValues: children.map { ($0.id, $0) })
+                let orderedChildren = receipt.pageAttachmentIDs.compactMap { childrenByID[$0] }
+                guard orderedChildren.count == receipt.pageAttachmentIDs.count,
+                      orderedChildren.map(\.typeUTI) == receipt.pageTypeUTIs else { return nil }
+                let storedPages = orderedChildren.compactMap { child -> ScanPageEvidence? in
+                    guard let path = child.filePath else { return nil }
+                    return try? Self.scanPageEvidence(url: URL(fileURLWithPath: path), name: child.filename ?? child.id)
+                }
+                guard storedPages.count == receipt.sourcePages.count,
+                      zip(storedPages, receipt.sourcePages).allSatisfy({ $0.visuallyMatches($1) }) else { return nil }
+                return ["attachmentID": receipt.attachmentID,
+                        "pageIDs": receipt.pageAttachmentIDs.joined(separator: ","),
+                        "pageCount": String(orderedChildren.count), "pages": "decoded_and_matched"]
+            }, mismatch: "The scanned document structure or page order did not match after readback.")
+            return NativeScanResult(attachmentID: receipt.attachmentID,
+                                    pageAttachmentIDs: receipt.pageAttachmentIDs,
+                                    position: receipt.position,
+                                    write: write)
+        })
+    }
+
+    public func appendScanPages(_ ref: String, attachmentID: String, pages: [FrozenAttachmentInput],
+                                expectedPageIDs: [String]? = nil, allowShared: Bool) throws -> NativeScanResult {
+        try Self.validateScanInputs(pages)
+        let sourcePages = try pages.map(Self.scanPageEvidence)
+        let preparation: NCPreparedScan
+        do { preparation = try NCNotesRuntime.prepareScan(imageURLs: pages.map(\.url)) }
+        catch { throw nativeError(error) }
+        defer { preparation.invalidate() }
+        do { try NCNotesRuntime.validateScanPopulation(preparation) }
+        catch { throw nativeError(error) }
+
+        return try performScanWrite(transaction: { context in
+            let target = try note(ref, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target),
+                in: context, limit: 1).first,
+                  value(gallery, "typeUTI") as? String == "com.apple.notes.gallery" else {
+                throw NotesError("scan_not_found", "No scanned document matches the attachment ID in this note.")
+            }
+            let before = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+            if let expectedPageIDs, before != expectedPageIDs {
+                throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
+            }
+            operation?.noteID = id(target)
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = "com.apple.notes.gallery"
+            operation?.attachmentPosition = 0
+            operation?.committed = true
+            let populated: [String: Any]
+            do { populated = try NCNotesRuntime.populateScanGallery(gallery, preparation: preparation, context: context) }
+            catch { throw nativeError(error) }
+            guard let pageIDs = populated["pageIDs"] as? [String],
+                  let pageTypes = populated["pageTypes"] as? [String],
+                  pageIDs.count == pages.count, pageTypes.count == pages.count else {
+                throw NotesError("scan_incomplete", "Notes did not append every scanned document page.")
+            }
+            operation?.childAttachmentIDs = pageIDs
+            try save(context, notes: [target])
+            return ScanReceipt(noteID: id(target), attachmentID: attachmentID,
+                               pageAttachmentIDs: pageIDs, pageTypeUTIs: pageTypes,
+                               position: before.count, sourcePages: sourcePages,
+                               existingPageIDs: before)
+        }, readback: { context, receipt in
+            let fresh = try self.note(receipt.noteID, in: context)
+            let markers = attachmentMarkers(try body(fresh)).filter { $0.2 == receipt.attachmentID }
+            let parents = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@", receipt.attachmentID, fresh), in: context)
+            let children = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "parentAttachment.identifier == %@", receipt.attachmentID), in: context)
+            let nativeChildIDs = children.map(id)
+            let nativePageOrder = try parents.first.map { try NCNotesRuntime.galleryPageIdentifiers(in: $0) } ?? []
+            let expectedOrder = receipt.existingPageIDs + receipt.pageAttachmentIDs
+            let nativeVerified = markers.count == 1 && parents.count == 1 &&
+                Set(nativeChildIDs) == Set(expectedOrder) && nativePageOrder == expectedOrder
+            let native = ["attachmentID": receipt.attachmentID,
+                          "pageIDs": receipt.pageAttachmentIDs.joined(separator: ","),
+                          "storedPageOrder": nativePageOrder.joined(separator: ","),
+                          "pageCount": String(nativeChildIDs.count)]
+            let write = result(receipt.noteID, native: native, nativeVerified: nativeVerified, sqlite: { storedNote in
+                guard let gallery = storedNote.attachments.first(where: { $0.id == receipt.attachmentID }),
+                      gallery.childAttachmentIDs == expectedOrder,
+                      let children = gallery.childAttachments else { return nil }
+                let childrenByID = Dictionary(uniqueKeysWithValues: children.map { ($0.id, $0) })
+                let added = receipt.pageAttachmentIDs.compactMap { childrenByID[$0] }
+                guard added.count == receipt.pageAttachmentIDs.count,
+                      added.map(\.typeUTI) == receipt.pageTypeUTIs else { return nil }
+                let storedPages = added.compactMap { child -> ScanPageEvidence? in
+                    guard let path = child.filePath else { return nil }
+                    return try? Self.scanPageEvidence(url: URL(fileURLWithPath: path), name: child.filename ?? child.id)
+                }
+                guard storedPages.count == receipt.sourcePages.count,
+                      zip(storedPages, receipt.sourcePages).allSatisfy({ $0.visuallyMatches($1) }) else { return nil }
+                return ["attachmentID": receipt.attachmentID,
+                        "pageIDs": receipt.pageAttachmentIDs.joined(separator: ","),
+                        "pageCount": String(expectedOrder.count), "pages": "decoded_and_matched"]
+            }, mismatch: "The appended scan pages or page order did not match after readback.")
+            return NativeScanResult(attachmentID: receipt.attachmentID,
+                                    pageAttachmentIDs: receipt.pageAttachmentIDs,
+                                    position: receipt.position, write: write)
+        })
+    }
+
+    fileprivate func scanPageState(_ ref: String, attachmentID: String, pageID: String,
+                                   in context: NSManagedObjectContext) throws -> NativeScanPageState {
+        let target = try note(ref, in: context)
+        let galleries = try fetch("ICAttachment", predicate: NSPredicate(
+            format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target), in: context)
+        guard galleries.count == 1, let gallery = galleries.first,
+              value(gallery, "typeUTI") as? String == "com.apple.notes.gallery" else {
+            throw NotesError("scan_not_found", "No scanned document matches the attachment ID in this note.")
+        }
+        let pages = try fetch("ICAttachment", predicate: NSPredicate(
+            format: "identifier == %@ AND parentAttachment == %@ AND markedForDeletion == NO", pageID, gallery), in: context)
+        guard pages.count == 1, let page = pages.first else {
+            throw NotesError("scan_page_not_found", "No page with that ID belongs to the scanned document.")
+        }
+        let order: [String]
+        do { order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery) }
+        catch { throw nativeError(error) }
+        guard order.contains(pageID) else { throw NotesError("scan_page_not_found", "The page is absent from the gallery order.") }
+        let filterValue = (value(page, "imageFilterType") as? NSNumber)?.intValue ?? 0
+        let orientationValue = (value(page, "orientation") as? NSNumber)?.intValue ?? 0
+        guard let filter = NativeScanFilter(value: filterValue),
+              let orientation = NativeScanOrientation(value: orientationValue) else {
+            throw NotesError("unsupported_scan_state", "Notes returned an unknown scan filter or orientation.")
+        }
+        func number(_ key: String) -> Double? { (value(page, key) as? NSNumber)?.doubleValue }
+        let crop: ScanCrop?
+        var pixelWidth: Double?
+        var pixelHeight: Double?
+        if let fileURL = value(page, "fileURL") as? URL,
+           let size = Self.scanImagePixelSize(fileURL) {
+            pixelWidth = size.width
+            pixelHeight = size.height
+        }
+        if let blx = number("croppingQuadBottomLeftX"), let bly = number("croppingQuadBottomLeftY"),
+           let brx = number("croppingQuadBottomRightX"), let bry = number("croppingQuadBottomRightY"),
+           let tlx = number("croppingQuadTopLeftX"), let tly = number("croppingQuadTopLeftY"),
+           let trx = number("croppingQuadTopRightX"), let tryValue = number("croppingQuadTopRightY") {
+            let stored = Self.decodedScanCrop(bottomLeft: ScanPoint(x: blx, y: bly),
+                                              bottomRight: ScanPoint(x: brx, y: bry),
+                                              topLeft: ScanPoint(x: tlx, y: tly),
+                                              topRight: ScanPoint(x: trx, y: tryValue))
+            if let stored {
+                guard let normalized = Self.normalizedScanCrop(stored, pixelWidth: pixelWidth, pixelHeight: pixelHeight) else {
+                    throw NotesError("unsupported_scan_crop", "The stored scan crop cannot be mapped to the page image dimensions.")
+                }
+                crop = normalized
+            } else { crop = nil }
+        } else { crop = nil }
+        let hasMarkup = (value(page, "markupModelData") as? Data)?.isEmpty == false
+        let hasEmbeddedMarkup = (value(page, "hasMarkupData") as? NSNumber)?.boolValue ?? false
+        return NativeScanPageState(noteID: id(target), attachmentID: attachmentID, pageID: pageID,
+                                   pageIDs: order, filter: filter, orientation: orientation,
+                                   crop: crop, hasMarkup: hasMarkup, hasEmbeddedMarkup: hasEmbeddedMarkup)
+    }
+
+    static func decodedScanCrop(bottomLeft: ScanPoint, bottomRight: ScanPoint,
+                                topLeft: ScanPoint, topRight: ScanPoint) -> ScanCrop? {
+        let values = [bottomLeft.x, bottomLeft.y, bottomRight.x, bottomRight.y,
+                      topLeft.x, topLeft.y, topRight.x, topRight.y]
+        guard !values.allSatisfy({ $0 == 0 }) else { return nil }
+        return ScanCrop(bottomLeft: bottomLeft, bottomRight: bottomRight,
+                        topLeft: topLeft, topRight: topRight)
+    }
+
+    static func normalizedScanCrop(_ crop: ScanCrop, pixelWidth: Double?, pixelHeight: Double?) -> ScanCrop? {
+        let points = [crop.bottomLeft, crop.bottomRight, crop.topLeft, crop.topRight]
+        guard points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.x >= 0 && $0.y >= 0 }) else { return nil }
+        if points.allSatisfy({ $0.x <= 1 && $0.y <= 1 }) { return crop }
+        guard let pixelWidth, let pixelHeight, pixelWidth > 0, pixelHeight > 0,
+              points.allSatisfy({ $0.x <= pixelWidth && $0.y <= pixelHeight }) else { return nil }
+        func point(_ value: ScanPoint) -> ScanPoint {
+            ScanPoint(x: value.x / pixelWidth, y: value.y / pixelHeight)
+        }
+        return ScanCrop(bottomLeft: point(crop.bottomLeft), bottomRight: point(crop.bottomRight),
+                        topLeft: point(crop.topLeft), topRight: point(crop.topRight))
+    }
+
+    fileprivate static func scanImagePixelSize(_ url: URL) -> (width: Double, height: Double)? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        return (Double(image.width), Double(image.height))
+    }
+
+    public func scanPageState(_ ref: String, attachmentID: String, pageID: String) throws -> NativeScanPageState {
+        try performRead { try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: $0) }
+    }
+
+    fileprivate enum ScanEdit {
+        case filter(NativeScanFilter)
+        case orientation(NativeScanOrientation)
+        case crop(ScanCrop)
+        case move(Int)
+    }
+
+    fileprivate enum ScanExpectation {
+        case filter(NativeScanFilter)
+        case orientation(NativeScanOrientation)
+        case crop(ScanCrop)
+        case pageIDs([String])
+    }
+
+    fileprivate func editScan(_ ref: String, attachmentID: String, pageID: String,
+                              edit: ScanEdit, expected: ScanExpectation?, allowShared: Bool) throws -> NativeWriteResult {
+        do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
+        return try performWrite { context in
+            let before = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
+            let expectationMatches: Bool
+            switch expected {
+            case .filter(let value): expectationMatches = before.filter == value
+            case .orientation(let value): expectationMatches = before.orientation == value
+            case .crop(let value): expectationMatches = NativeVerificationRules.sameScanCrop(before.crop, value)
+            case .pageIDs(let value): expectationMatches = before.pageIDs == value
+            case nil: expectationMatches = true
+            }
+            guard expectationMatches else {
+                throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
+            }
+            let target = try note(before.noteID, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target), in: context, limit: 1).first else {
+                throw NotesError("scan_not_found", "The scanned document disappeared before editing.")
+            }
+            if case .move(let index) = edit, !(0..<before.pageIDs.count).contains(index) {
+                throw NotesError("invalid_scan_page_index", "Destination index must be between 0 and \(before.pageIDs.count - 1).")
+            }
+            if case .crop = edit {
+                guard before.orientation == .upright else {
+                    throw NotesError("scan_crop_rotated_unproven", "Crop is refused for rotated pages until Notes' orientation transform is proven.")
+                }
+                guard !before.hasMarkup, !before.hasEmbeddedMarkup else {
+                    throw NotesError("scan_crop_markup_unproven", "Crop is refused for marked-up pages until markup alignment is proven.")
+                }
+                guard before.crop != nil else {
+                    throw NotesError("scan_crop_unavailable", "The scanned page has no restorable crop quadrilateral.")
+                }
+            }
+            operation?.noteID = before.noteID
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = "com.apple.notes.gallery"
+            do {
+                switch edit {
+                case .filter(let filter):
+                    try NCNotesRuntime.applyScanFilter(Int16(filter.value), pageIdentifier: pageID, gallery: gallery)
+                case .orientation(let orientation):
+                    try NCNotesRuntime.setScanOrientation(orientation.value, pageIdentifier: pageID, gallery: gallery)
+                case .crop(let crop):
+                    try NCNotesRuntime.setScanCrop(
+                        bottomLeftX: crop.bottomLeft.x, bottomLeftY: crop.bottomLeft.y,
+                        bottomRightX: crop.bottomRight.x, bottomRightY: crop.bottomRight.y,
+                        topLeftX: crop.topLeft.x, topLeftY: crop.topLeft.y,
+                        topRightX: crop.topRight.x, topRightY: crop.topRight.y,
+                        pageIdentifier: pageID, gallery: gallery)
+                case .move(let index):
+                    try NCNotesRuntime.moveScanPage(pageID, toIndex: UInt(index), gallery: gallery)
+                }
+                guard !context.hasChanges else {
+                    context.rollback()
+                    throw NotesError("scan_edit_not_committed", "Notes left the scanned-document edit unsaved; the change was rolled back.")
+                }
+                operation?.committed = true
+            } catch {
+                let mutationError = error
+                do {
+                    if context.hasChanges { context.rollback() }
+                    context.refreshAllObjects()
+                    let current = try scanPageState(before.noteID, attachmentID: attachmentID, pageID: pageID, in: context)
+                    operation?.committed = current != before
+                } catch {
+                    // If readback itself fails, retain the conservative do-not-retry outcome.
+                    operation?.committed = true
+                }
+                throw nativeError(mutationError)
+            }
+            context.refreshAllObjects()
+            let after = try scanPageState(before.noteID, attachmentID: attachmentID, pageID: pageID, in: context)
+            func cropText(_ value: ScanCrop?) -> String {
+                guard let value else { return "" }
+                return "\(value.bottomLeft.x),\(value.bottomLeft.y);\(value.bottomRight.x),\(value.bottomRight.y);\(value.topLeft.x),\(value.topLeft.y);\(value.topRight.x),\(value.topRight.y)"
+            }
+            let nativeVerified: Bool
+            var native = ["attachmentID": attachmentID, "pageID": pageID,
+                          "pageOrder": after.pageIDs.joined(separator: ","),
+                          "filter": after.filter.rawValue, "orientation": after.orientation.rawValue,
+                          "crop": cropText(after.crop)]
+            switch edit {
+            case .filter(let filter): nativeVerified = after.filter == filter
+            case .orientation(let orientation): nativeVerified = after.orientation == orientation
+            case .crop(let crop): nativeVerified = NativeVerificationRules.sameScanCrop(after.crop, crop)
+            case .move(let index):
+                nativeVerified = after.pageIDs.indices.contains(index) && after.pageIDs[index] == pageID
+                native["index"] = String(index)
+            }
+            return result(before.noteID, native: native, nativeVerified: nativeVerified, sqlite: { decoded in
+                guard let gallery = decoded.attachments.first(where: { $0.id == attachmentID }),
+                      let children = gallery.childAttachments,
+                      let page = children.first(where: { $0.id == pageID }) else { return nil }
+                switch edit {
+                case .filter(let filter): guard page.scanFilter == filter.value else { return nil }
+                case .orientation(let orientation): guard page.scanOrientation == orientation.value else { return nil }
+                case .crop(let crop):
+                    let size = page.filePath.flatMap { Self.scanImagePixelSize(URL(fileURLWithPath: $0)) }
+                    guard let stored = page.scanCrop,
+                          let normalized = Self.normalizedScanCrop(stored, pixelWidth: size?.width, pixelHeight: size?.height),
+                          NativeVerificationRules.sameScanCrop(normalized, crop) else { return nil }
+                case .move(let index):
+                    guard let order = gallery.childAttachmentIDs, order.indices.contains(index), order[index] == pageID else { return nil }
+                }
+                return ["attachmentID": attachmentID, "pageID": pageID,
+                        "pageOrder": (gallery.childAttachmentIDs ?? []).joined(separator: ","),
+                        "filter": String(page.scanFilter ?? -1), "orientation": String(page.scanOrientation ?? -1),
+                        "crop": cropText(page.scanCrop)]
+            }, mismatch: "The scanned document edit did not match after readback.")
+        }
+    }
+
+    public func setScanFilter(_ ref: String, attachmentID: String, pageID: String,
+                              filter: NativeScanFilter, expectedCurrent: NativeScanFilter? = nil,
+                              allowShared: Bool) throws -> NativeWriteResult {
+        try editScan(ref, attachmentID: attachmentID, pageID: pageID, edit: .filter(filter),
+                     expected: expectedCurrent.map(ScanExpectation.filter), allowShared: allowShared)
+    }
+
+    public func setScanOrientation(_ ref: String, attachmentID: String, pageID: String,
+                                   orientation: NativeScanOrientation, expectedCurrent: NativeScanOrientation? = nil,
+                                   allowShared: Bool) throws -> NativeWriteResult {
+        try editScan(ref, attachmentID: attachmentID, pageID: pageID, edit: .orientation(orientation),
+                     expected: expectedCurrent.map(ScanExpectation.orientation), allowShared: allowShared)
+    }
+
+    public func setScanMarkupData(_ ref: String, attachmentID: String, pageID: String,
+                                  data: Data, embedded: Bool = false,
+                                  allowShared: Bool) throws -> NativeWriteResult {
+        guard !data.isEmpty, data.count <= 50 * 1024 * 1024 else {
+            throw NotesError("invalid_scan_markup", "Scan markup data must be between 1 byte and 50 MB.")
+        }
+        let expectedHash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return try performWrite { context in
+            let before = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
+            let target = try note(before.noteID, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target
+            ), in: context, limit: 1).first else {
+                throw NotesError("scan_not_found", "The scanned document disappeared before editing.")
+            }
+            operation?.noteID = before.noteID
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = "com.apple.notes.gallery"
+            do {
+                try NCNotesRuntime.setScanMarkupData(data, pageIdentifier: pageID, gallery: gallery)
+                guard !context.hasChanges else {
+                    context.rollback()
+                    throw NotesError("scan_edit_not_committed", "Notes left the scan markup edit unsaved; the change was rolled back.")
+                }
+                guard let page = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND parentAttachment == %@", pageID, gallery),
+                    in: context,
+                    limit: 1
+                ).first else {
+                    throw NotesError("scan_page_not_found", "The scan page disappeared after applying markup.")
+                }
+                try NCNotesRuntime.setValue(embedded, forKey: "hasMarkupData", of: page)
+                try NCNotesRuntime.updateChangeCount(of: page, reason: "Changed scan markup embedding")
+                try save(context, notes: [target])
+                operation?.committed = true
+            } catch {
+                if context.hasChanges { context.rollback() }
+                throw nativeError(error)
+            }
+            context.refreshAllObjects()
+            let after = try scanPageState(before.noteID, attachmentID: attachmentID, pageID: pageID, in: context)
+            return result(before.noteID,
+                          native: ["attachmentID": attachmentID, "pageID": pageID,
+                                   "hasMarkup": String(after.hasMarkup), "sha256": expectedHash],
+                          nativeVerified: after.hasMarkup && after.hasEmbeddedMarkup == embedded,
+                          sqlite: { decoded in
+                guard decoded.attachments.first(where: { $0.id == attachmentID })?
+                    .childAttachments?.first(where: { $0.id == pageID })?.scanHasMarkup == true,
+                      let stored = try? SQLiteNotesStore(refresh: true).scanMarkupPayloads(decoded.summary.id.uuid)[pageID],
+                      decoded.attachments.first(where: { $0.id == attachmentID })?
+                        .childAttachments?.first(where: { $0.id == pageID })?.scanHasEmbeddedMarkup == embedded,
+                      SHA256.hash(data: stored).map({ String(format: "%02x", $0) }).joined() == expectedHash else {
+                    return nil
+                }
+                return ["attachmentID": attachmentID, "pageID": pageID,
+                        "hasMarkup": "true", "embedded": String(embedded), "sha256": expectedHash]
+            }, mismatch: "The scan markup did not match after readback.")
+        }
+    }
+
+    public func setAttachmentMarkupData(_ ref: String, attachmentID: String, data: Data,
+                                        embedded: Bool, allowShared: Bool) throws -> NativeWriteResult {
+        guard !data.isEmpty, data.count <= 50 * 1024 * 1024 else {
+            throw NotesError("invalid_attachment_markup", "Attachment markup data must be between 1 byte and 50 MB.")
+        }
+        let expectedHash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return try performWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            guard let attachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(
+                    format: "identifier == %@ AND note == %@ AND markedForDeletion == NO",
+                    attachmentID,
+                    note
+                ),
+                in: context,
+                limit: 1
+            ).first else {
+                throw NotesError("attachment_not_found", "No live attachment matches \(attachmentID).")
+            }
+            let type = (value(attachment, "typeUTI") as? String ?? "").lowercased()
+            guard type.contains("image") || type.contains("jpeg") || type.contains("png") ||
+                    type.contains("heic") || type.contains("pdf") else {
+                throw NotesError("markup_unsupported", "Editable attachment markup is limited to images and PDFs.")
+            }
+            operation?.noteID = id(note)
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = value(attachment, "typeUTI") as? String
+            do {
+                try NCNotesRuntime.setValue(data, forKey: "markupModelData", of: attachment)
+                try NCNotesRuntime.setValue(embedded, forKey: "hasMarkupData", of: attachment)
+                try NCNotesRuntime.updateChangeCount(of: attachment, reason: "Changed editable markup")
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw nativeError(error)
+            }
+            let fresh = try self.note(id(note), in: context)
+            guard let storedAttachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh),
+                in: context,
+                limit: 1
+            ).first,
+                  let stored = value(storedAttachment, "markupModelData") as? Data else {
+                throw NotesError("attachment_markup_unavailable", "Notes did not retain the editable markup payload.")
+            }
+            let storedHash = SHA256.hash(data: stored).map { String(format: "%02x", $0) }.joined()
+            let storedEmbedded = (value(storedAttachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false
+            return result(
+                id(note),
+                native: ["attachmentID": attachmentID, "sha256": storedHash,
+                         "embedded": String(storedEmbedded)],
+                nativeVerified: storedHash == expectedHash && storedEmbedded == embedded,
+                sqlite: { decoded in
+                    guard let actual = decoded.attachments.first(where: { $0.id == attachmentID }),
+                          actual.hasEmbeddedMarkup == embedded,
+                          let payload = try? SQLiteNotesStore(refresh: true)
+                            .scanMarkupPayloads(decoded.summary.id.uuid)[attachmentID] else { return nil }
+                    let hash = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                    return hash == expectedHash
+                        ? ["attachmentID": attachmentID, "sha256": hash, "embedded": String(embedded)] : nil
+                },
+                mismatch: "The editable attachment markup did not match after readback."
+            )
+        }
+    }
+
+    public func setScanCrop(_ ref: String, attachmentID: String, pageID: String,
+                            crop: ScanCrop, expectedCurrent: ScanCrop? = nil,
+                            allowShared: Bool) throws -> NativeWriteResult {
+        try editScan(ref, attachmentID: attachmentID, pageID: pageID, edit: .crop(crop),
+                     expected: expectedCurrent.map(ScanExpectation.crop), allowShared: allowShared)
+    }
+
+    public func moveScanPage(_ ref: String, attachmentID: String, pageID: String,
+                             toIndex: Int, expectedPageIDs: [String]? = nil,
+                             allowShared: Bool) throws -> NativeWriteResult {
+        try editScan(ref, attachmentID: attachmentID, pageID: pageID, edit: .move(toIndex),
+                     expected: expectedPageIDs.map(ScanExpectation.pageIDs), allowShared: allowShared)
+    }
+
+    public func deleteScanPage(_ ref: String, attachmentID: String, pageID: String,
+                               expectedPageIDs: [String]? = nil,
+                               allowShared: Bool) throws -> NativeWriteResult {
+        do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
+        return try performWrite { context in
+            let before = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
+            if let expectedPageIDs, before.pageIDs != expectedPageIDs {
+                throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
+            }
+            guard before.pageIDs.count > 1 else {
+                throw NotesError("scan_last_page_refused", "Refusing to delete the only page in a scanned document.")
+            }
+            let target = try note(before.noteID, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target), in: context, limit: 1).first else {
+                throw NotesError("scan_not_found", "The scanned document disappeared before editing.")
+            }
+            operation?.noteID = before.noteID
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = "com.apple.notes.gallery"
+            do {
+                try NCNotesRuntime.deleteScanPage(pageID, gallery: gallery)
+                guard !context.hasChanges else {
+                    context.rollback()
+                    throw NotesError("scan_edit_not_committed", "Notes left the page deletion unsaved; the change was rolled back.")
+                }
+                operation?.committed = true
+            } catch {
+                let mutationError = error
+                do {
+                    if context.hasChanges { context.rollback() }
+                    context.refreshAllObjects()
+                    let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+                    operation?.committed = order != before.pageIDs
+                } catch {
+                    operation?.committed = true
+                }
+                throw nativeError(mutationError)
+            }
+            context.refreshAllObjects()
+            let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+            let expectedOrder = before.pageIDs.filter { $0 != pageID }
+            return result(before.noteID,
+                          native: ["attachmentID": attachmentID, "pageID": pageID,
+                                   "pageOrder": order.joined(separator: ",")],
+                          nativeVerified: order == expectedOrder,
+                          sqlite: { decoded in
+                guard let decodedGallery = decoded.attachments.first(where: { $0.id == attachmentID }),
+                      decodedGallery.childAttachmentIDs == expectedOrder else { return nil }
+                return ["attachmentID": attachmentID, "pageID": pageID,
+                        "pageOrder": expectedOrder.joined(separator: ",")]
+            }, mismatch: "The scanned document page was not deleted after readback.")
+        }
+    }
+
+    public func restoreScanPage(_ ref: String, attachmentID: String, pageID: String, toIndex: Int,
+                                expectedPageIDs: [String]? = nil,
+                                allowShared: Bool) throws -> NativeWriteResult {
+        do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
+        return try performWrite { context in
+            let target = try note(ref, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target), in: context, limit: 1).first else {
+                throw NotesError("scan_not_found", "The scanned document disappeared before restoring its page.")
+            }
+            let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+            if let expectedPageIDs, order != expectedPageIDs {
+                throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
+            }
+            guard (0...order.count).contains(toIndex) else {
+                throw NotesError("invalid_scan_page_index", "Restore index must be between 0 and \(order.count).")
+            }
+            let candidates = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@", pageID, target), in: context)
+            guard candidates.count == 1, let page = candidates.first,
+                  value(page, "parentAttachment") == nil ||
+                    (value(page, "markedForDeletion") as? NSNumber)?.boolValue == true else {
+                throw NotesError("scan_deleted_page_not_found", "The deleted scanned-document page is no longer restorable.")
+            }
+            let noteID = id(target)
+            operation?.noteID = noteID
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = "com.apple.notes.gallery"
+            do {
+                try NCNotesRuntime.undeleteScanPage(page, pageIdentifier: pageID,
+                                                    toIndex: UInt(toIndex), gallery: gallery)
+                guard !context.hasChanges else {
+                    context.rollback()
+                    throw NotesError("scan_edit_not_committed", "Notes left the page restore unsaved; the change was rolled back.")
+                }
+                operation?.committed = true
+            } catch {
+                let mutationError = error
+                do {
+                    if context.hasChanges { context.rollback() }
+                    context.refreshAllObjects()
+                    let current = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+                    operation?.committed = current != order
+                } catch {
+                    operation?.committed = true
+                }
+                throw nativeError(mutationError)
+            }
+            context.refreshAllObjects()
+            guard let refreshedGallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target),
+                in: context, limit: 1).first else {
+                throw NotesError("scan_not_found", "The scanned document disappeared after restoring its page.")
+            }
+            var restoredOrder = try NCNotesRuntime.galleryPageIdentifiers(in: refreshedGallery)
+            guard let restoredIndex = restoredOrder.firstIndex(of: pageID) else {
+                let stillDeleted = try fetch("ICAttachment", predicate: NSPredicate(
+                    format: "identifier == %@ AND note == %@ AND markedForDeletion == YES", pageID, target),
+                    in: context, limit: 1).first != nil
+                if stillDeleted { operation?.committed = false }
+                throw NotesError("scan_restore_failed", "Notes did not restore the scanned document page.")
+            }
+            if restoredIndex != toIndex {
+                do {
+                    try NCNotesRuntime.moveScanPage(pageID, toIndex: UInt(toIndex), gallery: refreshedGallery)
+                    operation?.committed = true
+                } catch {
+                    throw nativeError(error)
+                }
+                context.refreshAllObjects()
+                restoredOrder = try NCNotesRuntime.galleryPageIdentifiers(in: refreshedGallery)
+            }
+            let after = try scanPageState(noteID, attachmentID: attachmentID, pageID: pageID, in: context)
+            var expectedOrder = order
+            expectedOrder.insert(pageID, at: toIndex)
+            return result(noteID,
+                          native: ["attachmentID": attachmentID, "pageID": pageID,
+                                   "pageOrder": after.pageIDs.joined(separator: ",")],
+                          nativeVerified: after.pageIDs == expectedOrder,
+                          sqlite: { decoded in
+                guard let decodedGallery = decoded.attachments.first(where: { $0.id == attachmentID }),
+                      decodedGallery.childAttachmentIDs == expectedOrder else { return nil }
+                return ["attachmentID": attachmentID, "pageID": pageID,
+                        "pageOrder": expectedOrder.joined(separator: ",")]
+            }, mismatch: "The scanned document page was not restored at its prior position.")
+        }
+    }
+
+    public func deleteScanPages(_ ref: String, attachmentID: String, pageIDs: [String],
+                                expectedPageIDs: [String]? = nil,
+                                allowShared: Bool) throws -> NativeWriteResult {
+        guard !pageIDs.isEmpty, Set(pageIDs).count == pageIDs.count else {
+            throw NotesError("invalid_scan_pages", "Provide one or more unique scanned-document page IDs.")
+        }
+        do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
+        return try performWrite { context in
+            let target = try note(ref, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target),
+                in: context, limit: 1).first else {
+                throw NotesError("scan_not_found", "The scanned document disappeared before editing.")
+            }
+            let before = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+            if let expectedPageIDs, before != expectedPageIDs {
+                throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
+            }
+            guard Set(pageIDs).isSubset(of: Set(before)), before.count > pageIDs.count else {
+                throw NotesError("invalid_scan_pages", "The requested pages are absent or would empty the scanned document.")
+            }
+            let expectedOrder = before.filter { !Set(pageIDs).contains($0) }
+            operation?.noteID = id(target)
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = "com.apple.notes.gallery"
+            do {
+                try NCNotesRuntime.deleteScanPages(pageIDs, gallery: gallery)
+                guard !context.hasChanges else {
+                    context.rollback()
+                    throw NotesError("scan_edit_not_committed", "Notes left the page deletion unsaved; the change was rolled back.")
+                }
+                operation?.committed = true
+            } catch {
+                let mutationError = error
+                do {
+                    if context.hasChanges { context.rollback() }
+                    context.refreshAllObjects()
+                    operation?.committed = try NCNotesRuntime.galleryPageIdentifiers(in: gallery) != before
+                } catch {
+                    operation?.committed = true
+                }
+                throw nativeError(mutationError)
+            }
+            context.refreshAllObjects()
+            let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+            return result(id(target),
+                          native: ["attachmentID": attachmentID, "pageIDs": pageIDs.joined(separator: ","),
+                                   "pageOrder": order.joined(separator: ",")],
+                          nativeVerified: order == expectedOrder,
+                          sqlite: { decoded in
+                guard let decodedGallery = decoded.attachments.first(where: { $0.id == attachmentID }),
+                      decodedGallery.childAttachmentIDs == expectedOrder else { return nil }
+                return ["attachmentID": attachmentID, "pageIDs": pageIDs.joined(separator: ","),
+                        "pageOrder": expectedOrder.joined(separator: ",")]
+            }, mismatch: "The appended scanned-document pages were not removed after readback.")
+        }
+    }
+
     fileprivate func destinationFolder(_ ref: String?, in context: NSManagedObjectContext) throws -> NSManagedObject {
         if let ref, !ref.isEmpty {
             if ref.contains(">") {
@@ -1196,10 +2602,83 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     private func readBackStrokes(_ attachment: NSManagedObject) throws -> [PaperStrokeRecord] {
-        PaperStrokeRecord.records(try NCNotesRuntime.systemPaperDrawings(for: attachment).map { value in
-            guard let drawing = value as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
-            return drawing
+        PaperStrokeRecord.records(try readBackDrawingCanvases(attachment).map {
+            try PaperStrokeRecord.drawing($0)
         })
+    }
+
+    private func readBackDrawingCanvases(_ attachment: NSManagedObject) throws -> [[PaperStrokeRecord]] {
+        try NCNotesRuntime.systemPaperDrawings(for: attachment).map { value in
+            guard let drawing = value as? PKDrawing else { throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.") }
+            return PaperStrokeRecord.records([drawing])
+        }
+    }
+
+    private func legacyDrawingPayload(_ attachment: NSManagedObject, identifier: String) throws -> Data {
+        if let executable = legacyDrawingHelperExecutable() {
+            return try freshLegacyDrawingPayload(identifier: identifier, executable: executable)
+        }
+        return try NCNotesRuntime.legacyDrawingStrokes(for: attachment)
+    }
+
+    private func legacyDrawingHelperExecutable() -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        if let supplied = environment["NOTESCLI_LEGACY_HELPER"], !supplied.isEmpty {
+            let value = URL(fileURLWithPath: supplied)
+            return FileManager.default.isExecutableFile(atPath: value.path) ? value : nil
+        }
+        guard let current = Bundle.main.executableURL,
+              ["notescli", "notectl"].contains(current.lastPathComponent),
+              FileManager.default.isExecutableFile(atPath: current.path) else { return nil }
+        return current
+    }
+
+    private func freshLegacyDrawingPayload(identifier: String, executable: URL) throws -> Data {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notescli-legacy-read-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("strokes.json")
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["__legacy-drawing-read", identifier, output.path]
+        var childEnvironment = ProcessInfo.processInfo.environment
+        childEnvironment["NOTESCLI_CAPABILITY_HOST"] = "direct"
+        childEnvironment.removeValue(forKey: "NOTESCLI_HOST_ACTIVE")
+        process.environment = childEnvironment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+        do {
+            try process.run()
+            if finished.wait(timeout: .now() + 20) == .timedOut {
+                process.terminate()
+                if finished.wait(timeout: .now() + 0.2) == .timedOut, process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                    _ = finished.wait(timeout: .now() + 1)
+                }
+                throw NotesError("drawing_decode_failed", "The isolated Notes drawing reader timed out.")
+            }
+        } catch {
+            if let error = error as? NotesError { throw error }
+            throw NotesError("drawing_decode_failed", "The isolated Notes drawing reader could not start.")
+        }
+        guard process.terminationReason == .exit, process.terminationStatus == 0,
+              let attributes = try? FileManager.default.attributesOfItem(atPath: output.path),
+              let byteCount = attributes[.size] as? NSNumber,
+              byteCount.intValue > 0, byteCount.intValue <= 256 * 1024 * 1024 else {
+            throw NotesError("drawing_decode_failed", "The isolated Notes drawing reader returned no safe stroke data.")
+        }
+        return try Data(contentsOf: output, options: [.mappedIfSafe])
+    }
+
+    private func readBackLegacyStrokes(_ attachment: NSManagedObject, identifier: String) throws -> [LegacyDrawingStrokeRecord] {
+        let data = try legacyDrawingPayload(attachment, identifier: identifier)
+        let records = try JSONDecoder().decode([LegacyDrawingStrokeRecord].self, from: data)
+        try LegacyDrawingStrokeRecord.validate(records)
+        return records
     }
 
     public func createDrawingNote(title: String, folder folderRef: String?, drawing: PKDrawing,
@@ -1261,6 +2740,253 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                   attachmentSHA256: [:], write: write)
     }
 
+    private static func flattenAttachments(_ attachments: [Attachment]) -> [Attachment] {
+        attachments.flatMap { [$0] + flattenAttachments($0.childAttachments ?? []) }
+    }
+
+    private func handwritingResult(_ payload: [String: Any], attachmentID: String,
+                                   persisted: Bool, write: NativeWriteResult? = nil) throws -> NativeHandwritingResult {
+        guard let text = payload["text"] as? String,
+              let raw = payload["raw"] as? String,
+              let model = payload["model"] as? String,
+              let score = payload["score"] as? NSNumber,
+              let strokes = payload["strokes"] as? NSNumber,
+              let points = payload["points"] as? NSNumber else {
+            throw NotesError("handwriting_recognition_failed", "Apple Notes returned an invalid handwriting result.")
+        }
+        return NativeHandwritingResult(
+            attachmentID: attachmentID, text: text, rawText: raw, modelText: model,
+            score: score.doubleValue, strokeCount: strokes.intValue, pointCount: points.intValue,
+            persisted: persisted, write: write
+        )
+    }
+
+    public func recognizeHandwriting(_ ref: String, attachmentID: String,
+                                     locale: String = "en-US") throws -> NativeHandwritingResult {
+        try performRead { context in
+            let note = try note(ref, in: context)
+            guard let attachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note),
+                in: context,
+                limit: 1
+            ).first else {
+                throw NotesError("attachment_not_found", "No attachment matches \(attachmentID) in this note.")
+            }
+            do {
+                let payload = try NCNotesRuntime.recognizeHandwriting(in: attachment, locale: locale)
+                return try handwritingResult(payload, attachmentID: attachmentID, persisted: false)
+            } catch let error as NotesError {
+                throw error
+            } catch {
+                throw nativeError(error)
+            }
+        }
+    }
+
+    public func recognizeAndPersistHandwriting(_ ref: String, attachmentID: String,
+                                               locale: String = "en-US",
+                                               allowShared: Bool) throws -> NativeHandwritingResult {
+        var recognition: NativeHandwritingResult?
+        let write = try performWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            guard let attachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note),
+                in: context,
+                limit: 1
+            ).first else {
+                throw NotesError("attachment_not_found", "No attachment matches \(attachmentID) in this note.")
+            }
+            do {
+                let payload = try NCNotesRuntime.recognizeHandwriting(in: attachment, locale: locale)
+                let value = try handwritingResult(payload, attachmentID: attachmentID, persisted: true)
+                guard !value.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NotesError("handwriting_not_recognized", "Apple Notes did not recognize text in this drawing.")
+                }
+                _ = try NCNotesRuntime.setHandwritingSummary(value.text, attachment: attachment)
+                try save(context, notes: [note])
+                recognition = value
+            } catch let error as NotesError {
+                context.rollback()
+                throw error
+            } catch {
+                context.rollback()
+                throw nativeError(error)
+            }
+            let fresh = try self.note(id(note), in: context)
+            guard let freshAttachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh),
+                in: context,
+                limit: 1
+            ).first, let value = recognition else {
+                throw NotesError("handwriting_persist_failed", "The handwriting attachment disappeared after save.")
+            }
+            let nativeSummary = self.value(freshAttachment, "handwritingSummary") as? String
+            return result(id(note),
+                          native: ["attachmentID": attachmentID, "handwriting": nativeSummary ?? ""],
+                          nativeVerified: nativeSummary == value.text,
+                          sqlite: { decoded in
+                guard let stored = Self.flattenAttachments(decoded.attachments).first(where: { $0.id == attachmentID }),
+                      stored.handwritingText == value.text else { return nil }
+                return ["attachmentID": attachmentID, "handwriting": value.text]
+            }, mismatch: "The recognized handwriting was not persisted exactly.")
+        }
+        guard var recognition else {
+            throw NotesError("handwriting_recognition_failed", "Apple Notes returned no handwriting result.")
+        }
+        recognition.write = write
+        return recognition
+    }
+
+    public func setHandwritingSummary(_ ref: String, attachmentID: String, summary: String?,
+                                      allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            guard let attachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note),
+                in: context,
+                limit: 1
+            ).first else {
+                throw NotesError("attachment_not_found", "No attachment matches \(attachmentID) in this note.")
+            }
+            do {
+                _ = try NCNotesRuntime.setHandwritingSummary(summary, attachment: attachment)
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            let expected = summary ?? ""
+            let fresh = try self.note(id(note), in: context)
+            let freshAttachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh),
+                in: context,
+                limit: 1
+            ).first
+            let nativeSummary = freshAttachment.flatMap { self.value($0, "handwritingSummary") as? String } ?? ""
+            return result(id(note), native: ["attachmentID": attachmentID, "handwriting": nativeSummary],
+                          nativeVerified: nativeSummary == expected,
+                          sqlite: { decoded in
+                guard let stored = Self.flattenAttachments(decoded.attachments).first(where: { $0.id == attachmentID }),
+                      (stored.handwritingText ?? "") == expected else { return nil }
+                return ["attachmentID": attachmentID, "handwriting": stored.handwritingText ?? ""]
+            }, mismatch: "The handwriting summary was not updated exactly.")
+        }
+    }
+
+    public func regenerateFallbackPDF(_ ref: String, attachmentID: String,
+                                      allowShared: Bool) throws -> NativeFallbackPDFResult {
+        var byteCount = 0
+        var path = ""
+        let write = try performWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            guard let attachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note),
+                in: context,
+                limit: 1
+            ).first else {
+                throw NotesError("attachment_not_found", "No attachment matches \(attachmentID) in this note.")
+            }
+            do {
+                let payload = try NCNotesRuntime.regenerateFallbackPDF(for: attachment)
+                guard let bytes = payload["byteCount"] as? NSNumber,
+                      let output = payload["url"] as? String,
+                      bytes.intValue > 0, !output.isEmpty else {
+                    throw NotesError("fallback_pdf_failed", "Apple Notes returned no fallback PDF evidence.")
+                }
+                byteCount = bytes.intValue
+                path = output
+                try save(context, notes: [note])
+            } catch let error as NotesError {
+                context.rollback()
+                throw error
+            } catch {
+                context.rollback()
+                throw nativeError(error)
+            }
+            let isPDF = (try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe).prefix(5)) == Data("%PDF-".utf8)
+            return result(id(note), native: ["attachmentID": attachmentID, "byteCount": String(byteCount), "path": path],
+                          nativeVerified: byteCount > 0 && FileManager.default.fileExists(atPath: path) && isPDF,
+                          sqlite: { decoded in
+                guard Self.flattenAttachments(decoded.attachments).contains(where: { $0.id == attachmentID }) else { return nil }
+                return ["attachmentID": attachmentID, "byteCount": String(byteCount)]
+            }, mismatch: "Apple Notes did not retain a readable fallback PDF.")
+        }
+        return NativeFallbackPDFResult(attachmentID: attachmentID, byteCount: byteCount, path: path, write: write)
+    }
+
+    public func insertPaperDocument(_ ref: String, frozen: FrozenAttachmentInput, subtype: String,
+                                    position: Int?, allowShared: Bool) throws -> NativeAttachmentResult {
+        let normalized = subtype.lowercased()
+        guard normalized == "pdf" || normalized == "scan" else {
+            throw NotesError("invalid_paper_subtype", "Paper document subtype must be pdf or scan.")
+        }
+        return try performAttachmentWrite { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            var attachmentID = "", kind: NSString?, at = 0
+            do {
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                at = position ?? editor.original.length
+                let requestedID = UUID().uuidString.lowercased()
+                attachmentID = try NCNotesRuntime.addPaperDocument(
+                    at: frozen.url,
+                    subtype: normalized,
+                    identifier: requestedID,
+                    to: note,
+                    type: &kind
+                )
+                guard attachmentID.caseInsensitiveCompare(requestedID) == .orderedSame else {
+                    throw NotesError("paper_identifier_mismatch", "Notes returned a different Paper identifier.")
+                }
+                let type = kind as String? ?? ""
+                operation?.attachmentID = attachmentID
+                operation?.attachmentType = type
+                operation?.attachmentPosition = at
+                try insertMarker(editor, original: editor.original, id: attachmentID, type: type, position: position)
+                try editor.finish()
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            let type = kind as String? ?? ""
+            let expectedType = normalized == "pdf" ? "com.apple.paper.doc.pdf" : "com.apple.paper.doc.scan"
+            let fresh = try self.note(id(note), in: context)
+            let placements = attachmentMarkers(try body(fresh)).filter { $0.2 == attachmentID && $0.3 == type }.count
+            let exists = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@ AND typeUTI == %@", attachmentID, fresh, type),
+                in: context,
+                limit: 1
+            ).count == 1
+            let write = result(id(note),
+                               native: ["attachmentID": attachmentID, "typeUTI": type, "placements": String(placements)],
+                               nativeVerified: exists && placements == 1 && type == expectedType,
+                               sqlite: { decoded in
+                guard Self.flattenAttachments(decoded.attachments).contains(where: {
+                    $0.id == attachmentID && $0.typeUTI == expectedType
+                }) else { return nil }
+                return ["attachmentID": attachmentID, "typeUTI": expectedType, "placements": "1"]
+            }, mismatch: "The native Paper document did not match after readback.")
+            return NativeAttachmentResult(attachmentID: attachmentID, typeUTI: type, position: at,
+                                          sourceSHA256: frozen.sha256, storedSHA256: nil, write: write)
+        }
+    }
+
     public func paperDrawings(_ ref: String, attachmentID: String? = nil) throws -> [NativePaperAttachment] {
         try performRead { context in
             let note = try note(ref, in: context)
@@ -1286,15 +3012,156 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func snapshotDrawingPayloads(_ ref: String) throws -> [String: Data] {
+        try performRead { context in
+            let note = try note(ref, in: context)
+            let markers = attachmentMarkers(try body(note)).filter {
+                let lower = $0.3.lowercased()
+                return (lower.contains("paper") && !lower.contains("paper.doc")) ||
+                    lower.contains("drawing") || lower.contains("sketch")
+            }
+            var payloads: [String: Data] = [:]
+            for marker in markers {
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", marker.2, note),
+                    in: context,
+                    limit: 1
+                ).first else {
+                    throw NotesError("drawing_unavailable", "Drawing \(marker.2) has no native attachment row.")
+                }
+                let lowerType = marker.3.lowercased()
+                if lowerType.contains("sketch") || (lowerType.contains("drawing") && !lowerType.contains("paper")) {
+                    let data = try legacyDrawingPayload(attachment, identifier: marker.2)
+                    let records = try JSONDecoder().decode([LegacyDrawingStrokeRecord].self, from: data)
+                    try LegacyDrawingStrokeRecord.validate(records)
+                    payloads[marker.2] = data
+                    continue
+                }
+                let drawings = try NCNotesRuntime.systemPaperDrawings(for: attachment).map { value -> PKDrawing in
+                    guard let drawing = value as? PKDrawing else {
+                        throw NotesError("drawing_decode_failed", "Notes returned an unknown Paper drawing object.")
+                    }
+                    return drawing
+                }
+                guard !drawings.isEmpty else {
+                    throw NotesError("drawing_snapshot_failed", "Drawing \(marker.2) contains no editable canvases.")
+                }
+                let data = drawings.count == 1
+                    ? try JSONEncoder().encode(PaperStrokeRecord.records(drawings))
+                    : try JSONEncoder().encode(drawings.map { PaperStrokeRecord.records([$0]) })
+                guard !data.isEmpty else {
+                    throw NotesError("drawing_snapshot_failed", "Drawing \(marker.2) produced an empty PencilKit archive.")
+                }
+                payloads[marker.2] = data
+            }
+            return payloads
+        }
+    }
+
+    public func snapshotPaperBundlePayloads(_ ref: String) throws -> [String: Data] {
+        try performRead { context in
+            let note = try note(ref, in: context)
+            let markers = attachmentMarkers(try body(note)).filter { $0.3.lowercased().contains("paper") }
+            var payloads: [String: Data] = [:]
+            for marker in markers {
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", marker.2, note),
+                    in: context,
+                    limit: 1
+                ).first else {
+                    throw NotesError("paper_bundle_unavailable", "Paper attachment \(marker.2) has no native attachment row.")
+                }
+                let archive = try NCNotesRuntime.archivePaperBundle(for: attachment)
+                guard !archive.isEmpty else {
+                    throw NotesError("paper_bundle_snapshot_failed", "Paper attachment \(marker.2) produced an empty native archive.")
+                }
+                payloads[marker.2] = archive
+            }
+            return payloads
+        }
+    }
+
+#if DEBUG
+    func paperFileURLsForTesting(_ ref: String, identifier: String) throws -> [URL] {
+        try performRead { context in
+            let note = try note(ref, in: context)
+            let account = try paperAccount(note)
+            return try NCNotesRuntime.paperFileURLs(identifier: identifier, account: account.object)
+                .map(Self.canonicalPaperURL)
+        }
+    }
+
+    func paperBundleNamesForTesting(_ ref: String) throws -> Set<String> {
+        try performRead { context in
+            let note = try note(ref, in: context)
+            let account = try paperAccount(note)
+            let root = Self.canonicalPaperURL(try NCNotesRuntime.paperBundlesDirectoryURL(account: account.object))
+            return Set(((try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )) ?? []).map(\.lastPathComponent))
+        }
+    }
+#endif
+
+    public func snapshotLinkPayloads(_ ref: String) throws -> [String: SnapshotLinkPayload] {
+        try performRead { context in
+            let note = try note(ref, in: context)
+            let markers = attachmentMarkers(try body(note))
+            var payloads: [String: SnapshotLinkPayload] = [:]
+            for marker in markers {
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", marker.2, note),
+                    in: context,
+                    limit: 1
+                ).first else { continue }
+                let synapse = value(attachment, "synapseData") as? Data
+                let metadata = value(attachment, "linkPresentationArchivedMetadata") as? Data
+                guard synapse?.isEmpty == false || metadata?.isEmpty == false else { continue }
+                payloads[marker.2] = SnapshotLinkPayload(
+                    synapseData: synapse?.isEmpty == false ? synapse : nil,
+                    linkPresentationMetadata: metadata?.isEmpty == false ? metadata : nil
+                )
+            }
+            return payloads
+        }
+    }
+
     public func createNote(title: String, markdown: String, folder folderRef: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult {
+        try createNote(title: title, markdown: markdown, folder: folderRef, attachments: attachments,
+                       systemPaper: false, allowShared: allowShared)
+    }
+
+    public func createQuickNote(title: String, markdown: String, folder folderRef: String?, allowShared: Bool) throws -> NativeCreateResult {
+        try createNote(title: title, markdown: markdown, folder: folderRef, attachments: [],
+                       systemPaper: true, allowShared: allowShared)
+    }
+
+    private func createNote(title: String, markdown: String, folder folderRef: String?, attachments: [FrozenAttachmentInput],
+                            systemPaper: Bool, allowShared: Bool) throws -> NativeCreateResult {
         let write = try performWrite { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
+            if systemPaper {
+                guard let account = value(destination, "account") as? NSManagedObject else {
+                    throw NotesError("account_not_found", "The Quick Note folder has no account.")
+                }
+                try require(["identifier"], of: account)
+                guard let accountID = value(account, "identifier") as? String, !accountID.isEmpty else {
+                    throw NotesError("account_not_found", "The Quick Note account has no identifier.")
+                }
+                try requireQuickNoteAccount(accountID)
+            }
             var noteID = "", attachmentIDs: [String] = [], createdNoteID: String?
             do {
                 let note = try NCNotesRuntime.newNote(in: destination)
                 createdNoteID = id(note)
                 try NCNotesRuntime.setValue(title, forKey: "title", of: note)
+                if systemPaper { try NCNotesRuntime.setSystemPaper(true, note: note) }
                 let editor = try NCBodyEditor(note: note)
                 try editor.prepare(["insert"])
                 let source = "# " + title + (markdown.isEmpty ? "" : "\n" + markdown)
@@ -1322,13 +3189,18 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     hashes[attachmentID] = hash
                 }
             }
-            return result(noteID, native: ["title": title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)"],
-                          nativeVerified: attachmentIDs.count == attachments.count && hashes.count == attachments.count,
+            let nativeSystemPaper = value(try self.note(noteID, in: context), "isSystemPaper") as? Bool == true
+            return result(noteID, native: ["title": title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)",
+                                                   "isSystemPaper": String(nativeSystemPaper)],
+                          nativeVerified: attachmentIDs.count == attachments.count && hashes.count == attachments.count &&
+                              (!systemPaper || nativeSystemPaper),
                           sqlite: { note in
                 guard note.summary.title == title,
                       Set(attachmentIDs).isSubset(of: Set(note.attachments.map(\.id))),
-                      hashes.count == attachments.count else { return nil }
-                return ["title": note.summary.title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)"]
+                      hashes.count == attachments.count,
+                      !systemPaper || note.summary.isSystemPaper == true else { return nil }
+                return ["title": note.summary.title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)",
+                        "isSystemPaper": String(note.summary.isSystemPaper == true)]
             }, mismatch: "The created note or frozen attachment bytes did not match.")
         }
         guard write.writeResult.outcome != .rolledBack else {
@@ -1374,6 +3246,111 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 }
                 return note.document?.text.contains(url.absoluteString) == true ? ["url": url.absoluteString] : nil
             }, mismatch: card ? "The URL preview card was not present exactly once." : "The URL link was not found after the write.")
+        }
+    }
+
+    public func insertSynapseLink(_ ref: String, url: URL, title: String,
+                                  position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  url.host?.isEmpty == false, url.user == nil, url.password == nil else {
+                throw NotesError("invalid_url", "Use an absolute http or https URL without embedded credentials.")
+            }
+            let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanTitle.isEmpty else { throw NotesError("invalid_shared_link", "Title cannot be empty.") }
+            let sourceIdentifier: String
+            do { sourceIdentifier = try NCNotesRuntime.synapseWebSourceIdentifier() }
+            catch { throw nativeError(error) }
+            let sourceName = "NotesCLI"
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            var attachmentID = "", kind = ""
+            do {
+                let editor = try NCBodyEditor(note: note)
+                try editor.prepare(["insert"])
+                let at = position ?? editor.original.length
+                guard (0...editor.original.length).contains(at) else {
+                    throw NotesError("invalid_range", "Position exceeds the note length.")
+                }
+                var nativeKind: NSString?
+                attachmentID = try NCNotesRuntime.addSynapseLink(url, title: cleanTitle, to: note, type: &nativeKind)
+                guard let nativeKind = nativeKind as String?, !nativeKind.isEmpty else {
+                    throw NotesError("native_write_failed", "Notes created a shared link without an attachment type.")
+                }
+                kind = nativeKind
+                try insertMarker(editor, original: editor.original, id: attachmentID, type: kind, position: position)
+                try editor.finish()
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            guard let attachment = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, note),
+                in: context, limit: 1).first else {
+                throw NotesError("native_verification_failed", "The shared-link attachment disappeared after save.")
+            }
+            let info: [String: Any]
+            do { info = try NCNotesRuntime.synapseLinkInfo(for: attachment) }
+            catch { throw nativeError(error) }
+            let nativeVerified = info["url"] as? String == url.absoluteString &&
+                info["title"] as? String == cleanTitle && info["sourceIdentifier"] as? String == sourceIdentifier &&
+                info["sourceName"] as? String == sourceName && ((info["dataBytes"] as? NSNumber)?.intValue ?? 0) > 0
+            let markerCount = attachmentMarkers(try body(try self.note(id(note), in: context)))
+                .filter { $0.2 == attachmentID && $0.3 == kind }.count
+            return result(id(note), native: ["url": url.absoluteString, "title": cleanTitle,
+                                             "attachmentID": attachmentID, "typeUTI": kind,
+                                             "markerCount": String(markerCount)],
+                          nativeVerified: nativeVerified && markerCount == 1,
+                          sqlite: { stored in
+                guard let value = stored.attachments.first(where: {
+                    $0.id == attachmentID && $0.typeUTI == kind && ($0.synapseDataBytes ?? 0) > 0
+                }), stored.document?.runs.filter({
+                    $0.attachment?.id == attachmentID && $0.attachment?.typeUTI == kind
+                }).count == 1 else { return nil }
+                return ["attachmentID": value.id, "typeUTI": value.typeUTI, "url": value.url ?? "",
+                        "synapseDataBytes": String(value.synapseDataBytes ?? 0),
+                        "linkPreviewMetadataBytes": String(value.linkPreviewMetadataBytes ?? 0)]
+            }, mismatch: "The native shared-link attachment did not match its Synapse content item.")
+        }
+    }
+
+    public func insertMap(_ ref: String, url: URL, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            try NativeMapURL.validate(url)
+            let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
+            var attachmentID = "", mapEvidence: [String: Any] = [:]
+            do {
+                let editor = try NCBodyEditor(note: note); try editor.prepare(["insert"])
+                let at = position ?? editor.original.length
+                guard (0...editor.original.length).contains(at) else { throw NotesError("invalid_range", "Position exceeds the note length.") }
+                var kind: NSString?
+                attachmentID = try NCNotesRuntime.addURL(url, to: note, type: &kind)
+                guard let attachment = try fetch("ICAttachment", predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note), in: context, limit: 1).first else {
+                    throw NotesError("attachment_not_found", "Notes did not return the created map attachment.")
+                }
+                mapEvidence = try NCNotesRuntime.addLocation(toMapAttachment: attachment)
+                guard mapEvidence["model"] as? String == "ICAttachmentMapModel",
+                      mapEvidence["hasLocation"] as? Bool == true else {
+                    throw NotesError("map_metadata_missing", "Notes created a URL card without native map metadata.")
+                }
+                try insertMarker(editor, original: editor.original, id: attachmentID,
+                                 type: kind as String? ?? "public.url", position: position)
+                try editor.finish(); try save(context, notes: [note])
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            let nativeBody = try body(try self.note(id(note), in: context))
+            let nativeOK = attachmentMarkers(nativeBody).filter { $0.2 == attachmentID }.count == 1
+            return result(id(note), native: ["url": url.absoluteString, "attachmentID": attachmentID,
+                                             "model": mapEvidence["model"] as? String ?? "",
+                                             "hasLocation": String(mapEvidence["hasLocation"] as? Bool == true)],
+                          nativeVerified: nativeOK && mapEvidence["hasLocation"] as? Bool == true,
+                          sqlite: { storedNote in
+                guard storedNote.attachments.contains(where: { $0.id == attachmentID && $0.url == url.absoluteString }),
+                      (try? SQLiteNotesStore(refresh: true).attachmentHasStoredLocation(note: storedNote.summary.id.uuid,
+                                                                                       attachmentID: attachmentID)) == true else { return nil }
+                return ["attachmentID": attachmentID, "url": url.absoluteString, "location": "stored"]
+            }, mismatch: "The Apple Maps card or its stored location did not match after readback.")
         }
     }
 
@@ -1513,8 +3490,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
         let before = try body(note).string
         guard let marker = attachmentMarkers(try body(note)).first(where: { $0.2 == attachmentID }) else { throw NotesError("table_marker_not_found", "The table marker is missing from the note body.") }
         do {
-            let editor = try NCBodyEditor(note: note); try editor.begin(["delete", "insert"]); try editor.delete(marker.0)
-            if !text.isEmpty { try editor.insert(NSAttributedString(string: text), at: UInt(marker.0.location)) }
+            let editor = try NCBodyEditor(note: note); try editor.begin(["replace"])
+            try editor.replace(marker.0, with: NSAttributedString(string: text))
             try NCNotesRuntime.markForDeletion(attachment); try editor.finish(); try save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
         let fresh = try self.note(id(note), in: context), nativeBody = try body(fresh)
@@ -1539,16 +3516,71 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func deleteNote(_ ref: String, allowShared: Bool) throws -> NativeWriteResult {
+        try performWriteWithFreshReadback(transaction: { context -> String in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note, protectsBody: false)
+            let noteID = id(note)
+            guard let sourceFolder = value(note, "folder") as? NSManagedObject,
+                  let account = value(sourceFolder, "account") as? NSManagedObject else {
+                throw NotesError("folder_not_found", "The note has no account folder.")
+            }
+            let trashFolders = try fetch("ICFolder", predicate: NSPredicate(
+                format: "folderType == 1 AND account == %@ AND markedForDeletion == NO", account
+            ), in: context)
+            guard trashFolders.count == 1, let trash = trashFolders.first else {
+                throw NotesError("trash_folder_not_found", "The note account does not expose one Recently Deleted folder.")
+            }
+            do {
+                try appleMove(note, to: trash)
+            } catch {
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            operation?.committed = true
+            operation?.noteID = noteID
+            return noteID
+        }, readback: { context, noteID in
+            let deleted = try note(noteID, in: context)
+            try require(["markedForDeletion", "folder"], of: deleted)
+            let markedForDeletion = value(deleted, "markedForDeletion") as? Bool == true
+            let folder = value(deleted, "folder") as? NSManagedObject
+            if let folder { try require(["folderType"], of: folder) }
+            let folderType = folder.flatMap { value($0, "folderType") as? Int }
+            let nativeDeleted = NativeDeleteVerification.isDeleted(markedForDeletion: markedForDeletion,
+                                                                    folderType: folderType)
+            return result(noteID,
+                          native: ["markedForDeletion": String(markedForDeletion),
+                                   "folderType": folderType.map(String.init) ?? ""],
+                          nativeVerified: nativeDeleted,
+                          sqlite: { note in
+                              guard let state = try? SQLiteNotesStore(refresh: true).noteDeletionState(noteID) else { return nil }
+                              return NativeDeleteVerification.isDeleted(markedForDeletion: state.markedForDeletion,
+                                                                        folderType: state.folderType)
+                                  ? ["deleted": "true", "markedForDeletion": "false", "folderType": "1",
+                                     "folder": note.summary.folderPath.joined(separator: " > ")]
+                                  : nil
+                          },
+                          mismatch: "The note was saved but was not verified in Recently Deleted.")
+        })
+    }
+
     fileprivate func appleMove(_ note: NSManagedObject, to folder: NSManagedObject) throws {
         let script = "on run argv\ntell application \"Notes\" to move note id (item 1 of argv) to folder id (item 2 of argv)\nend run", process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); process.arguments = ["-e", script, "--", note.objectID.uriRepresentation().absoluteString, folder.objectID.uriRepresentation().absoluteString]; let errorPipe = Pipe(); process.standardError = errorPipe; process.standardOutput = FileHandle.nullDevice; try process.run(); process.waitUntilExit(); guard process.terminationStatus == 0 else { throw NotesError("native_sync_failed", String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)) }
     }
     public func restore(_ ref: String, folder destination: String?, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        return try performWrite { context in
         let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared, allowTrash: true); try refreshIfStale(note, protectsBody: false)
         let target: NSManagedObject
         if let destination { target = try folder(destination, in: context) }
         else { guard let original = ["folderBeforeDeletion", "originalFolder", "previousFolder"].compactMap({ value(note, $0) as? NSManagedObject }).first else { throw NotesError("restore_folder_required", "NotesShared exposes no original folder for this note. Pass --folder.") }; target = original }
         try guardWritableFolder(target, allowShared: allowShared)
+        if value(note, "markedForDeletion") as? Bool == true {
+            try NCNotesRuntime.unmarkForDeletion(note)
+            try NCNotesRuntime.save(context)
+            operation?.committed = true
+            operation?.noteID = id(note)
+        }
         try appleMove(note, to: target); operation?.committed = true; operation?.noteID = id(note)
         context.refreshAllObjects(); let restored = try self.note(id(note), in: context)
         guard let restoredFolder = value(restored, "folder") as? NSManagedObject else {
@@ -1597,11 +3629,19 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func setFolderSort(_ ref: String, order: NativeFolderSortOrder, direction: NativeFolderSortDirection) throws -> NativeWriteResult {
+        try setFolderSort(ref, order: order, direction: direction, expectedOrder: nil, expectedDirection: nil)
+    }
+
+    public func setFolderSort(_ ref: String, order: NativeFolderSortOrder, direction: NativeFolderSortDirection,
+                              expectedOrder: NativeFolderSortOrder?, expectedDirection: NativeFolderSortDirection?) throws -> NativeWriteResult {
         try performWrite { context in
             let folder = try folder(ref, in: context), folderID = id(folder)
             guard !((order == .title) != (direction == .ascending || direction == .descending)) else {
                 throw NotesError("invalid_folder_sort", "Use ascending or descending for title, and newest or oldest for date sorts.")
             }
+            let current = try folderSortSetting(folder)
+            try requireUndoState(current.order, expected: expectedOrder, label: "Folder sort order")
+            try requireUndoState(current.direction, expected: expectedDirection, label: "Folder sort direction")
             do {
                 try require(["setCustomNoteSortType:", "customNoteSortType", "supportsCustomNoteSortType", "updateChangeCountWithReason:"], of: folder)
                 guard value(folder, "supportsCustomNoteSortType") as? Bool == true else { throw NotesError("folder_sort_unsupported", "This folder does not support a custom note sort.") }
@@ -1617,6 +3657,43 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func setFolderDateGrouping(_ ref: String, grouped: Bool, allowShared: Bool) throws -> NativeWriteResult {
+        try setFolderDateGrouping(ref, type: grouped ? 2 : 1, expectedCurrentType: nil, allowShared: allowShared)
+    }
+
+    public func setFolderDateGrouping(_ ref: String, type: Int, allowShared: Bool) throws -> NativeWriteResult {
+        try setFolderDateGrouping(ref, type: type, expectedCurrentType: nil, allowShared: allowShared)
+    }
+
+    public func setFolderDateGrouping(_ ref: String, type: Int, expectedCurrentType: Int?, allowShared: Bool) throws -> NativeWriteResult {
+        guard (0...2).contains(type) else {
+            throw NotesError("invalid_date_grouping", "Folder date grouping must be inherited (0), off (1), or on (2).")
+        }
+        return try performWrite { context in
+            let folder = try folder(ref, in: context), folderID = id(folder)
+            try guardWritableFolder(folder, allowShared: allowShared)
+            let currentType = try SQLiteNotesStore(refresh: true).folderDateHeadersType(folderID)
+            try requireUndoState(currentType, expected: expectedCurrentType, label: "Folder date grouping")
+            do {
+                try NCNotesRuntime.applyDateHeadersType(type, to: folder)
+                try NCNotesRuntime.save(context)
+                operation?.committed = true
+                operation?.folderID = folderID
+                context.refreshAllObjects()
+            } catch { context.rollback(); throw (error as? NotesError) ?? nativeError(error) }
+            let setting = try folderSortSetting(folder)
+            let grouped = type == 2
+            return globalResult(native: ["folderID": folderID, "grouped": String(setting.groupsByDate),
+                                         "dateHeadersType": String(type)],
+                                nativeVerified: type == 0 || setting.groupsByDate == grouped, folderID: folderID,
+                                sqlite: {
+                let stored = try SQLiteNotesStore(refresh: true).folderDateHeadersType(folderID)
+                return stored == type ? ["folderID": folderID, "dateHeadersType": String(stored)] : nil
+            }, message: type == 0 ? "Restored inherited date grouping for the folder."
+                : grouped ? "Grouped the folder by date." : "Turned off date grouping for the folder.")
+        }
+    }
+
     public func defaultAccountIdentifier() throws -> String {
         try performRead { _ in
             do { return try NCNotesRuntime.defaultAccountIdentifier() }
@@ -1625,13 +3702,191 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func setDefaultAccount(_ identifier: String) throws -> NativeWriteResult {
+        try setDefaultAccount(identifier, expectedCurrent: nil)
+    }
+
+    public func setDefaultAccount(_ identifier: String, expectedCurrent: String?) throws -> NativeWriteResult {
         try performWrite { _ in
-            do { try NCNotesRuntime.setDefaultAccountIdentifier(identifier); operation?.committed = true }
+            do {
+                let current = try NCNotesRuntime.defaultAccountIdentifier()
+                try requireUndoIdentifier(current, expected: expectedCurrent, label: "Default Notes account")
+                try NCNotesRuntime.setDefaultAccountIdentifier(identifier); operation?.committed = true
+            }
+            catch let error as NotesError { throw error }
             catch { throw nativeError(error) }
             let readback: String
             do { readback = try NCNotesRuntime.defaultAccountIdentifier() }
             catch { throw nativeError(error) }
             return globalResult(native: ["accountID": readback], nativeVerified: readback.caseInsensitiveCompare(identifier) == .orderedSame)
+        }
+    }
+
+    public func defaultParagraphStyle() throws -> NativeDefaultParagraphStyle {
+        try performRead { _ in
+            do {
+                let value = try NCNotesRuntime.noteDefaultNamedStyle().intValue
+                guard let style = NativeDefaultParagraphStyle(value: value) else {
+                    throw NotesError("unsupported_default_style", "Notes returned unknown default paragraph style \(value).")
+                }
+                return style
+            } catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+        }
+    }
+
+    public func setDefaultParagraphStyle(_ style: NativeDefaultParagraphStyle) throws -> NativeWriteResult {
+        try setDefaultParagraphStyle(style, expectedCurrent: nil)
+    }
+
+    public func setDefaultParagraphStyle(_ style: NativeDefaultParagraphStyle,
+                                         expectedCurrent: NativeDefaultParagraphStyle?) throws -> NativeWriteResult {
+        try performWrite { _ in
+            do {
+                let currentValue = try NCNotesRuntime.noteDefaultNamedStyle().intValue
+                guard let current = NativeDefaultParagraphStyle(value: currentValue) else {
+                    throw NotesError("unsupported_default_style", "Notes returned unknown default paragraph style \(currentValue).")
+                }
+                try requireUndoState(current, expected: expectedCurrent, label: "Default paragraph style")
+                try NCNotesRuntime.setNoteDefaultNamedStyle(UInt(style.value))
+                operation?.committed = true
+            } catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+            let readback: NativeDefaultParagraphStyle
+            do {
+                let value = try NCNotesRuntime.noteDefaultNamedStyle().intValue
+                guard let decoded = NativeDefaultParagraphStyle(value: value) else {
+                    throw NotesError("unsupported_default_style", "Notes returned unknown default paragraph style \(value).")
+                }
+                readback = decoded
+            } catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+            return globalResult(native: ["style": readback.rawValue, "value": String(readback.value)],
+                                nativeVerified: readback == style)
+        }
+    }
+
+    private static let noteTextSizes = [10, 12, 14, 18, 24]
+
+    public func notesSettings() throws -> NativeNotesSettings {
+        try performRead { _ in
+            do {
+                let sortValue = try NCNotesRuntime.currentNoteListSortType().intValue
+                guard let sort = NativeGlobalNoteSort(value: sortValue) else {
+                    throw NotesError("unsupported_global_sort", "Notes returned unknown global note sort \(sortValue).")
+                }
+                let dateHeaders = try NCNotesRuntime.defaultDateHeadersType().intValue
+                guard [1, 2].contains(dateHeaders) else {
+                    throw NotesError("unsupported_date_grouping", "Notes returned unknown global date grouping \(dateHeaders).")
+                }
+                let zoom = try NCNotesRuntime.globalZoomFactorIndex().intValue
+                guard Self.noteTextSizes.indices.contains(zoom) else {
+                    throw NotesError("unsupported_text_size", "Notes returned unknown default text size index \(zoom).")
+                }
+                return NativeNotesSettings(sort: sort, groupsByDate: dateHeaders == 2,
+                                           defaultTextSize: Self.noteTextSizes[zoom],
+                                           resumesLastQuickNote: try NCNotesRuntime.shouldResumeLastQuickNote().boolValue,
+                                           autoConvertsToTags: try NCNotesRuntime.shouldAutoConvertToTag().boolValue)
+            } catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+        }
+    }
+
+    public func setGlobalNoteSort(_ sort: NativeGlobalNoteSort) throws -> NativeWriteResult {
+        try setGlobalNoteSort(sort, expectedCurrent: nil)
+    }
+
+    public func setGlobalNoteSort(_ sort: NativeGlobalNoteSort, expectedCurrent: NativeGlobalNoteSort?) throws -> NativeWriteResult {
+        try performWrite { _ in
+            do {
+                let raw = try NCNotesRuntime.currentNoteListSortType().intValue
+                guard let current = NativeGlobalNoteSort(value: raw) else {
+                    throw NotesError("unsupported_global_sort", "Notes returned unknown global note sort \(raw).")
+                }
+                try requireUndoState(current, expected: expectedCurrent, label: "Global note sort")
+                try NCNotesRuntime.setCurrentNoteListSortType(sort.value); operation?.committed = true
+            }
+            catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+            let readback = try notesSettings().sort
+            return globalResult(native: ["sort": readback.rawValue], nativeVerified: readback == sort)
+        }
+    }
+
+    public func setGlobalDateGrouping(_ enabled: Bool) throws -> NativeWriteResult {
+        try setGlobalDateGrouping(enabled, expectedCurrent: nil)
+    }
+
+    public func setGlobalDateGrouping(_ enabled: Bool, expectedCurrent: Bool?) throws -> NativeWriteResult {
+        try performWrite { _ in
+            do {
+                let current = try NCNotesRuntime.defaultDateHeadersType().intValue == 2
+                try requireUndoState(current, expected: expectedCurrent, label: "Global date grouping")
+                try NCNotesRuntime.setDefaultDateHeadersType(enabled ? 2 : 1); operation?.committed = true
+            }
+            catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+            let readback = try notesSettings().groupsByDate
+            return globalResult(native: ["enabled": String(readback)], nativeVerified: readback == enabled)
+        }
+    }
+
+    public func setDefaultTextSize(_ points: Int) throws -> NativeWriteResult {
+        try setDefaultTextSize(points, expectedCurrent: nil)
+    }
+
+    public func setDefaultTextSize(_ points: Int, expectedCurrent: Int?) throws -> NativeWriteResult {
+        guard let index = Self.noteTextSizes.firstIndex(of: points) else {
+            throw NotesError("invalid_text_size", "Use 10, 12, 14, 18, or 24 points.")
+        }
+        return try performWrite { _ in
+            do {
+                let currentIndex = try NCNotesRuntime.globalZoomFactorIndex().intValue
+                guard Self.noteTextSizes.indices.contains(currentIndex) else {
+                    throw NotesError("unsupported_text_size", "Notes returned unknown default text size index \(currentIndex).")
+                }
+                try requireUndoState(Self.noteTextSizes[currentIndex], expected: expectedCurrent, label: "Default text size")
+                try NCNotesRuntime.setGlobalZoomFactorIndex(index); operation?.committed = true
+            }
+            catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+            let readback = try notesSettings().defaultTextSize
+            return globalResult(native: ["points": String(readback)], nativeVerified: readback == points)
+        }
+    }
+
+    public func setResumeLastQuickNote(_ enabled: Bool) throws -> NativeWriteResult {
+        try setResumeLastQuickNote(enabled, expectedCurrent: nil)
+    }
+
+    public func setResumeLastQuickNote(_ enabled: Bool, expectedCurrent: Bool?) throws -> NativeWriteResult {
+        try performWrite { _ in
+            do {
+                let current = try NCNotesRuntime.shouldResumeLastQuickNote().boolValue
+                try requireUndoState(current, expected: expectedCurrent, label: "Resume last Quick Note")
+                try NCNotesRuntime.setShouldResumeLastQuickNote(enabled); operation?.committed = true
+            }
+            catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+            let readback = try notesSettings().resumesLastQuickNote
+            return globalResult(native: ["enabled": String(readback)], nativeVerified: readback == enabled)
+        }
+    }
+
+    public func setAutoConvertToTags(_ enabled: Bool) throws -> NativeWriteResult {
+        try setAutoConvertToTags(enabled, expectedCurrent: nil)
+    }
+
+    public func setAutoConvertToTags(_ enabled: Bool, expectedCurrent: Bool?) throws -> NativeWriteResult {
+        try performWrite { _ in
+            do {
+                let current = try NCNotesRuntime.shouldAutoConvertToTag().boolValue
+                try requireUndoState(current, expected: expectedCurrent, label: "Automatic tag conversion")
+                try NCNotesRuntime.setShouldAutoConvertToTag(enabled); operation?.committed = true
+            }
+            catch let error as NotesError { throw error }
+            catch { throw nativeError(error) }
+            let readback = try notesSettings().autoConvertsToTags
+            return globalResult(native: ["enabled": String(readback)], nativeVerified: readback == enabled)
         }
     }
 
@@ -1707,12 +3962,23 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult {
+        try editSmartFolderRules(ref, queryJSON: queryJSON, expectedCount: expectedCount, expectedCurrentQuery: nil)
+    }
+
+    public func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int,
+                                     expectedCurrentQuery: String?) throws -> NativeWriteResult {
         try SmartFolderQueryGrammar.validate(queryJSON)
         return try performWriteWithFreshReadback(transaction: { context in
             let matches = try matchingSmartFolders(ref, in: context)
             guard matches.count == expectedCount else { throw NotesError("expected_count_mismatch", "Found \(matches.count) matching Smart Folders, not \(expectedCount).") }
             guard expectedCount == 1, let folder = matches.first else { throw NotesError("invalid_expected_count", "Smart Folder rule editing requires --expected-count 1.") }
             let folderID = id(folder)
+            let currentQuery = value(folder, "smartFolderQueryJSON") as? String ?? ""
+            if let expectedCurrentQuery {
+                let currentRule = try SmartFolderQueryGrammar.parse(currentQuery)
+                let expectedRule = try SmartFolderQueryGrammar.parse(expectedCurrentQuery)
+                try requireUndoState(currentRule, expected: expectedRule, label: "Smart Folder rules")
+            }
             do {
                 try NCNotesRuntime.requireSelectors(["smartFolderQueryJSON", "setSmartFolderQueryJSON:", "updateChangeCountWithReason:"], of: folder)
                 try NCNotesRuntime.setValue(queryJSON, forKey: "smartFolderQueryJSON", of: folder)
@@ -1791,12 +4057,11 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     ranges.append(found); start = NSMaxRange(found)
                 }
                 guard !ranges.isEmpty else { throw NotesError("text_not_found", "The requested text was not found.") }
-                try editor.begin(["delete", "insert"])
+                try editor.begin(["replace"])
                 for range in ranges.reversed() {
                     var attributes: [NSAttributedString.Key: Any] = [:]
                     if original.length > 0 { attributes = original.attributes(at: min(range.location, original.length - 1), effectiveRange: nil) }
-                    try editor.delete(range)
-                    try editor.insert(NSAttributedString(string: replacement, attributes: attributes), at: UInt(range.location))
+                    try editor.replace(range, with: NSAttributedString(string: replacement, attributes: attributes))
                 }
             }
             let noteID = id(note), expected = (before.document?.text as NSString?)?.replacingOccurrences(of: find, with: replacement)
@@ -1818,79 +4083,1128 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    private struct SnapshotScanRestoreResult {
+        var idMap: [String: String]
+        var parentID: String
+    }
+
+    private func recreateSnapshotScan(
+        _ scan: SnapshotScanRecreation,
+        newParentID: String,
+        note: NSManagedObject,
+        context: NSManagedObjectContext,
+        prepared: [String: FrozenAttachmentInput],
+        restoreMaterial: SnapshotRestoreMaterial?,
+        snapshotDocument: NoteDocument,
+        reservedIDs: Set<String>
+    ) throws -> SnapshotScanRestoreResult {
+        let pages = try scan.pages.map { page -> FrozenAttachmentInput in
+            guard let frozen = prepared[page.id] else {
+                throw NotesError("snapshot_material_missing", "Scan page \(page.id) has no prepared snapshot blob.")
+            }
+            return frozen
+        }
+        try Self.validateScanInputs(pages)
+        let preparation: NCPreparedScan
+        do { preparation = try NCNotesRuntime.prepareScan(imageURLs: pages.map(\.url)) }
+        catch { throw nativeError(error) }
+        defer { preparation.invalidate() }
+        do { try NCNotesRuntime.validateScanPopulation(preparation) }
+        catch { throw nativeError(error) }
+
+        let current = try body(note)
+        let markers = attachmentMarkers(current).filter {
+            $0.2 == scan.parentID || $0.2 == newParentID
+        }
+        guard markers.count <= 1 else {
+            throw NotesError("snapshot_attachment_unavailable", "Scan \(scan.parentID) has more than one current body marker.")
+        }
+        var savedOffset = 0
+        let savedMarkers = snapshotDocument.runs.compactMap { run -> Int? in
+            defer { savedOffset += run.length }
+            return run.attachment?.id == scan.parentID ? savedOffset : nil
+        }
+        guard savedMarkers.count == 1 else {
+            throw NotesError("invalid_snapshot", "Scan \(scan.parentID) does not have exactly one saved body marker.")
+        }
+        let markerLocation = markers.first?.0.location ?? savedMarkers[0]
+        guard markerLocation <= current.length else {
+            throw NotesError("undo_conflict", "The deleted scan marker's saved position no longer exists in the note body.")
+        }
+        guard !reservedIDs.contains(newParentID) else {
+            throw NotesError("snapshot_attachment_id_collision", "Notes reused an attachment identifier during scan restore.")
+        }
+        let gallery = try NCNotesRuntime.newScanGallery(in: note, identifier: newParentID)
+        guard value(gallery, "typeUTI") as? String == "com.apple.notes.gallery" else {
+            throw NotesError("snapshot_attachment_type_mismatch", "Notes created an unexpected scan container type.")
+        }
+        if markers.first?.2 != newParentID {
+            let editor = try NCBodyEditor(note: note)
+            try editor.prepare(markers.first == nil ? ["insert"] : ["replace"])
+            let marker = try NCNotesRuntime.attachmentMarker(id: newParentID, type: "com.apple.notes.gallery")
+            let replacement: NSMutableAttributedString
+            if let existing = markers.first {
+                replacement = NSMutableAttributedString(attributedString: current.attributedSubstring(from: existing.0))
+            } else {
+                let savedBody = try attributed(snapshotDocument).text
+                replacement = NSMutableAttributedString(attributedString: savedBody.attributedSubstring(
+                    from: NSRange(location: savedMarkers[0], length: 1)
+                ))
+            }
+            replacement.addAttribute(.init("NSAttachment"), value: marker,
+                                     range: NSRange(location: 0, length: replacement.length))
+            if let existing = markers.first {
+                try editor.begin(["replace"])
+                try editor.replace(existing.0, with: replacement)
+            } else {
+                try editor.begin(["insert"])
+                try editor.insert(replacement, at: UInt(markerLocation))
+            }
+            try editor.finish()
+        }
+
+        operation?.noteID = id(note)
+        operation?.attachmentID = newParentID
+        operation?.attachmentType = "com.apple.notes.gallery"
+        operation?.attachmentPosition = markerLocation
+        // Notes' gallery utility saves the context internally. The replacement marker is already in
+        // the body, so an interrupted population leaves a visible, diagnosable partial scan.
+        try validateBodiesBeforeSave([note])
+        operation?.committed = true
+        let populated: [String: Any]
+        do { populated = try NCNotesRuntime.populateScanGallery(gallery, preparation: preparation, context: context) }
+        catch { throw nativeError(error) }
+        guard let newPageIDs = populated["pageIDs"] as? [String],
+              let pageTypes = populated["pageTypes"] as? [String],
+              newPageIDs.count == scan.pages.count,
+              pageTypes.count == scan.pages.count else {
+            throw NotesError("scan_incomplete", "Notes did not recreate every saved scan page.")
+        }
+        let allNewIDs = [newParentID] + newPageIDs
+        guard Set(allNewIDs).count == allNewIDs.count,
+              Set(allNewIDs).isDisjoint(with: reservedIDs),
+              zip(pageTypes, scan.pages).allSatisfy({ $0 == $1.material.typeUTI }) else {
+            throw NotesError("snapshot_attachment_type_mismatch", "Notes recreated the scan with conflicting IDs or page types.")
+        }
+        operation?.childAttachmentIDs.append(contentsOf: newPageIDs)
+
+        if zip(scan.pages, newPageIDs).contains(where: { page, _ in
+            page.filter != 0 || page.orientation != 0 || page.crop != nil || page.markupSHA256 != nil
+        }) {
+            do { try NCNotesRuntime.validateScanEditing() }
+            catch { throw nativeError(error) }
+        }
+        for (page, newPageID) in zip(scan.pages, newPageIDs) {
+            if let savedCrop = page.crop {
+                guard let frozen = prepared[page.id],
+                      let size = Self.scanImagePixelSize(frozen.url),
+                      let crop = Self.normalizedScanCrop(savedCrop, pixelWidth: size.width, pixelHeight: size.height) else {
+                    throw NotesError("unsupported_scan_crop", "The saved crop for scan page \(page.id) cannot be mapped to its archived image.")
+                }
+                try NCNotesRuntime.setScanCrop(
+                    bottomLeftX: crop.bottomLeft.x, bottomLeftY: crop.bottomLeft.y,
+                    bottomRightX: crop.bottomRight.x, bottomRightY: crop.bottomRight.y,
+                    topLeftX: crop.topLeft.x, topLeftY: crop.topLeft.y,
+                    topRightX: crop.topRight.x, topRightY: crop.topRight.y,
+                    pageIdentifier: newPageID, gallery: gallery
+                )
+            }
+            if page.filter != 0 {
+                try NCNotesRuntime.applyScanFilter(Int16(page.filter), pageIdentifier: newPageID, gallery: gallery)
+            }
+            if page.orientation != 0 {
+                try NCNotesRuntime.setScanOrientation(page.orientation, pageIdentifier: newPageID, gallery: gallery)
+            }
+            if let hash = page.markupSHA256, let byteCount = page.markupByteCount {
+                guard let restoreMaterial else {
+                    throw NotesError("snapshot_material_missing", "The scan markup package is unavailable.")
+                }
+                let markup = try restoreMaterial.blobs.verifiedData(sha256: hash, byteCount: byteCount)
+                guard markup.count == byteCount else {
+                    throw NotesError("snapshot_integrity_failed", "Scan markup for page \(page.id) failed its integrity check.")
+                }
+                try NCNotesRuntime.setScanMarkupData(markup, pageIdentifier: newPageID, gallery: gallery)
+            }
+            if page.hasEmbeddedMarkup {
+                guard let restoredPage = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND parentAttachment == %@", newPageID, gallery),
+                    in: context,
+                    limit: 1
+                ).first else {
+                    throw NotesError("scan_page_not_found", "The restored scan page disappeared before embedded markup state was applied.")
+                }
+                try NCNotesRuntime.setValue(true, forKey: "hasMarkupData", of: restoredPage)
+                try NCNotesRuntime.updateChangeCount(of: restoredPage, reason: "Restored embedded scan markup")
+                try save(context, notes: [note])
+            }
+            guard !context.hasChanges else {
+                throw NotesError("scan_edit_not_committed", "Notes left restored scan metadata unsaved.")
+            }
+        }
+        context.refreshAllObjects()
+        var idMap = [scan.parentID: newParentID]
+        for (page, newPageID) in zip(scan.pages, newPageIDs) { idMap[page.id] = newPageID }
+        return SnapshotScanRestoreResult(idMap: idMap, parentID: newParentID)
+    }
+
+    private func paperAccount(_ note: NSManagedObject) throws -> (object: NSManagedObject, identifier: String) {
+        guard let folder = value(note, "folder") as? NSManagedObject,
+              let account = value(folder, "account") as? NSManagedObject,
+              let identifier = value(account, "identifier") as? String,
+              !identifier.isEmpty else {
+            throw NotesError("account_not_found", "The note has no account for Paper file management.")
+        }
+        return (account, identifier)
+    }
+
+    private static func canonicalPaperURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private func paperCleanupScope(_ note: NSManagedObject) throws -> PaperCleanupScope {
+        let account = try paperAccount(note)
+        let root = Self.canonicalPaperURL(try NCNotesRuntime.paperBundlesDirectoryURL(account: account.object))
+        let names = Set(((try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? []).map { $0.lastPathComponent.lowercased() })
+        return PaperCleanupScope(accountID: account.identifier, rootURL: root, bundleNamesBefore: names)
+    }
+
+    private func paperCleanupCandidate(_ identifier: String, note: NSManagedObject,
+                                       scope suppliedScope: PaperCleanupScope? = nil) throws -> PaperCleanupCandidate {
+        guard UUID(uuidString: identifier) != nil else {
+            throw NotesError("invalid_paper_identifier", "The generated Paper identifier is not a UUID.")
+        }
+        let account = try paperAccount(note)
+        let scope = try suppliedScope ?? paperCleanupScope(note)
+        guard account.identifier.caseInsensitiveCompare(scope.accountID) == .orderedSame else {
+            throw NotesError("paper_cleanup_scope_mismatch", "The Paper account changed during restore.")
+        }
+        let currentRoot = Self.canonicalPaperURL(try NCNotesRuntime.paperBundlesDirectoryURL(account: account.object))
+        guard currentRoot == scope.rootURL else {
+            throw NotesError("paper_cleanup_scope_mismatch", "The Paper bundle directory changed during restore.")
+        }
+        let fileURLs = try NCNotesRuntime.paperFileURLs(identifier: identifier, account: account.object)
+            .map(Self.canonicalPaperURL)
+        guard let bundleURL = fileURLs.first,
+              bundleURL.deletingLastPathComponent() == currentRoot,
+              bundleURL.lastPathComponent.caseInsensitiveCompare(identifier + ".bundle") == .orderedSame else {
+            throw NotesError("unsafe_paper_cleanup_path", "Notes returned an unsafe Paper bundle path.")
+        }
+        guard scope.bundleNamesBefore.contains(bundleURL.lastPathComponent.lowercased()) == false else {
+            throw NotesError("paper_identifier_collision", "The generated Paper bundle path already existed before restore.")
+        }
+        return PaperCleanupCandidate(
+            identifier: identifier,
+            accountID: account.identifier,
+            rootURL: currentRoot,
+            fileURLs: fileURLs
+        )
+    }
+
+    private func cleanFailedPaperRestores(_ candidates: [PaperCleanupCandidate],
+                                          context: NSManagedObjectContext) -> String {
+        guard !candidates.isEmpty else { return "" }
+        context.reset()
+        var failures: [String] = []
+        var cleaned: [String] = []
+        for candidate in candidates {
+            do {
+                guard UUID(uuidString: candidate.identifier) != nil else {
+                    throw NotesError("invalid_paper_identifier", "The cleanup identifier is not a UUID.")
+                }
+                let rows = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@", candidate.identifier),
+                    in: context,
+                    limit: 2
+                )
+                guard rows.isEmpty else {
+                    throw NotesError("paper_cleanup_refused", "A live attachment still uses the generated identifier.")
+                }
+                guard let account = try fetch(
+                    "ICAccount",
+                    predicate: NSPredicate(format: "identifier ==[c] %@", candidate.accountID),
+                    in: context,
+                    limit: 1
+                ).first else {
+                    throw NotesError("account_not_found", "The Paper account disappeared before cleanup.")
+                }
+                let root = Self.canonicalPaperURL(try NCNotesRuntime.paperBundlesDirectoryURL(account: account))
+                guard root == candidate.rootURL else {
+                    throw NotesError("paper_cleanup_scope_mismatch", "The Paper bundle directory changed before cleanup.")
+                }
+                let currentURLs = try NCNotesRuntime.paperFileURLs(identifier: candidate.identifier, account: account)
+                    .map(Self.canonicalPaperURL)
+                guard Set(currentURLs.map(\.path)) == Set(candidate.fileURLs.map(\.path)) else {
+                    let before = candidate.fileURLs.map(\.path).sorted().joined(separator: ", ")
+                    let after = currentURLs.map(\.path).sorted().joined(separator: ", ")
+                    throw NotesError("unsafe_paper_cleanup_path", "Notes returned different Paper cleanup paths. before=[\(before)] after=[\(after)]")
+                }
+                guard let bundleURL = currentURLs.first,
+                      bundleURL.deletingLastPathComponent() == root,
+                      bundleURL.lastPathComponent.caseInsensitiveCompare(candidate.identifier + ".bundle") == .orderedSame else {
+                    throw NotesError("unsafe_paper_cleanup_path", "Notes returned an unsafe Paper bundle path before cleanup.")
+                }
+                _ = try NCNotesRuntime.purgePaperFiles(identifier: candidate.identifier, account: account)
+                let remaining = currentURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+                guard remaining.isEmpty else {
+                    throw NotesError(
+                        "paper_cleanup_incomplete",
+                        "Paper files remain after purge: \(remaining.map(\.lastPathComponent).joined(separator: ", "))."
+                    )
+                }
+                cleaned.append(candidate.identifier)
+            } catch {
+                failures.append("\(candidate.identifier): \(String(describing: error))")
+            }
+        }
+        if failures.isEmpty {
+            return "Paper cleanup verified for \(cleaned.joined(separator: ", "))."
+        }
+        return "Paper cleanup was not fully verified. \(failures.joined(separator: " "))"
+    }
+
     public func restoreSnapshot(_ ref: String, snapshot: Note, allowShared: Bool) throws -> NativeWriteResult {
+        try restoreSnapshot(ref, snapshot: snapshot, material: nil, expectedRevision: nil,
+                            expectedModified: nil, allowShared: allowShared)
+    }
+
+    public func restoreSnapshot(_ ref: String, snapshot: Note,
+                                material: SnapshotRestoreMaterial?, expectedRevision: String? = nil,
+                                expectedModified: Date? = nil,
+                                allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
-            guard let document = snapshot.document else {
+            guard snapshot.document != nil else {
                 throw NotesError("snapshot_locked", "The snapshot has no readable note body.")
             }
             let note = try note(ref, in: context)
             guard snapshot.summary.id.uuid.caseInsensitiveCompare(id(note)) == .orderedSame else {
                 throw NotesError("snapshot_note_mismatch", "The snapshot belongs to a different note.")
             }
-            try guardWritable(note, allowShared: allowShared)
+            try guardWritable(note, allowShared: allowShared, allowTrash: true)
             try refreshIfStale(note)
-            let expectedMarkers = Self.topLevelMarkerReferences(document)
-            let expectedAttachments = try Self.attachmentReferences(snapshot)
+            try requireRestoreState(id(note), expectedRevision: expectedRevision, expectedModified: expectedModified)
+            let currentNestedMarkerIDs = Set(
+                (try? SQLiteNotesStore(refresh: true).note(id(note)).document.map(Self.nestedMarkerReferences)) ?? []
+            )
+            let references = try Self.attachmentReferences(snapshot)
+            var existing: [SnapshotRestoreExistingAttachment] = []
             var attachmentObjects: [String: NSManagedObject] = [:]
-            var unresolved = expectedAttachments
-            while !unresolved.isEmpty {
-                var next: [SnapshotAttachmentReference] = [], madeProgress = false
-                for reference in unresolved {
-                    if let parentID = reference.parentID, attachmentObjects[parentID] == nil {
-                        next.append(reference)
-                        continue
+            let currentReadback = try? SQLiteNotesStore(refresh: true).note(id(note))
+            func readbackAttachment(_ identifier: String, in attachments: [Attachment]) -> Attachment? {
+                for attachment in attachments {
+                    if attachment.id == identifier { return attachment }
+                    if let found = readbackAttachment(identifier, in: attachment.childAttachments ?? []) {
+                        return found
                     }
-                    let predicate: NSPredicate
-                    if let parentID = reference.parentID, let parent = attachmentObjects[parentID] {
-                        predicate = NSPredicate(format: "identifier == %@ AND parentAttachment == %@", reference.id, parent)
+                }
+                return nil
+            }
+            func dataEvidence(_ data: Data?) -> SnapshotRestoreDigestEvidence {
+                guard let data, !data.isEmpty else { return .absent }
+                return .present(SnapshotRestoreDigest(
+                    sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+                    byteCount: data.count
+                ))
+            }
+            func fileEvidence(_ path: String?) -> SnapshotRestoreDigestEvidence {
+                guard let path, !path.isEmpty else { return .absent }
+                let url = URL(fileURLWithPath: path)
+                guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                      values.isRegularFile == true,
+                      let byteCount = values.fileSize,
+                      let sha256 = try? FrozenAttachmentInput.hash(file: url) else { return .notCollected }
+                return .present(SnapshotRestoreDigest(sha256: sha256, byteCount: byteCount))
+            }
+            let archivedIDs = Set(material?.archive.attachments.map(\.id) ?? [])
+#if DEBUG
+            let forcedAbsentIDs = Set((ProcessInfo.processInfo.environment["NOTESCLI_TEST_TREAT_ABSENT"] ?? "")
+                .split(separator: ",").map(String.init))
+#else
+            let forcedAbsentIDs: Set<String> = []
+#endif
+            for reference in references {
+                let predicate = NSPredicate(format: "identifier == %@", reference.id)
+                let fetched = try fetch("ICInlineAttachment", predicate: predicate, in: context) +
+                    fetch("ICAttachment", predicate: predicate, in: context)
+                var seen: Set<NSManagedObjectID> = []
+                for attachment in fetched where seen.insert(attachment.objectID).inserted {
+                    if forcedAbsentIDs.contains(reference.id) { continue }
+                    let parent = value(attachment, "parentAttachment") as? NSManagedObject
+                    let parentID = parent.flatMap { value($0, "identifier") as? String }
+                    let belongs = NativeAttachmentOwnership.belongs(attachment, to: note)
+                    let type = value(attachment, "typeUTI") as? String ?? ""
+                    let readback = currentReadback.flatMap {
+                        readbackAttachment(reference.id, in: $0.attachments)
+                    }
+                    let evidence: SnapshotRestoreExistingEvidence
+                    if archivedIDs.contains(reference.id) {
+                        var orderedChildIDs = readback?.childAttachmentIDs
+                        if type == "com.apple.notes.gallery" {
+                            orderedChildIDs = try? NCNotesRuntime.galleryPageIdentifiers(in: attachment)
+                        }
+                        evidence = SnapshotRestoreExistingEvidence(
+                            blob: fileEvidence(readback?.filePath ?? readback?.fallbackRasterPath),
+                            paperBundle: .notCollected,
+                            synapse: dataEvidence(value(attachment, "synapseData") as? Data),
+                            linkMetadata: dataEvidence(value(attachment, "linkPresentationArchivedMetadata") as? Data),
+                            scanMarkup: dataEvidence(value(attachment, "markupModelData") as? Data),
+                            orderedChildIDs: orderedChildIDs
+                        )
                     } else {
-                        predicate = NSPredicate(format: "identifier == %@ AND note == %@", reference.id, note)
+                        evidence = SnapshotRestoreExistingEvidence()
                     }
-                    let rows = try fetch("ICInlineAttachment", predicate: predicate, in: context) +
-                        fetch("ICAttachment", predicate: predicate, in: context)
-                    guard let attachment = rows.first(where: { NativeAttachmentOwnership.belongs($0, to: note) }),
-                          value(attachment, "typeUTI") as? String == reference.typeUTI else {
-                        throw NotesError("snapshot_attachment_unavailable", "Attachment \(reference.id) is not available on the target note with its saved type and parent.")
+                    existing.append(SnapshotRestoreExistingAttachment(
+                        id: reference.id,
+                        typeUTI: type,
+                        parentID: parentID,
+                        belongsToTargetNote: belongs,
+                        isMarkedForDeletion: value(attachment, "markedForDeletion") as? Bool == true,
+                        evidence: evidence
+                    ))
+                    if belongs, type == reference.typeUTI,
+                       parentID == reference.parentID || parentID == reference.alternateParentID {
+                        attachmentObjects[reference.id] = attachment
                     }
-                    attachmentObjects[reference.id] = attachment
-                    madeProgress = true
                 }
-                guard madeProgress || next.isEmpty else {
-                    throw NotesError("invalid_snapshot", "The snapshot attachment parent graph is incomplete.")
-                }
-                unresolved = next
+            }
+            let plan = SnapshotRestorePlanner.plan(
+                snapshot: snapshot,
+                verifiedArchive: material?.archive,
+                existing: existing
+            )
+            guard plan.canRestore else { throw Self.restorePlanError(plan) }
+            try preflightSnapshotDocument(snapshot.document!)
+            var selfParagraphLinkIDs: Set<String> = []
+            for planned in plan.attachments {
+                guard case .recreateInline(let request) = planned.action,
+                      case .noteLink(let targetID, let paragraphID?, _, _) = request else { continue }
+                let target = try self.note(targetID, in: context)
+                guard id(target) == id(note) else { continue }
+                _ = try paragraphLinkTarget(paragraphID, in: snapshot.document!)
+                selfParagraphLinkIDs.insert(planned.id)
+            }
+            let prepared = try Self.prepareSnapshotFiles(plan, material: material)
+            var restoredSnapshot = snapshot
+            var attachmentIDMap: [String: String] = [:]
+            var recreatedFileCount = 0
+            var recreatedFileIDs: Set<String> = []
+            var recreatedFileMarkup: [String: (sha256: String, embedded: Bool)] = [:]
+            var recreatedRichLinks: [String: Attachment] = [:]
+            var recreatedMaps: [String: Attachment] = [:]
+            var recreatedLinkPayloads: [String: (synapseHash: String?, synapseBytes: Int?,
+                                                   metadataHash: String?, metadataBytes: Int?)] = [:]
+            var recreatedPaperDocuments: [String: (oldID: String, subtype: String,
+                                                     material: SnapshotAttachmentMaterial)] = [:]
+            var recreatedPaperBundleDrawings: [String: SnapshotAttachmentMaterial] = [:]
+            var recreatedDrawings: [String: [[PaperStrokeRecord]]] = [:]
+            var recreatedLegacyDrawings: [String: [LegacyDrawingStrokeRecord]] = [:]
+            var recreatedInline: [String: (request: SnapshotInlineRecreation, parentID: String?)] = [:]
+            var recreatedScans: [String: SnapshotScanRecreation] = [:]
+            var recreatedRecordings: [String: SnapshotRecordingRecreation] = [:]
+            var pendingScans: [(scan: SnapshotScanRecreation, newParentID: String)] = []
+            var paperCleanupCandidates: [PaperCleanupCandidate] = []
+            var reservedScanIDs = Set(references.map(\.id))
+            for planned in plan.attachments {
+                guard case .recreateScan(let scan) = planned.action else { continue }
+                var newParentID = UUID().uuidString.lowercased()
+                while reservedScanIDs.contains(newParentID) { newParentID = UUID().uuidString.lowercased() }
+                reservedScanIDs.insert(newParentID)
+                attachmentIDMap[scan.parentID] = newParentID
+                pendingScans.append((scan, newParentID))
             }
             do {
-                for attachment in attachmentObjects.values where value(attachment, "markedForDeletion") as? Bool == true {
-                    try NCNotesRuntime.unmarkForDeletion(attachment)
+                for planned in plan.attachments {
+                    switch planned.action {
+                    case .keep:
+                        guard attachmentObjects[planned.id] != nil else {
+                            throw NotesError("snapshot_attachment_unavailable", "Attachment \(planned.id) disappeared before restore.")
+                        }
+                    case .unmark:
+                        guard let attachment = attachmentObjects[planned.id] else {
+                            throw NotesError("snapshot_attachment_unavailable", "Attachment \(planned.id) disappeared before restore.")
+                        }
+                        try NCNotesRuntime.unmarkForDeletion(attachment)
+                        if planned.typeUTI.lowercased().contains("hashtag") {
+                            try NCNotesRuntime.reviveTagAttachment(attachment)
+                        }
+                    case .recreateFile, .recreateScan, .recreateRecording, .recreatedByParent, .recreateTable,
+                         .recreateRichLink, .recreateMap, .recreatePaperDocument, .recreateDrawing, .recreateInline, .refuse:
+                        break
+                    }
                 }
-                let built = try attributed(document)
                 let editor = try NCBodyEditor(note: note)
-                let oldMarkers = attachmentMarkers(editor.original)
-                try editor.begin(["delete", "insert"])
-                try editor.delete(NSRange(location: 0, length: editor.original.length))
-                try editor.insert(built.text, at: 0)
-                try editor.finish()
-
-                if let tables = document.tableCells {
+                try editor.prepare(["replace"])
+                for planned in plan.attachments {
+                    switch planned.action {
+                    case .recreateFile(let fileMaterial):
+                        guard let frozen = prepared[planned.id] else {
+                            throw NotesError("snapshot_material_missing", "Attachment \(planned.id) has no prepared snapshot blob.")
+                        }
+                        var kind: NSString?
+                        let newID: String
+                        if SnapshotRestoreFilename.requiresExplicitType(fileMaterial) {
+                            guard let filename = SnapshotRestoreFilename.forExplicitType(fileMaterial) else {
+                                throw NotesError("snapshot_attachment_filename_unsupported",
+                                                 "Attachment \(planned.id) has invalid saved type metadata.")
+                            }
+                            newID = try NCNotesRuntime.addFile(
+                                frozen.url,
+                                to: note,
+                                title: fileMaterial.title ?? fileMaterial.filename ?? frozen.sourceName,
+                                typeUTI: planned.typeUTI,
+                                filename: filename,
+                                resultingType: &kind
+                            )
+                        } else {
+                            newID = try NCNotesRuntime.addFile(
+                                frozen.url,
+                                to: note,
+                                title: fileMaterial.title ?? fileMaterial.filename ?? frozen.sourceName,
+                                type: &kind
+                            )
+                        }
+                        let createdType = kind as String? ?? ""
+                        guard !newID.isEmpty, createdType == planned.typeUTI else {
+                            throw NotesError("snapshot_attachment_type_mismatch", "Notes recreated attachment \(planned.id) as \(createdType), not \(planned.typeUTI).")
+                        }
+                        guard attachmentIDMap.values.contains(newID) == false,
+                              references.contains(where: { $0.id == newID }) == false else {
+                            throw NotesError("snapshot_attachment_id_collision", "Notes reused attachment identifier \(newID) during restore.")
+                        }
+                        guard let created = try fetch(
+                            "ICAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                            in: context,
+                            limit: 1
+                        ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "Notes created no attachment row for restored attachment \(planned.id).")
+                        }
+                        if let markupHash = fileMaterial.scanMarkupSHA256,
+                           let markupBytes = fileMaterial.scanMarkupByteCount {
+                            let markup = try Self.verifiedMarkupPayload(
+                                hash: markupHash,
+                                byteCount: markupBytes,
+                                restoreMaterial: material
+                            )
+                            let embedded = snapshot.attachments.first(where: { $0.id == planned.id })?
+                                .hasEmbeddedMarkup == true
+                            try NCNotesRuntime.setValue(markup, forKey: "markupModelData", of: created)
+                            try NCNotesRuntime.setValue(embedded, forKey: "hasMarkupData", of: created)
+                            try NCNotesRuntime.updateChangeCount(of: created, reason: "Restored editable markup")
+                            recreatedFileMarkup[newID] = (markupHash, embedded)
+                        }
+                        attachmentIDMap[planned.id] = newID
+                        attachmentObjects[planned.id] = created
+                        recreatedFileCount += 1
+                        recreatedFileIDs.insert(planned.id)
+                        operation?.childAttachmentIDs.append(newID)
+                    case .recreateRecording(let recording):
+                        guard recording.fragments.allSatisfy({ prepared[$0.id] != nil }) else {
+                            throw NotesError("snapshot_material_missing", "Recording \(planned.id) has an incomplete prepared audio graph.")
+                        }
+                        let measuredDuration = try recording.fragments.reduce(0.0) { total, fragment in
+                            guard let frozen = prepared[fragment.id] else {
+                                throw NotesError("snapshot_material_missing", "Recording fragment \(fragment.id) is unavailable.")
+                            }
+                            return total + (try Self.audioDuration(frozen.url))
+                        }
+                        guard abs(measuredDuration - recording.duration) <= max(0.25, recording.duration * 0.05) else {
+                            throw NotesError("snapshot_recording_duration_mismatch",
+                                             "The archived recording fragments do not match the saved total duration.")
+                        }
+                        let canUseNativeGraphConstructor = recording.fragments.allSatisfy {
+                            $0.createdDate != nil && $0.transcriptVersion != nil
+                        }
+                        let newParentID: String
+                        let newChildIDs: [String]
+                        let created: NSManagedObject
+                        if canUseNativeGraphConstructor {
+                            let rows: [[String: Any]] = try recording.fragments.map { fragment in
+                                guard let frozen = prepared[fragment.id],
+                                      let createdDate = fragment.createdDate,
+                                      let transcriptVersion = fragment.transcriptVersion else {
+                                    throw NotesError("snapshot_material_missing", "Recording fragment \(fragment.id) is incomplete.")
+                                }
+                                return [
+                                    "url": frozen.url,
+                                    "typeUTI": fragment.material.typeUTI,
+                                    "filename": fragment.material.filename ?? frozen.sourceName,
+                                    "duration": fragment.duration,
+                                    "createdDate": createdDate,
+                                    "transcriptVersion": transcriptVersion,
+                                    "segments": transcriptRows(fragment.transcript),
+                                ]
+                            }
+                            let result = try NCNotesRuntime.createRecording(
+                                in: note,
+                                fragments: rows,
+                                title: snapshot.attachments.first(where: { $0.id == planned.id })?.title,
+                                duration: recording.duration
+                            )
+                            guard let parent = result["parentID"] as? String,
+                                  let children = result["childIDs"] as? [String],
+                                  let createdType = result["typeUTI"] as? String,
+                                  !parent.isEmpty, children.count == recording.fragments.count,
+                                  Set(children).count == children.count,
+                                  createdType == planned.typeUTI else {
+                                throw NotesError("snapshot_attachment_type_mismatch", "Notes could not recreate recording \(planned.id) with its saved graph.")
+                            }
+                            newParentID = parent
+                            newChildIDs = children
+                            guard let object = try fetch(
+                                "ICAttachment",
+                                predicate: NSPredicate(format: "identifier == %@ AND note == %@", parent, note),
+                                in: context,
+                                limit: 1
+                            ).first else {
+                                throw NotesError("snapshot_attachment_unavailable", "Notes created no parent row for restored recording \(planned.id).")
+                            }
+                            created = object
+                        } else {
+                            guard recording.fragments.count == 1,
+                                  let fragment = recording.fragments.first,
+                                  let frozen = prepared[fragment.id] else {
+                                throw NotesError("snapshot_recording_unsupported", "A recording without complete fragment metadata must contain exactly one fragment.")
+                            }
+                            var kind: NSString?
+                            let parent = try NCNotesRuntime.addFile(
+                                frozen.url,
+                                to: note,
+                                title: snapshot.attachments.first(where: { $0.id == planned.id })?.title ?? frozen.sourceName,
+                                type: &kind
+                            )
+                            let createdType = kind as String? ?? ""
+                            guard !parent.isEmpty, createdType == planned.typeUTI else {
+                                throw NotesError("snapshot_attachment_type_mismatch", "Notes could not recreate recording \(planned.id) with its saved type.")
+                            }
+                            guard let object = try fetch(
+                                "ICAttachment",
+                                predicate: NSPredicate(format: "identifier == %@ AND note == %@", parent, note),
+                                in: context,
+                                limit: 1
+                            ).first else {
+                                throw NotesError("snapshot_attachment_unavailable", "Notes created no parent row for restored recording \(planned.id).")
+                            }
+                            let children = try NCNotesRuntime.transformAudioAttachment(object, duration: recording.duration)
+                            guard children.count == 1 else {
+                                throw NotesError("snapshot_attachment_id_collision", "Notes did not create one fragment for restored recording \(planned.id).")
+                            }
+                            if !fragment.transcript.isEmpty {
+                                _ = try NCNotesRuntime.appendTranscriptSegments(
+                                    transcriptRows(fragment.transcript),
+                                    toAudioAttachment: object
+                                )
+                            }
+                            newParentID = parent
+                            newChildIDs = children
+                            created = object
+                        }
+                        let newGraphIDs = [newParentID] + newChildIDs
+                        guard Set(newGraphIDs).count == newGraphIDs.count,
+                              Set(newGraphIDs).isDisjoint(with: Set(attachmentIDMap.values)),
+                              newGraphIDs.allSatisfy({ newID in
+                                  !references.contains(where: { $0.id == newID })
+                              }) else {
+                            throw NotesError("snapshot_attachment_id_collision", "Notes reused an attachment identifier while restoring recording \(planned.id).")
+                        }
+                        if let metadata = recording.metadata {
+                            try NCNotesRuntime.applyRecordingMetadata(
+                                Self.recordingMetadataPayload(metadata),
+                                toAudioAttachment: created
+                            )
+                        }
+                        if let searchText = snapshot.attachments.first(where: { $0.id == recording.parentID })?
+                            .additionalIndexableText {
+                            try NCNotesRuntime.setValue(searchText, forKey: "additionalIndexableText", of: created)
+                        }
+                        attachmentIDMap[recording.parentID] = newParentID
+                        for (fragment, newChildID) in zip(recording.fragments, newChildIDs) {
+                            attachmentIDMap[fragment.id] = newChildID
+                        }
+                        attachmentObjects[recording.parentID] = created
+                        recreatedRecordings[newParentID] = recording
+                        operation?.childAttachmentIDs.append(contentsOf: newGraphIDs)
+                    case .recreateTable:
+                        guard let rows = Self.snapshotTableRows(planned.id, in: snapshot.document!) else {
+                            throw NotesError("invalid_snapshot", "Table \(planned.id) has no saved cell grid.")
+                        }
+                        let rightToLeft = snapshot.attachments.first(where: { $0.id == planned.id })?.tableRightToLeft == true
+                        let logicalRows = rightToLeft ? rows.map { Array($0.reversed()) } : rows
+                        let plain = logicalRows.map { row in
+                            row.map { $0.text.replacingOccurrences(of: "\t", with: " ").replacingOccurrences(of: "\n", with: " ") }
+                                .joined(separator: "\t")
+                        }.joined(separator: "\n")
+                        let newID = try editor.addTable(plain)
+                        guard !newID.isEmpty,
+                              attachmentIDMap.values.contains(newID) == false,
+                              references.contains(where: { $0.id == newID }) == false else {
+                            throw NotesError("snapshot_attachment_id_collision", "Notes reused attachment identifier \(newID) during table restore.")
+                        }
+                        guard let created = try fetch(
+                            "ICAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@ AND typeUTI == %@",
+                                                   newID, note, "com.apple.notes.table"),
+                            in: context,
+                            limit: 1
+                        ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "Notes created no table row for restored table \(planned.id).")
+                        }
+                        if rightToLeft {
+                            let tableEditor = try NCTableEditor(attachment: created)
+                            try tableEditor.reverseColumnDirection()
+                            try tableEditor.save()
+                        }
+                        attachmentIDMap[planned.id] = newID
+                        attachmentObjects[planned.id] = created
+                        operation?.childAttachmentIDs.append(newID)
+                    case .recreateRichLink:
+                        guard let saved = snapshot.attachments.first(where: { $0.id == planned.id }),
+                              let urlString = saved.url, let url = URL(string: urlString) else {
+                            throw NotesError("invalid_snapshot", "Rich link \(planned.id) has no valid saved URL.")
+                        }
+                        var nativeKind: NSString?
+                        let newID: String
+                        if (saved.synapseDataBytes ?? 0) > 0,
+                           let title = saved.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+                            newID = try NCNotesRuntime.addSynapseLink(url, title: title, to: note, type: &nativeKind)
+                        } else {
+                            newID = try NCNotesRuntime.addURL(url, to: note, type: &nativeKind)
+                        }
+                        let createdType = nativeKind as String? ?? ""
+                        guard !newID.isEmpty, createdType == planned.typeUTI,
+                              attachmentIDMap.values.contains(newID) == false,
+                              references.contains(where: { $0.id == newID }) == false else {
+                            throw NotesError("snapshot_attachment_type_mismatch", "Notes could not recreate rich link \(planned.id) with its saved type.")
+                        }
+                        guard let created = try fetch(
+                            "ICAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                            in: context,
+                            limit: 1
+                        ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "Notes created no row for restored rich link \(planned.id).")
+                        }
+                        if let linkMaterial = material?.archive.attachments.first(where: { $0.id == planned.id }),
+                           linkMaterial.synapseSHA256 != nil || linkMaterial.linkMetadataSHA256 != nil {
+                            let payload = try Self.verifiedLinkPayload(linkMaterial, material: material)
+                            try NCNotesRuntime.setValue(payload.synapse, forKey: "synapseData", of: created)
+                            try NCNotesRuntime.setValue(payload.metadata, forKey: "linkPresentationArchivedMetadata", of: created)
+                            try NCNotesRuntime.updateChangeCount(of: created, reason: "Restored rich-link payload")
+                            recreatedLinkPayloads[newID] = (
+                                linkMaterial.synapseSHA256, linkMaterial.synapseByteCount,
+                                linkMaterial.linkMetadataSHA256, linkMaterial.linkMetadataByteCount
+                            )
+                        }
+                        attachmentIDMap[planned.id] = newID
+                        attachmentObjects[planned.id] = created
+                        recreatedRichLinks[newID] = saved
+                        operation?.childAttachmentIDs.append(newID)
+                    case .recreateMap:
+                        guard let saved = snapshot.attachments.first(where: { $0.id == planned.id }),
+                              let urlString = saved.url, let url = URL(string: urlString) else {
+                            throw NotesError("invalid_snapshot", "Map card \(planned.id) has no valid saved URL.")
+                        }
+                        try NativeMapURL.validate(url)
+                        var nativeKind: NSString?
+                        let newID = try NCNotesRuntime.addURL(url, to: note, type: &nativeKind)
+                        let createdType = nativeKind as String? ?? ""
+                        guard !newID.isEmpty, createdType == planned.typeUTI,
+                              attachmentIDMap.values.contains(newID) == false,
+                              references.contains(where: { $0.id == newID }) == false else {
+                            throw NotesError("snapshot_attachment_type_mismatch", "Notes could not recreate map card \(planned.id) with its saved type.")
+                        }
+                        guard let created = try fetch(
+                            "ICAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                            in: context,
+                            limit: 1
+                        ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "Notes created no row for restored map card \(planned.id).")
+                        }
+                        let mapEvidence = try NCNotesRuntime.addLocation(toMapAttachment: created)
+                        guard mapEvidence["model"] as? String == "ICAttachmentMapModel",
+                              mapEvidence["hasLocation"] as? Bool == true else {
+                            throw NotesError("map_metadata_missing", "Notes recreated a URL card without native map metadata.")
+                        }
+                        if let latitude = saved.mapLatitude, let longitude = saved.mapLongitude,
+                           latitude.isFinite, longitude.isFinite,
+                           (-90...90).contains(latitude), (-180...180).contains(longitude),
+                           let location = value(created, "location") as? NSManagedObject {
+                            try NCNotesRuntime.setValue(latitude, forKey: "latitude", of: location)
+                            try NCNotesRuntime.setValue(longitude, forKey: "longitude", of: location)
+                            if let updated = saved.mapPlaceUpdated {
+                                try NCNotesRuntime.setValue(updated, forKey: "placeUpdated", of: location)
+                            }
+                        }
+                        if let title = saved.title, !title.isEmpty {
+                            try NCNotesRuntime.setValue(title, forKey: "title", of: created)
+                        }
+                        if let address = saved.mapAddress, !address.isEmpty {
+                            try NCNotesRuntime.setValue(address, forKey: "summary", of: created)
+                        }
+                        if let linkMaterial = material?.archive.attachments.first(where: { $0.id == planned.id }),
+                           linkMaterial.synapseSHA256 != nil || linkMaterial.linkMetadataSHA256 != nil {
+                            let payload = try Self.verifiedLinkPayload(linkMaterial, material: material)
+                            try NCNotesRuntime.setValue(payload.synapse, forKey: "synapseData", of: created)
+                            try NCNotesRuntime.setValue(payload.metadata, forKey: "linkPresentationArchivedMetadata", of: created)
+                            recreatedLinkPayloads[newID] = (
+                                linkMaterial.synapseSHA256, linkMaterial.synapseByteCount,
+                                linkMaterial.linkMetadataSHA256, linkMaterial.linkMetadataByteCount
+                            )
+                        }
+                        try NCNotesRuntime.updateChangeCount(of: created, reason: "Restored map card")
+                        attachmentIDMap[planned.id] = newID
+                        attachmentObjects[planned.id] = created
+                        recreatedMaps[newID] = saved
+                        operation?.childAttachmentIDs.append(newID)
+                    case .recreatePaperDocument(let paperMaterial, let subtype):
+                        var nativeKind: NSString?
+                        let newID: String
+                        let requestedID = UUID().uuidString.lowercased()
+                        let cleanupScope = try paperCleanupScope(note)
+                        if paperMaterial.paperBundleArchived {
+                            let bundle = try Self.verifiedPaperBundlePayload(paperMaterial, material: material)
+                            let cleanup = try paperCleanupCandidate(requestedID, note: note, scope: cleanupScope)
+                            paperCleanupCandidates.append(cleanup)
+                            operation?.committed = true
+                            operation?.noteID = id(note)
+                            operation?.attachmentID = requestedID
+                            newID = try NCNotesRuntime.addPaperDocument(
+                                archive: bundle,
+                                subtype: subtype,
+                                identifier: requestedID,
+                                to: note,
+                                type: &nativeKind
+                            )
+                        } else {
+                            guard let frozen = prepared[planned.id] else {
+                                throw NotesError("snapshot_material_missing", "Paper document \(planned.id) has no prepared fallback PDF.")
+                            }
+                            let cleanup = try paperCleanupCandidate(requestedID, note: note, scope: cleanupScope)
+                            paperCleanupCandidates.append(cleanup)
+                            operation?.committed = true
+                            operation?.noteID = id(note)
+                            operation?.attachmentID = requestedID
+                            newID = try NCNotesRuntime.addPaperDocument(
+                                at: frozen.url,
+                                subtype: subtype,
+                                identifier: requestedID,
+                                to: note,
+                                type: &nativeKind
+                            )
+                        }
+                        guard newID.caseInsensitiveCompare(requestedID) == .orderedSame else {
+                            throw NotesError("paper_identifier_mismatch", "Notes returned a different Paper identifier.")
+                        }
+                        try TestFault.check("after_paper_helper")
+                        let createdType = nativeKind as String? ?? ""
+                        guard !newID.isEmpty, createdType == planned.typeUTI,
+                              attachmentIDMap.values.contains(newID) == false,
+                              references.contains(where: { $0.id == newID }) == false else {
+                            throw NotesError("snapshot_attachment_type_mismatch", "Notes could not recreate Paper document \(planned.id) with its saved type.")
+                        }
+                        guard let created = try fetch(
+                            "ICAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                            in: context,
+                            limit: 1
+                        ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "Notes created no row for restored Paper document \(planned.id).")
+                        }
+                        if paperMaterial.paperBundleArchived {
+                            let fallback = try NCNotesRuntime.regenerateFallbackPDF(for: created)
+                            guard (fallback["byteCount"] as? NSNumber)?.intValue ?? 0 > 0 else {
+                                throw NotesError("paper_fallback_generation_failed", "Notes restored the Paper bundle but produced no fallback PDF.")
+                            }
+                        }
+                        attachmentIDMap[planned.id] = newID
+                        attachmentObjects[planned.id] = created
+                        recreatedPaperDocuments[newID] = (planned.id, subtype, paperMaterial)
+                        operation?.childAttachmentIDs.append(newID)
+                    case .recreateDrawing(let payload):
+                        guard let saved = snapshot.attachments.first(where: { $0.id == planned.id }),
+                              payload != nil || saved.drawingSVG != nil else {
+                            throw NotesError("invalid_snapshot", "Drawing \(planned.id) has no saved editable source.")
+                        }
+                        var nativeKind: NSString?
+                        let lowerType = planned.typeUTI.lowercased()
+                        let isLegacy = lowerType.contains("sketch") ||
+                            (lowerType.contains("drawing") && !lowerType.contains("paper"))
+                        let newID: String
+                        if isLegacy {
+                            let records: [LegacyDrawingStrokeRecord]
+                            if let payload {
+                                guard payload.payloadKind == "legacy-drawing-v1" else {
+                                    throw NotesError("invalid_snapshot", "Legacy drawing \(planned.id) has the wrong saved payload type.")
+                                }
+                                let data = try Self.verifiedSnapshotPayload(payload, material: material)
+                                records = try JSONDecoder().decode([LegacyDrawingStrokeRecord].self, from: data)
+                            } else {
+                                let drawing = try SVGDrawingConverter.drawing(from: Data(saved.drawingSVG!.utf8))
+                                records = PaperStrokeRecord.records([drawing]).map(LegacyDrawingStrokeRecord.init)
+                            }
+                            try LegacyDrawingStrokeRecord.validate(records)
+                            let data = try JSONEncoder().encode(records)
+                            newID = try NCNotesRuntime.addLegacyDrawing(strokesData: data, to: note, type: &nativeKind)
+                            recreatedLegacyDrawings[newID] = records
+                        } else {
+                            let drawing: PKDrawing?
+                            let expectedCanvases: [[PaperStrokeRecord]]
+                            if let payload {
+                                let data = try Self.verifiedSnapshotPayload(payload, material: material)
+                                if payload.payloadKind == "paper-canvases-v1" {
+                                    guard payload.paperBundleArchived else {
+                                        throw NotesError("invalid_snapshot", "Multi-canvas Paper drawing \(planned.id) has no native Paper bundle.")
+                                    }
+                                    expectedCanvases = try JSONDecoder().decode([[PaperStrokeRecord]].self, from: data)
+                                    guard expectedCanvases.count > 1 else {
+                                        throw NotesError("invalid_snapshot", "Multi-canvas Paper drawing \(planned.id) has an invalid canvas payload.")
+                                    }
+                                    for canvas in expectedCanvases { _ = try PaperStrokeRecord.drawing(canvas) }
+                                    drawing = nil
+                                } else {
+                                    guard payload.payloadKind == "paper-strokes-v1" else {
+                                        throw NotesError("invalid_snapshot", "Paper drawing \(planned.id) has the wrong saved payload type.")
+                                    }
+                                    let records = try JSONDecoder().decode([PaperStrokeRecord].self, from: data)
+                                    drawing = try PaperStrokeRecord.drawing(records)
+                                    expectedCanvases = [records]
+                                }
+                            } else {
+                                let converted = try SVGDrawingConverter.drawing(from: Data(saved.drawingSVG!.utf8))
+                                drawing = converted
+                                expectedCanvases = [PaperStrokeRecord.records([converted])]
+                            }
+                            guard expectedCanvases.allSatisfy({ !$0.isEmpty }) else {
+                                throw NotesError("invalid_snapshot", "Drawing \(planned.id) has no restorable strokes.")
+                            }
+                            if let payload, payload.paperBundleArchived {
+                                let bundle = try Self.verifiedPaperBundlePayload(payload, material: material)
+                                let requestedID = UUID().uuidString.lowercased()
+                                let cleanupScope = try paperCleanupScope(note)
+                                let cleanup = try paperCleanupCandidate(requestedID, note: note, scope: cleanupScope)
+                                paperCleanupCandidates.append(cleanup)
+                                operation?.committed = true
+                                operation?.noteID = id(note)
+                                operation?.attachmentID = requestedID
+                                newID = try NCNotesRuntime.addSystemPaper(
+                                    archive: bundle,
+                                    identifier: requestedID,
+                                    to: note,
+                                    type: &nativeKind
+                                )
+                                guard newID.caseInsensitiveCompare(requestedID) == .orderedSame else {
+                                    throw NotesError("paper_identifier_mismatch", "Notes returned a different System Paper identifier.")
+                                }
+                                try TestFault.check("after_paper_helper")
+                                recreatedPaperBundleDrawings[newID] = payload
+                            } else {
+                                guard let drawing else {
+                                    throw NotesError("invalid_snapshot", "Multi-canvas Paper drawing \(planned.id) requires its native Paper bundle.")
+                                }
+                                let cleanupScope = try paperCleanupScope(note)
+                                operation?.committed = true
+                                operation?.noteID = id(note)
+                                newID = try NCNotesRuntime.addSystemPaperDrawing(
+                                    drawing as AnyObject,
+                                    to: note,
+                                    type: &nativeKind
+                                )
+                                operation?.attachmentID = newID
+                                paperCleanupCandidates.append(
+                                    try paperCleanupCandidate(newID, note: note, scope: cleanupScope)
+                                )
+                                try TestFault.check("after_paper_helper")
+                            }
+                            recreatedDrawings[newID] = expectedCanvases
+                        }
+                        let createdType = nativeKind as String? ?? ""
+                        guard !newID.isEmpty, createdType == planned.typeUTI,
+                              attachmentIDMap.values.contains(newID) == false,
+                              references.contains(where: { $0.id == newID }) == false else {
+                            throw NotesError("snapshot_attachment_type_mismatch", "Notes could not recreate drawing \(planned.id) with its saved type.")
+                        }
+                        guard let created = try fetch(
+                            "ICAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                            in: context,
+                            limit: 1
+                        ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "Notes created no row for restored drawing \(planned.id).")
+                        }
+                        attachmentIDMap[planned.id] = newID
+                        attachmentObjects[planned.id] = created
+                        operation?.childAttachmentIDs.append(newID)
+                    case .recreateInline(let request):
+                        var nativeKind: NSString?
+                        let newID: String
+                        let savedParentID = Self.savedTableParentID(for: planned.id, in: snapshot.document!)
+                        let parent = try savedParentID.map { tableID -> NSManagedObject in
+                            guard let table = attachmentObjects[tableID] else {
+                                throw NotesError("snapshot_attachment_unavailable", "The parent table for inline object \(planned.id) is unavailable.")
+                            }
+                            return table
+                        }
+                        switch request {
+                        case .hashtag(let name):
+                            newID = try NCNotesRuntime.makeTag(name, in: note, parent: parent)
+                            nativeKind = "com.apple.notes.inlinetextattachment.hashtag"
+                        case .noteLink(let targetID, let paragraphID, let paragraphName, let text):
+                            let target = try self.note(targetID, in: context)
+                            if let paragraphID {
+                                let paragraph = selfParagraphLinkIDs.contains(planned.id)
+                                    ? try paragraphLinkTarget(paragraphID, in: snapshot.document!)
+                                    : try paragraphLinkTarget(paragraphID, in: target)
+                                newID = try NCNotesRuntime.makeParagraphLink(
+                                    to: target, paragraphName: paragraphName ?? paragraph.name,
+                                    paragraphID: paragraph.id, from: note, text: text, parent: parent
+                                )
+                            } else {
+                                newID = try NCNotesRuntime.makeNoteLink(to: target, from: note, text: text, parent: parent)
+                            }
+                            nativeKind = "com.apple.notes.inlinetextattachment.link"
+                        case .divider:
+                            newID = try NCNotesRuntime.makeDivider(in: note, parent: parent, type: &nativeKind)
+                        case .math(let expression):
+                            newID = try NCNotesRuntime.makeMathExpression(expression, in: note, parent: parent, type: &nativeKind)
+                        case .mention(let text, let userRecordName):
+                            guard isShared(note) else {
+                                throw NotesError("mention_requires_shared_note", "A saved mention can only be restored in its shared note.")
+                            }
+                            newID = try NCNotesRuntime.makeMention(text, userRecordName: userRecordName,
+                                                                  in: note, parent: parent, type: &nativeKind)
+                        }
+                        let createdType = nativeKind as String? ?? ""
+                        guard !newID.isEmpty, createdType == planned.typeUTI,
+                              attachmentIDMap.values.contains(newID) == false,
+                              references.contains(where: { $0.id == newID }) == false else {
+                            throw NotesError("snapshot_attachment_type_mismatch", "Notes could not recreate inline object \(planned.id) with its saved type.")
+                        }
+                        guard let created = try fetch(
+                            "ICInlineAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                            in: context,
+                            limit: 1
+                        ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "Notes created no row for restored inline object \(planned.id).")
+                        }
+                        attachmentIDMap[planned.id] = newID
+                        attachmentObjects[planned.id] = created
+                        recreatedInline[newID] = (request, savedParentID)
+                        operation?.childAttachmentIDs.append(newID)
+                    case .keep, .unmark, .recreateScan, .recreatedByParent, .refuse:
+                        break
+                    }
+                }
+#if DEBUG
+                for oldID in forcedAbsentIDs where references.contains(where: { $0.id == oldID }) {
+                    let predicate = NSPredicate(format: "identifier == %@", oldID)
+                    let stale = try fetch("ICInlineAttachment", predicate: predicate, in: context) +
+                        fetch("ICAttachment", predicate: predicate, in: context)
+                    for attachment in stale where NativeAttachmentOwnership.belongs(attachment, to: note) {
+                        try NCNotesRuntime.markForDeletion(attachment)
+                    }
+                }
+#endif
+                if let tables = snapshot.document?.tables {
+                    for attachmentID in tables.keys where snapshot.document?.tableCells?[attachmentID] == nil {
+                        guard let attachment = attachmentObjects[attachmentID],
+                              let rows = Self.snapshotTableRows(attachmentID, in: snapshot.document!) else {
+                            throw NotesError("snapshot_attachment_unavailable", "Table \(attachmentID) is no longer available for restore.")
+                        }
+                        let rightToLeft = snapshot.attachments.first(where: { $0.id == attachmentID })?.tableRightToLeft == true
+                        try restoreTable(Self.remapTableRows(rows, attachmentIDs: attachmentIDMap), attachment: attachment,
+                                         rightToLeft: rightToLeft)
+                    }
+                }
+                if let tables = snapshot.document?.tableCells {
                     for (attachmentID, rows) in tables {
                         guard let attachment = attachmentObjects[attachmentID] else {
                             throw NotesError("snapshot_attachment_unavailable", "Table \(attachmentID) is no longer available for restore.")
                         }
-                        try restoreTable(rows, attachment: attachment)
+                        let rightToLeft = snapshot.attachments.first(where: { $0.id == attachmentID })?.tableRightToLeft == true
+                        try restoreTable(Self.remapTableRows(rows, attachmentIDs: attachmentIDMap), attachment: attachment,
+                                         rightToLeft: rightToLeft)
                     }
                 }
+                var handwritingByID: [String: Attachment] = [:]
+                for attachment in Self.flattenAttachments(snapshot.attachments) {
+                    handwritingByID[attachment.id] = attachment
+                }
+                for (savedID, saved) in handwritingByID {
+                    let type = saved.typeUTI.lowercased()
+                    guard type.contains("paper") || type.contains("drawing") || type.contains("sketch") else { continue }
+                    guard let attachment = attachmentObjects[savedID] else {
+                        throw NotesError("snapshot_attachment_unavailable", "Drawing \(savedID) is unavailable for handwriting restore.")
+                    }
+                    let expected = saved.handwritingText ?? ""
+                    let current = self.value(attachment, "handwritingSummary") as? String ?? ""
+                    if current != expected {
+                        _ = try NCNotesRuntime.setHandwritingSummary(expected.isEmpty ? nil : expected, attachment: attachment)
+                    }
+                }
+                guard let snapshotDocument = snapshot.document else {
+                    throw NotesError("snapshot_locked", "The snapshot has no readable note body.")
+                }
+                var document = SnapshotAttachmentIDRemapper.remapDocument(
+                    snapshotDocument,
+                    attachmentIDs: attachmentIDMap
+                )
+                let built = try attributed(document)
+                let oldMarkers = attachmentMarkers(editor.original)
+                try editor.begin(["replace"])
+                try editor.replace(NSRange(location: 0, length: editor.original.length), with: built.text)
+                try editor.finish()
+                let pendingSelfLinks = attachmentIDMap.compactMap { savedID, provisionalID ->
+                    (savedID: String, provisionalID: String,
+                     recreation: (request: SnapshotInlineRecreation, parentID: String?))? in
+                    guard selfParagraphLinkIDs.contains(savedID),
+                          let recreation = recreatedInline[provisionalID],
+                          case .noteLink(_, let paragraphID, _, _) = recreation.request,
+                          paragraphID != nil else { return nil }
+                    return (savedID, provisionalID, recreation)
+                }.sorted { $0.savedID < $1.savedID }
+
+                for (newID, recreation) in recreatedInline {
+                    guard case .noteLink(_, _, _, let text) = recreation.request,
+                          let attachment = try fetch(
+                            "ICInlineAttachment",
+                            predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                            in: context,
+                            limit: 1
+                          ).first,
+                          value(attachment, "altText") as? String != text else { continue }
+                    try NCNotesRuntime.setValue(text, forKey: "altText", of: attachment)
+                    try NCNotesRuntime.updateChangeCount(of: attachment, reason: "Restored note link label")
+                }
+
+                if title(note) != snapshot.summary.title {
+                    try NCNotesRuntime.setValue(snapshot.summary.title, forKey: "title", of: note)
+                    if note.entity.propertiesByName["dateForLastTitleModification"] != nil {
+                        try NCNotesRuntime.setValue(Date(), forKey: "dateForLastTitleModification", of: note)
+                    }
+                    try NCNotesRuntime.updateChangeCount(of: note, reason: "Restored note title")
+                }
+                if (value(note, "isPinned") as? Bool == true) != snapshot.summary.isPinned {
+                    try NCNotesRuntime.setPinned(snapshot.summary.isPinned, note: note)
+                }
+
                 if !built.collapsedParagraphIDs.isEmpty {
                     try require(["setOutlineStateData:"], of: note)
                     let data = try NCNotesRuntime.outlineStateData(collapsedUUIDStrings: built.collapsedParagraphIDs.sorted())
                     try NCNotesRuntime.setValue(data, forKey: "outlineStateData", of: note)
-                } else if snapshot.document?.collapsedParagraphIDs?.isEmpty == false {
+                } else if document.collapsedParagraphIDs?.isEmpty == false {
                     throw NotesError("snapshot_restore_failed", "Collapsed headings could not be rebuilt from the snapshot.")
                 } else if value(note, "outlineStateData") != nil {
                     let data = try NCNotesRuntime.outlineStateData(collapsedUUIDStrings: [])
                     try NCNotesRuntime.setValue(data, forKey: "outlineStateData", of: note)
                 }
-                let kept = Set(expectedMarkers.map(\.id))
+                let kept = Set(Self.markerReferences(document).map(\.id))
                 for old in oldMarkers where !kept.contains(old.2) {
                     let predicate = NSPredicate(format: "identifier == %@ AND note == %@", old.2, note)
                     let inline = try fetch("ICInlineAttachment", predicate: predicate, in: context, limit: 1).first
@@ -1899,26 +5213,894 @@ public final class NativeNotesWriter: NotesNativeWriting {
                         try NCNotesRuntime.markForDeletion(object)
                     }
                 }
-                try save(context, notes: [note])
+                for staleID in currentNestedMarkerIDs where !kept.contains(staleID) {
+                    let predicate = NSPredicate(format: "identifier == %@ AND note == %@", staleID, note)
+                    let inline = try fetch("ICInlineAttachment", predicate: predicate, in: context, limit: 1).first
+                    let regular = try fetch("ICAttachment", predicate: predicate, in: context, limit: 1).first
+                    if let object = inline ?? regular {
+                        try NCNotesRuntime.markForDeletion(object)
+                    }
+                }
+                for oldID in recreatedFileIDs {
+                    guard let attachment = attachmentObjects[oldID],
+                          let expected = prepared[oldID]?.sha256 else {
+                        throw NotesError("snapshot_attachment_unavailable", "A restored attachment disappeared before byte verification.")
+                    }
+                    try corruptStagedAttachmentIfRequested(attachment, savedID: oldID)
+                    _ = try stagedAttachmentHash(attachment, expected: expected)
+                }
+                for recording in recreatedRecordings.values {
+                    for fragment in recording.fragments {
+                        guard let newID = attachmentIDMap[fragment.id],
+                              let expected = prepared[fragment.id]?.sha256,
+                              let attachment = try fetch(
+                                "ICAttachment",
+                                predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, note),
+                                in: context,
+                                limit: 1
+                              ).first else {
+                            throw NotesError("snapshot_attachment_unavailable", "A restored recording fragment disappeared before byte verification.")
+                        }
+                        try corruptStagedAttachmentIfRequested(attachment, savedID: fragment.id)
+                        _ = try stagedAttachmentHash(attachment, expected: expected)
+                    }
+                }
+                try TestFault.check("before_restore_save")
+                try requireRestoreState(id(note), expectedRevision: expectedRevision, expectedModified: expectedModified)
+                for pending in pendingScans {
+                    let otherNewIDs = Set(attachmentIDMap.values).subtracting([pending.newParentID])
+                    let restored = try recreateSnapshotScan(
+                        pending.scan,
+                        newParentID: pending.newParentID,
+                        note: note,
+                        context: context,
+                        prepared: prepared,
+                        restoreMaterial: material,
+                        snapshotDocument: snapshot.document!,
+                        reservedIDs: Set(references.map(\.id)).union(otherNewIDs)
+                    )
+                    guard restored.idMap[pending.scan.parentID] == pending.newParentID,
+                          Set(restored.idMap.values).count == restored.idMap.count,
+                          Set(restored.idMap.values).subtracting([pending.newParentID])
+                            .isDisjoint(with: Set(attachmentIDMap.values)) else {
+                        throw NotesError("snapshot_attachment_id_collision", "A restored scan reused an attachment identifier.")
+                    }
+                    for (oldID, newID) in restored.idMap {
+                        if oldID != pending.scan.parentID, attachmentIDMap[oldID] != nil {
+                            throw NotesError("snapshot_attachment_id_collision", "A restored scan reused a saved attachment identifier.")
+                        }
+                        attachmentIDMap[oldID] = newID
+                    }
+                    recreatedScans[restored.parentID] = pending.scan
+                }
+                if pendingScans.isEmpty || context.hasChanges { try save(context, notes: [note]) }
+                paperCleanupCandidates.removeAll()
+                if !pendingSelfLinks.isEmpty {
+                    var reservedIDs = Set(attachmentIDMap.values)
+                    var finalized: [(savedID: String, provisionalID: String, finalID: String,
+                                     finalObject: NSManagedObject,
+                                     recreation: (request: SnapshotInlineRecreation, parentID: String?))] = []
+                    for pending in pendingSelfLinks {
+                        guard case .noteLink(_, let paragraphID?, let paragraphName, let text) = pending.recreation.request else {
+                            continue
+                        }
+                        let parent = try pending.recreation.parentID.map { savedParentID -> NSManagedObject in
+                            guard let object = attachmentObjects[savedParentID] else {
+                                throw NotesError(
+                                    "snapshot_attachment_unavailable",
+                                    "The parent table for inline object \(pending.savedID) is unavailable."
+                                )
+                            }
+                            return object
+                        }
+                        let paragraph = try paragraphLinkTarget(paragraphID, in: note)
+                        let finalID = try NCNotesRuntime.makeParagraphLink(
+                            to: note,
+                            paragraphName: paragraphName ?? paragraph.name,
+                            paragraphID: paragraph.id,
+                            from: note,
+                            text: text,
+                            parent: parent
+                        )
+                        guard !finalID.isEmpty,
+                              finalID != pending.provisionalID,
+                              reservedIDs.insert(finalID).inserted,
+                              references.contains(where: { $0.id == finalID }) == false,
+                              let finalObject = try fetch(
+                                "ICInlineAttachment",
+                                predicate: NSPredicate(format: "identifier == %@ AND note == %@", finalID, note),
+                                in: context,
+                                limit: 1
+                              ).first,
+                              let provisionalObject = try fetch(
+                                "ICInlineAttachment",
+                                predicate: NSPredicate(format: "identifier == %@ AND note == %@", pending.provisionalID, note),
+                                in: context,
+                                limit: 1
+                              ).first else {
+                            throw NotesError(
+                                "snapshot_attachment_unavailable",
+                                "Notes could not finalize self paragraph link \(pending.savedID)."
+                            )
+                        }
+                        try replaceSnapshotInlineMarker(
+                            pending.provisionalID,
+                            with: finalID,
+                            note: note,
+                            parent: parent
+                        )
+                        try NCNotesRuntime.markForDeletion(provisionalObject)
+                        finalized.append((pending.savedID, pending.provisionalID, finalID,
+                                          finalObject, pending.recreation))
+                    }
+                    try save(context, notes: [note])
+                    for row in finalized {
+                        attachmentIDMap[row.savedID] = row.finalID
+                        attachmentObjects[row.savedID] = row.finalObject
+                        if let index = operation?.childAttachmentIDs.firstIndex(of: row.provisionalID) {
+                            operation?.childAttachmentIDs[index] = row.finalID
+                        }
+                        recreatedInline.removeValue(forKey: row.provisionalID)
+                        recreatedInline[row.finalID] = row.recreation
+                    }
+                }
+                document = SnapshotAttachmentIDRemapper.remapDocument(
+                    snapshotDocument,
+                    attachmentIDs: attachmentIDMap
+                )
+                restoredSnapshot = try SnapshotAttachmentIDRemapper.remap(
+                    snapshot,
+                    attachmentIDs: attachmentIDMap
+                )
             } catch {
                 context.rollback()
-                throw (error as? NotesError) ?? nativeError(error)
+                let failure = (error as? NotesError) ?? nativeError(error)
+                let cleanup = cleanFailedPaperRestores(paperCleanupCandidates, context: context)
+                guard !cleanup.isEmpty else { throw failure }
+                throw NotesError(failure.code, "\(failure.message) \(cleanup)")
             }
-            let fresh = try self.note(id(note), in: context)
+            let restoredNoteID = id(note)
+            context.reset()
+            let fresh = try self.note(restoredNoteID, in: context)
             let nativeBody = try body(fresh)
             let nativeMarkers = attachmentMarkers(nativeBody).map { ($0.2, $0.3) }
+            let document = restoredSnapshot.document!
+            let expectedMarkers = Self.topLevelMarkerReferences(document)
             let expectedMarkerPairs = expectedMarkers.map { ($0.id, $0.typeUTI) }
+            let drawingsVerified = try recreatedDrawings.allSatisfy { id, expected in
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", id, fresh),
+                    in: context,
+                    limit: 1
+                ).first else { return false }
+                let actual = try readBackDrawingCanvases(attachment)
+                guard actual.count == expected.count else { return false }
+                return zip(expected, actual).allSatisfy {
+                    PaperStrokeRecord.mismatch(expected: $0, actual: $1) == nil
+                }
+            }
+            let legacyDrawingsVerified = try recreatedLegacyDrawings.allSatisfy { id, expected in
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", id, fresh),
+                    in: context,
+                    limit: 1
+                ).first else { return false }
+                let data = try legacyDrawingPayload(attachment, identifier: id)
+                let actual = try JSONDecoder().decode([LegacyDrawingStrokeRecord].self, from: data)
+                return LegacyDrawingStrokeRecord.mismatch(expected: expected, actual: actual) == nil
+            }
+            let paperDocumentsVerified = try recreatedPaperDocuments.allSatisfy { newID, recreation in
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, fresh),
+                    in: context,
+                    limit: 1
+                ).first,
+                      value(attachment, "typeUTI") as? String ==
+                        (recreation.subtype == "scan" ? "com.apple.paper.doc.scan" : "com.apple.paper.doc.pdf") else {
+                    return false
+                }
+                let rawURL = value(attachment, "fallbackPDFURL")
+                let fallbackURL = (rawURL as? URL) ?? (rawURL as? NSURL).map { $0 as URL }
+                guard let fallbackURL, FileManager.default.fileExists(atPath: fallbackURL.path),
+                      let restoredPages = try? Self.pdfPageEvidence(fallbackURL),
+                      !restoredPages.isEmpty else { return false }
+                if recreation.material.paperBundleArchived {
+                    let expected = try Self.verifiedPaperBundlePayload(recreation.material, material: material)
+                    let archive = try NCNotesRuntime.archivePaperBundle(for: attachment)
+                    guard let expectedSignature = Self.paperBundleSignature(expected),
+                          let actualSignature = Self.paperBundleSignature(archive),
+                          actualSignature == expectedSignature else { return false }
+                }
+                guard let source = prepared[recreation.oldID]?.url else {
+                    return recreation.material.paperBundleArchived
+                }
+                let expectedPages = try Self.pdfPageEvidence(source)
+                return expectedPages.count == restoredPages.count &&
+                    zip(expectedPages, restoredPages).allSatisfy { $0.visuallyMatches($1) }
+            }
+            let paperBundleDrawingsVerified = try recreatedPaperBundleDrawings.allSatisfy { id, payload in
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", id, fresh),
+                    in: context,
+                    limit: 1
+                ).first else { return false }
+                let expected = try Self.verifiedPaperBundlePayload(payload, material: material)
+                let actual = try NCNotesRuntime.archivePaperBundle(for: attachment)
+                guard let expectedSignature = Self.paperBundleSignature(expected),
+                      let actualSignature = Self.paperBundleSignature(actual) else { return false }
+                return actualSignature == expectedSignature
+            }
+            let archivedPaperBundlesVerified = try (material?.archive.attachments ?? [])
+                .filter(\.paperBundleArchived)
+                .allSatisfy { payload in
+                    let restoredID = attachmentIDMap[payload.id] ?? payload.id
+                    guard let attachment = try fetch(
+                        "ICAttachment",
+                        predicate: NSPredicate(format: "identifier == %@ AND note == %@", restoredID, fresh),
+                        in: context,
+                        limit: 1
+                    ).first else { return false }
+                    let expected = try Self.verifiedPaperBundlePayload(payload, material: material)
+                    let actual = try NCNotesRuntime.archivePaperBundle(for: attachment)
+                    guard let expectedSignature = Self.paperBundleSignature(expected),
+                          let actualSignature = Self.paperBundleSignature(actual) else { return false }
+                    return actualSignature == expectedSignature
+                }
+            let fileMarkupVerified = try recreatedFileMarkup.allSatisfy { id, expected in
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", id, fresh),
+                    in: context,
+                    limit: 1
+                ).first,
+                      let data = value(attachment, "markupModelData") as? Data,
+                      !data.isEmpty else { return false }
+                let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                let embedded = (value(attachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false
+                return hash == expected.sha256 && embedded == expected.embedded
+            }
+            let linkPayloadsVerified = try recreatedLinkPayloads.allSatisfy { id, expected in
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", id, fresh),
+                    in: context,
+                    limit: 1
+                ).first else { return false }
+                func matches(_ value: Any?, hash expectedHash: String?, bytes expectedBytes: Int?) -> Bool {
+                    guard expectedHash != nil || expectedBytes != nil else { return value == nil || (value as? Data)?.isEmpty != false }
+                    guard let expectedHash, let expectedBytes, let data = value as? Data,
+                          data.count == expectedBytes else { return false }
+                    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() == expectedHash
+                }
+                return matches(value(attachment, "synapseData"),
+                               hash: expected.synapseHash, bytes: expected.synapseBytes) &&
+                    matches(value(attachment, "linkPresentationArchivedMetadata"),
+                            hash: expected.metadataHash, bytes: expected.metadataBytes)
+            }
+            let scansVerified = try recreatedScans.allSatisfy { newParentID, scan in
+                guard let gallery = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", newParentID, fresh),
+                    in: context,
+                    limit: 1
+                ).first else { return false }
+                let expectedPageIDs = scan.pages.compactMap { attachmentIDMap[$0.id] }
+                guard expectedPageIDs.count == scan.pages.count,
+                      try NCNotesRuntime.galleryPageIdentifiers(in: gallery) == expectedPageIDs else { return false }
+                for (page, newPageID) in zip(scan.pages, expectedPageIDs) {
+                    let state = try scanPageState(restoredNoteID, attachmentID: newParentID, pageID: newPageID, in: context)
+                    let expectedCrop: ScanCrop?
+                    if let crop = page.crop, let frozen = prepared[page.id],
+                       let size = Self.scanImagePixelSize(frozen.url) {
+                        expectedCrop = Self.normalizedScanCrop(crop, pixelWidth: size.width, pixelHeight: size.height)
+                    } else { expectedCrop = nil }
+                    guard state.filter.value == page.filter,
+                          state.orientation.value == page.orientation,
+                          NativeVerificationRules.sameScanCrop(state.crop, expectedCrop),
+                          state.hasMarkup == (page.markupSHA256 != nil),
+                          state.hasEmbeddedMarkup == page.hasEmbeddedMarkup else { return false }
+                }
+                return true
+            }
+            let recordingsVerified = try recreatedRecordings.allSatisfy { newParentID, recording in
+                guard let parent = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", newParentID, fresh),
+                    in: context,
+                    limit: 1
+                ).first,
+                let children = value(parent, "subAttachments") as? NSSet,
+                children.count == recording.fragments.count,
+                abs(((value(parent, "duration") as? NSNumber)?.doubleValue ?? 0) - recording.duration) < 0.05 else {
+                    return false
+                }
+                let expectedIDs = recording.fragments.compactMap { attachmentIDMap[$0.id] }
+                guard expectedIDs.count == recording.fragments.count else { return false }
+                let childObjects = children.compactMap { $0 as? NSManagedObject }
+                guard Set(childObjects.compactMap { value($0, "identifier") as? String }) == Set(expectedIDs) else {
+                    return false
+                }
+                return childObjects.allSatisfy { child in
+                    guard let childID = value(child, "identifier") as? String,
+                          let fragment = recording.fragments.first(where: { attachmentIDMap[$0.id] == childID }),
+                          abs(((value(child, "duration") as? NSNumber)?.doubleValue ?? 0) - fragment.duration) < 0.05 else {
+                        return false
+                    }
+                    let parentObject = value(child, "parentAttachment") as? NSManagedObject
+                    return (parentObject.flatMap { value($0, "identifier") as? String }) == newParentID
+                }
+            }
+            let inlineParentsVerified = try recreatedInline.allSatisfy { newID, recreation in
+                guard let object = try fetch(
+                    "ICInlineAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", newID, fresh),
+                    in: context,
+                    limit: 1
+                ).first else { return false }
+                let actualParent = (value(object, "parentAttachment") as? NSManagedObject)
+                    .flatMap { value($0, "identifier") as? String }
+                return actualParent == recreation.parentID.map { attachmentIDMap[$0] ?? $0 }
+            }
+            var restoredHashes: [String: String] = [:]
+            for oldID in recreatedFileIDs {
+                guard let newID = attachmentIDMap[oldID] else { continue }
+                guard let expected = prepared[oldID]?.sha256,
+                      let stored = storedAttachmentHash(noteID: restoredNoteID, attachmentID: newID, expected: expected) else { continue }
+                restoredHashes[oldID] = stored
+            }
+            var restoredRecordingHashes: [String: String] = [:]
+            for recording in recreatedRecordings.values {
+                for fragment in recording.fragments {
+                    guard let newChildID = attachmentIDMap[fragment.id],
+                          let expected = prepared[fragment.id]?.sha256,
+                          let stored = storedAttachmentHash(noteID: restoredNoteID, attachmentID: newChildID, expected: expected) else { continue }
+                    restoredRecordingHashes[fragment.id] = stored
+                }
+            }
+            let recreatedRecordingFragmentCount = recreatedRecordings.values.reduce(0) { $0 + $1.fragments.count }
+            let idMapJSON = try Self.sortedJSON(attachmentIDMap)
+            let hashesJSON = try Self.sortedJSON(restoredHashes.merging(restoredRecordingHashes) { current, _ in current })
+            let bodyVerified = nativeBody.string == document.text
+            let markersVerified = NativeVerificationRules.sameMarkerMultiset(expectedMarkerPairs, nativeMarkers)
+            let filesVerified = restoredHashes.count == recreatedFileCount
+            let recordingFilesVerified = restoredRecordingHashes.count == recreatedRecordingFragmentCount
             return result(
-                id(note),
-                native: ["utf16Length": "\(nativeBody.length)", "markerCount": "\(expectedMarkers.count)"],
-                nativeVerified: nativeBody.string == document.text && NativeVerificationRules.sameMarkerMultiset(expectedMarkerPairs, nativeMarkers),
+                restoredNoteID,
+                native: ["utf16Length": "\(nativeBody.length)", "markerCount": "\(expectedMarkers.count)",
+                         "attachmentIDMap": idMapJSON, "restoredSHA256": hashesJSON,
+                         "bodyVerified": String(bodyVerified),
+                         "markersVerified": String(markersVerified),
+                         "scansVerified": String(scansVerified),
+                         "inlineParentsVerified": String(inlineParentsVerified),
+                         "paperDocumentsVerified": String(paperDocumentsVerified),
+                         "paperBundleDrawingsVerified": String(paperBundleDrawingsVerified),
+                         "archivedPaperBundlesVerified": String(archivedPaperBundlesVerified)],
+                nativeVerified: bodyVerified && markersVerified && filesVerified && recordingFilesVerified &&
+                    drawingsVerified && legacyDrawingsVerified && paperDocumentsVerified && paperBundleDrawingsVerified &&
+                    archivedPaperBundlesVerified &&
+                    fileMarkupVerified && linkPayloadsVerified && scansVerified &&
+                    recordingsVerified && inlineParentsVerified,
                 sqlite: { restored in
-                    guard SnapshotRestoreVerification.matches(expected: snapshot, actual: restored) else { return nil }
-                    return ["utf16Length": "\(document.text.utf16.count)", "attachmentTopology": "verified"]
+                    func nestedAttachment(_ id: String, in attachments: [Attachment]) -> Attachment? {
+                        for attachment in attachments {
+                            if attachment.id == id { return attachment }
+                            if let found = nestedAttachment(id, in: attachment.childAttachments ?? []) { return found }
+                        }
+                        return nil
+                    }
+                    let snapshotSQLiteVerified = SnapshotRestoreVerification.matches(
+                        expected: restoredSnapshot,
+                        actual: restored,
+                        archive: material?.archive,
+                        attachmentIDMap: attachmentIDMap
+                    )
+                    guard snapshotSQLiteVerified,
+                          restoredHashes.count == recreatedFileCount,
+                          recreatedRichLinks.allSatisfy({ newID, expected in
+                              restored.attachments.contains(where: { actual in
+                                  actual.id == newID && actual.typeUTI == expected.typeUTI &&
+                                      actual.url == expected.url &&
+                                      ((expected.synapseDataBytes ?? 0) == 0 || (actual.synapseDataBytes ?? 0) > 0)
+                              })
+                          }),
+                          recreatedMaps.allSatisfy({ newID, expected in
+                              restored.attachments.contains(where: { actual in
+                                  actual.id == newID && actual.typeUTI == expected.typeUTI &&
+                                      actual.url == expected.url && actual.hasMapLocation == true &&
+                                      (expected.mapLatitude == nil || abs((actual.mapLatitude ?? .infinity) - expected.mapLatitude!) < 0.000000001) &&
+                                      (expected.mapLongitude == nil || abs((actual.mapLongitude ?? .infinity) - expected.mapLongitude!) < 0.000000001) &&
+                                      (expected.mapAddress == nil || actual.mapAddress == expected.mapAddress)
+                              }) && ((try? SQLiteNotesStore(refresh: true).attachmentHasStoredLocation(
+                                  note: restored.summary.id.uuid,
+                                  attachmentID: newID
+                              )) == true)
+                          }),
+                          recreatedLinkPayloads.allSatisfy({ newID, expected in
+                              guard let actual = restored.attachments.first(where: { $0.id == newID }) else { return false }
+                              return actual.synapseDataBytes == expected.synapseBytes &&
+                                  actual.linkPreviewMetadataBytes == expected.metadataBytes
+                          }),
+                          recreatedDrawings.keys.allSatisfy({ newID in
+                              restored.attachments.contains(where: { $0.id == newID && $0.kind == "drawing" })
+                          }),
+                          recreatedLegacyDrawings.keys.allSatisfy({ newID in
+                              restored.attachments.contains(where: {
+                                  $0.id == newID && $0.typeUTI == "com.apple.notes.sketch"
+                              })
+                          }),
+                          recreatedFileMarkup.allSatisfy({ newID, expected in
+                              guard let actual = restored.attachments.first(where: { $0.id == newID }),
+                                    actual.hasEmbeddedMarkup == expected.embedded,
+                                    let payload = try? SQLiteNotesStore(refresh: true)
+                                        .scanMarkupPayloads(restored.summary.id.uuid)[newID] else { return false }
+                              return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined() == expected.sha256
+                          }),
+                          recreatedPaperDocuments.allSatisfy({ newID, recreation in
+                              guard let actual = restored.attachments.first(where: { $0.id == newID }),
+                                    actual.typeUTI == (recreation.subtype == "scan"
+                                        ? "com.apple.paper.doc.scan" : "com.apple.paper.doc.pdf"),
+                                    let path = actual.filePath ?? actual.fallbackRasterPath,
+                                    let actualPages = try? Self.pdfPageEvidence(URL(fileURLWithPath: path)),
+                                    !actualPages.isEmpty else {
+                                  return false
+                              }
+                              guard let source = prepared[recreation.oldID]?.url,
+                                    let expectedPages = try? Self.pdfPageEvidence(source) else {
+                                  return recreation.material.paperBundleArchived
+                              }
+                              return expectedPages.count == actualPages.count &&
+                                  zip(expectedPages, actualPages).allSatisfy { $0.visuallyMatches($1) }
+                          }),
+                          recreatedScans.allSatisfy({ newParentID, scan in
+                              guard let gallery = restored.attachments.first(where: { $0.id == newParentID }),
+                                    let children = gallery.childAttachments else { return false }
+                              let expectedPageIDs = scan.pages.compactMap { attachmentIDMap[$0.id] }
+                              guard gallery.childAttachmentIDs == expectedPageIDs,
+                                    children.map(\.id) == expectedPageIDs else { return false }
+                              return zip(scan.pages, children).allSatisfy { page, actual in
+                                  guard actual.typeUTI == page.material.typeUTI,
+                                        actual.scanFilter == page.filter,
+                                        actual.scanOrientation == page.orientation,
+                                        actual.scanHasMarkup == (page.markupSHA256 != nil),
+                                        actual.scanHasEmbeddedMarkup == page.hasEmbeddedMarkup,
+                                        let source = prepared[page.id],
+                                        let sourceEvidence = try? Self.scanPageEvidence(source),
+                                        let path = actual.filePath,
+                                        let actualEvidence = try? Self.scanPageEvidence(
+                                            url: URL(fileURLWithPath: path), name: actual.filename ?? actual.id
+                                        ),
+                                        sourceEvidence.visuallyMatches(actualEvidence) else { return false }
+                                  let sourceSize = Self.scanImagePixelSize(source.url)
+                                  let actualSize = Self.scanImagePixelSize(URL(fileURLWithPath: path))
+                                  let expectedCrop = page.crop.flatMap {
+                                      Self.normalizedScanCrop($0, pixelWidth: sourceSize?.width, pixelHeight: sourceSize?.height)
+                                  }
+                                  let actualCrop = actual.scanCrop.flatMap {
+                                      Self.normalizedScanCrop($0, pixelWidth: actualSize?.width, pixelHeight: actualSize?.height)
+                                  }
+                                  guard NativeVerificationRules.sameScanCrop(expectedCrop, actualCrop) else { return false }
+                                  if let expectedHash = page.markupSHA256,
+                                     let payload = try? SQLiteNotesStore(refresh: true)
+                                        .scanMarkupPayloads(restored.summary.id.uuid)[actual.id] {
+                                      return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined() == expectedHash
+                                  }
+                                  return page.markupSHA256 == nil
+                              }
+                          }),
+                          recreatedRecordings.allSatisfy({ newParentID, recording in
+                              guard let actual = nestedAttachment(newParentID, in: restored.attachments),
+                                    let children = actual.childAttachments,
+                                    let newChildIDs = Optional(recording.fragments.compactMap { attachmentIDMap[$0.id] }),
+                                    newChildIDs.count == recording.fragments.count,
+                                    actual.childAttachmentIDs == newChildIDs,
+                                    children.map(\.id) == newChildIDs,
+                                    actual.typeUTI == snapshot.attachments.first(where: { $0.id == recording.parentID })?.typeUTI,
+                                    abs((actual.duration ?? 0) - recording.duration) < 0.05,
+                                    RecordingFragments.mismatch(
+                                        expected: recording.transcript,
+                                        actual: actual.transcriptWords ?? []
+                                    ) == nil,
+                                    actual.recording == recording.metadata ||
+                                        (recording.metadata == nil && actual.recording.map(Self.recordingMetadataPayload)?.isEmpty != false) else {
+                                  return false
+                              }
+                              let fragmentsMatch = zip(recording.fragments, children).allSatisfy { fragment, child in
+                                  child.typeUTI == fragment.material.typeUTI &&
+                                      abs((child.duration ?? 0) - fragment.duration) < 0.05 &&
+                                      restoredRecordingHashes[fragment.id] == prepared[fragment.id]?.sha256
+                              }
+                              guard fragmentsMatch else { return false }
+                              let expectedMetadata = recording.fragments.compactMap { fragment -> RecordingFragmentMetadata? in
+                                  guard let id = attachmentIDMap[fragment.id],
+                                        let date = fragment.createdDate,
+                                        let version = fragment.transcriptVersion else { return nil }
+                                  return RecordingFragmentMetadata(id: id, createdDate: date, transcriptVersion: version)
+                              }
+                              if expectedMetadata.isEmpty { return true }
+                              guard expectedMetadata.count == recording.fragments.count,
+                                    let actualMetadata = actual.recordingFragments,
+                                    actualMetadata.count == expectedMetadata.count else { return false }
+                              return zip(expectedMetadata, actualMetadata).allSatisfy { expected, found in
+                                  expected.id == found.id && expected.transcriptVersion == found.transcriptVersion &&
+                                      abs((expected.createdDate?.timeIntervalSince1970 ?? 0) -
+                                          (found.createdDate?.timeIntervalSince1970 ?? 0)) < 0.001
+                              }
+                          }),
+                          recreatedInline.allSatisfy({ newID, recreation in
+                              guard let actual = nestedAttachment(newID, in: restored.attachments) else { return false }
+                              if let parentID = recreation.parentID {
+                                  let expectedParentID = attachmentIDMap[parentID] ?? parentID
+                                  guard let parent = nestedAttachment(expectedParentID, in: restored.attachments),
+                                        parent.childAttachmentIDs?.contains(newID) == true else { return false }
+                              } else if !restored.attachments.contains(where: { $0.id == newID }) {
+                                  return false
+                              }
+                              switch recreation.request {
+                              case .hashtag(let name):
+                                  let value = actual.displayText ?? actual.title ?? ""
+                                  return value.trimmingCharacters(in: CharacterSet(charactersIn: "#")) == name
+                              case .noteLink(let targetID, let paragraphID, _, _):
+                                  return actual.targetNoteID?.caseInsensitiveCompare(targetID) == .orderedSame &&
+                                      (paragraphID == nil && actual.targetParagraphID == nil ||
+                                       paragraphID != nil && actual.targetParagraphID?.caseInsensitiveCompare(paragraphID!) == .orderedSame)
+                              case .divider: return actual.isDivider == true
+                              case .math(let expression):
+                                  return actual.mathExpression == expression || actual.graphExpression == expression
+                              case .mention(_, let identity):
+                                  return actual.participantUserID == identity || actual.participantID == identity
+                              }
+                          }) else { return nil }
+                    return ["utf16Length": "\(document.text.utf16.count)", "attachmentTopology": "verified",
+                            "attachmentIDMap": idMapJSON, "restoredSHA256": hashesJSON]
                 },
                 mismatch: "Persisted snapshot readback did not match the saved note structure."
             )
         }
+    }
+
+#if DEBUG
+    func hardDeleteAttachmentsForTesting(_ ref: String, attachmentIDs: [String]) throws {
+        let ids = Set(attachmentIDs)
+        guard !ids.isEmpty, ids.count == attachmentIDs.count else {
+            throw NotesError("invalid_test_fixture", "The hard-delete test requires unique attachment identifiers.")
+        }
+        let lease = try writeLease(); defer { lease?.release() }
+        lock.lock(); defer { lock.unlock() }
+        try performContext { context in
+            let target = try note(ref, in: context)
+            var objects: [NSManagedObject] = []
+            var found: Set<String> = []
+            for identifier in ids {
+                let predicate = NSPredicate(format: "identifier == %@", identifier)
+                let fetched = try fetch("ICInlineAttachment", predicate: predicate, in: context) +
+                    fetch("ICAttachment", predicate: predicate, in: context)
+                var seen: Set<NSManagedObjectID> = []
+                for object in fetched where seen.insert(object.objectID).inserted {
+                    guard NativeAttachmentOwnership.belongs(object, to: target) else {
+                        throw NotesError("snapshot_attachment_id_collision",
+                                         "The hard-delete fixture identifier belongs to another note.")
+                    }
+                    objects.append(object)
+                    if let value = value(object, "identifier") as? String { found.insert(value) }
+                }
+            }
+            guard found == ids else {
+                throw NotesError("snapshot_attachment_unavailable",
+                                 "The hard-delete fixture no longer contains every requested attachment row.")
+            }
+            for object in objects { context.delete(object) }
+            try context.save()
+            context.refreshAllObjects()
+        }
+    }
+#endif
+
+    private static func prepareSnapshotFiles(_ plan: SnapshotRestorePlan,
+                                             material restoreMaterial: SnapshotRestoreMaterial?) throws -> [String: FrozenAttachmentInput] {
+        let recreations = plan.attachments.flatMap { item -> [(String, SnapshotAttachmentMaterial, String?)] in
+            switch item.action {
+            case .recreateFile(let material):
+                let filename = SnapshotRestoreFilename.requiresExplicitType(material)
+                    ? SnapshotRestoreFilename.forExplicitType(material)
+                    : SnapshotRestoreFilename.derive(for: material)
+                return [(item.id, material, filename)]
+            case .recreateScan(let scan): return scan.pages.map { ($0.id, $0.material, nil) }
+            case .recreateRecording(let recording): return recording.fragments.map { ($0.id, $0.material, nil) }
+            case .recreatePaperDocument(let material, _):
+                return material.archived ? [(item.id, material, "paper.pdf")] : []
+            default: return []
+            }
+        }
+        guard !recreations.isEmpty else { return [:] }
+        guard let restoreMaterial else {
+            throw NotesError("snapshot_material_missing", "The snapshot attachment package is unavailable.")
+        }
+        var result: [String: FrozenAttachmentInput] = [:]
+        for (id, material, suggestedName) in recreations {
+            guard let hash = material.blobSHA256, hash.count == 64, hash == hash.lowercased(),
+                  hash.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "0123456789abcdef").contains($0) }),
+                  let expectedBytes = material.byteCount, expectedBytes > 0 else {
+                throw NotesError("snapshot_integrity_failed", "Attachment \(id) has invalid archived blob metadata.")
+            }
+            let data = try restoreMaterial.blobs.verifiedData(sha256: hash, byteCount: expectedBytes)
+            guard data.count == expectedBytes else {
+                throw NotesError("snapshot_integrity_failed", "Attachment \(id) failed its archived blob integrity check.")
+            }
+            guard let filename = suggestedName ?? SnapshotRestoreFilename.derive(for: material) else {
+                throw NotesError("snapshot_attachment_filename_unsupported", "Attachment \(id) has no filename that safely preserves its saved type.")
+            }
+            result[id] = try FrozenAttachmentInput(
+                verifiedData: data,
+                suggestedName: filename,
+                sha256: hash
+            )
+        }
+        return result
+    }
+
+    private static func audioDuration(_ source: URL) throws -> Double {
+        let file = try AVAudioFile(forReading: source)
+        guard file.processingFormat.sampleRate > 0 else {
+            throw NotesError("snapshot_recording_invalid", "The archived recording has no readable audio sample rate.")
+        }
+        let duration = Double(file.length) / file.processingFormat.sampleRate
+        guard duration.isFinite, duration > 0, duration <= TranscriptLimits.maxSeconds else {
+            throw NotesError("snapshot_recording_invalid", "The archived recording has an invalid duration.")
+        }
+        return duration
+    }
+
+    private static func verifiedSnapshotPayload(_ payload: SnapshotAttachmentMaterial,
+                                                material restoreMaterial: SnapshotRestoreMaterial?) throws -> Data {
+        guard let restoreMaterial else {
+            throw NotesError("snapshot_material_missing", "The snapshot native attachment package is unavailable.")
+        }
+        guard let hash = payload.blobSHA256,
+              hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              let byteCount = payload.byteCount, byteCount > 0 else {
+            throw NotesError("snapshot_integrity_failed", "The snapshot native attachment payload is invalid.")
+        }
+        return try restoreMaterial.blobs.verifiedData(sha256: hash, byteCount: byteCount)
+    }
+
+    private static func verifiedPaperBundlePayload(_ payload: SnapshotAttachmentMaterial,
+                                                   material restoreMaterial: SnapshotRestoreMaterial?) throws -> Data {
+        guard let restoreMaterial else {
+            throw NotesError("snapshot_material_missing", "The snapshot Paper bundle package is unavailable.")
+        }
+        guard let hash = payload.paperBundleSHA256,
+              hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              let byteCount = payload.paperBundleByteCount, byteCount > 0 else {
+            throw NotesError("snapshot_integrity_failed", "The snapshot Paper bundle payload is invalid.")
+        }
+        return try restoreMaterial.blobs.verifiedData(sha256: hash, byteCount: byteCount)
+    }
+
+    private static func verifiedLinkPayload(
+        _ payload: SnapshotAttachmentMaterial,
+        material restoreMaterial: SnapshotRestoreMaterial?
+    ) throws -> (synapse: Data?, metadata: Data?) {
+        guard let restoreMaterial else {
+            throw NotesError("snapshot_material_missing", "The snapshot rich-link package is unavailable.")
+        }
+        func read(_ hash: String?, _ byteCount: Int?, name: String) throws -> Data? {
+            guard hash != nil || byteCount != nil else { return nil }
+            guard let hash,
+                  hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                  let byteCount, byteCount > 0 else {
+                throw NotesError("snapshot_integrity_failed", "The snapshot \(name) payload is invalid.")
+            }
+            let data = try restoreMaterial.blobs.verifiedData(sha256: hash, byteCount: byteCount)
+            guard data.count == byteCount else {
+                throw NotesError("snapshot_integrity_failed", "The snapshot \(name) payload failed its integrity check.")
+            }
+            return data
+        }
+        let synapse = try read(payload.synapseSHA256, payload.synapseByteCount, name: "Synapse")
+        let metadata = try read(payload.linkMetadataSHA256, payload.linkMetadataByteCount, name: "link metadata")
+        guard synapse != nil || metadata != nil else {
+            throw NotesError("snapshot_integrity_failed", "The snapshot rich-link payload is empty.")
+        }
+        return (synapse, metadata)
+    }
+
+    private static func verifiedMarkupPayload(hash: String, byteCount: Int,
+                                              restoreMaterial: SnapshotRestoreMaterial?) throws -> Data {
+        guard hash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              byteCount > 0 else {
+            throw NotesError("snapshot_integrity_failed", "The snapshot markup payload is invalid.")
+        }
+        guard let restoreMaterial else {
+            throw NotesError("snapshot_material_missing", "The snapshot markup package is unavailable.")
+        }
+        let data = try restoreMaterial.blobs.verifiedData(sha256: hash, byteCount: byteCount)
+        guard data.count == byteCount else {
+            throw NotesError("snapshot_integrity_failed", "The snapshot markup payload failed its integrity check.")
+        }
+        return data
+    }
+
+    static func paperBundleSignature(_ data: Data) -> String? {
+        guard let envelope = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              envelope["version"] as? Int == 1,
+              let format = envelope["format"] as? String,
+              let payload = envelope["payload"] as? Data,
+              !payload.isEmpty else { return nil }
+        let normalized: Data
+        switch format {
+        case "file-v1":
+            guard let signature = paperArchiveAssetSignature(payload) else { return nil }
+            normalized = Data(signature.utf8)
+        case "file-wrapper-v1":
+            guard let wrapper = FileWrapper(serializedRepresentation: payload),
+                  let entries = paperBundleEntries(wrapper, path: "") else { return nil }
+            let assets = entries.filter { $0.hasPrefix("F:") }
+            normalized = Data(assets.sorted().joined(separator: "\n").utf8)
+        default:
+            return nil
+        }
+        return SHA256.hash(data: normalized).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func paperBundleEntries(_ wrapper: FileWrapper, path: String) -> [String]? {
+        if wrapper.isSymbolicLink { return nil }
+        if wrapper.isRegularFile {
+            guard let contents = wrapper.regularFileContents else { return nil }
+            guard path.hasPrefix("Assets.bundle/") else { return [] }
+            let hash = SHA256.hash(data: contents).map { String(format: "%02x", $0) }.joined()
+            return ["F:\(Data(path.utf8).base64EncodedString()):\(contents.count):\(hash)"]
+        }
+        guard wrapper.isDirectory, let children = wrapper.fileWrappers else { return nil }
+        var entries = ["D:\(Data(path.utf8).base64EncodedString())"]
+        for name in children.keys.sorted() {
+            guard let child = children[name] else { return nil }
+            let childPath = path.isEmpty ? name : "\(path)/\(name)"
+            guard let childEntries = paperBundleEntries(child, path: childPath) else { return nil }
+            entries.append(contentsOf: childEntries)
+        }
+        return entries
+    }
+
+    private static func paperArchiveAssetSignature(_ payload: Data) -> String? {
+        guard payload.starts(with: Data("BZh".utf8)), payload.count <= maximumScanBytes,
+              let archive = try? FrozenAttachmentInput(data: payload, suggestedName: "paper.tar.bz2") else {
+            return nil
+        }
+        func run(_ arguments: [String]) -> Data? {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+            process.arguments = arguments
+            let output = Pipe()
+            let error = Pipe()
+            process.standardOutput = output
+            process.standardError = error
+            do { try process.run() } catch { return nil }
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            _ = error.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return process.terminationReason == .exit && process.terminationStatus == 0 ? data : nil
+        }
+        guard let listingData = run(["-tjf", archive.url.path]),
+              listingData.count <= 4 * 1024 * 1024,
+              let listing = String(data: listingData, encoding: .utf8) else { return nil }
+        let members = listing.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        var records: [String] = []
+        var totalBytes = 0
+        for member in members where member.hasPrefix("Assets.bundle/") && !member.hasSuffix("/") {
+            let components = member.split(separator: "/", omittingEmptySubsequences: false)
+            guard components.count == 2,
+                  components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+                  !member.contains("\0"),
+                  let contents = run(["-xOjf", archive.url.path, member]) else { return nil }
+            totalBytes += contents.count
+            guard totalBytes <= maximumScanBytes else { return nil }
+            let hash = SHA256.hash(data: contents).map { String(format: "%02x", $0) }.joined()
+            records.append("\(contents.count):\(hash)")
+        }
+        guard !records.isEmpty else { return "assets:none" }
+        return records.sorted().joined(separator: "\n")
+    }
+
+    private static func recordingMetadataPayload(_ metadata: RecordingMetadata) -> [String: Any] {
+        var result: [String: Any] = [:]
+        if let value = metadata.summary { result["summary"] = value }
+        if let value = metadata.topLineSummary { result["topLineSummary"] = value }
+        if let value = metadata.summaryVersion { result["summaryVersion"] = value }
+        if let value = metadata.externalModelAttributionProviderName { result["externalModelAttributionProviderName"] = value }
+        if let value = metadata.externalModelAttributionSymbolName { result["externalModelAttributionSymbolName"] = value }
+        if let value = metadata.localSpeakerHandle { result["localSpeakerHandle"] = value }
+        if let value = metadata.remoteSpeakerHandle { result["remoteSpeakerHandle"] = value }
+        if let value = metadata.callType { result["callType"] = value }
+        if let value = metadata.isCallRecording { result["isCallRecording"] = value }
+        if let value = metadata.startTime { result["startTime"] = value }
+        return result
+    }
+
+    private static func snapshotTableRows(_ id: String, in document: NoteDocument) -> [[TableCellDocument]]? {
+        if let rows = document.tableCells?[id] { return rows }
+        return document.tables?[id]?.map { row in
+            row.map { TableCellDocument(text: $0, runs: [AttributeRun(length: ($0 as NSString).length)]) }
+        }
+    }
+
+    private static func savedTableParentID(for id: String, in document: NoteDocument) -> String? {
+        for (tableID, rows) in document.tableCells ?? [:] {
+            for row in rows {
+                for cell in row {
+                    if cell.runs.contains(where: {
+                        $0.attachment?.id == id && $0.attachment?.parentAttachmentCaptured == true &&
+                            $0.attachment?.parentAttachmentID == tableID
+                    }) {
+                        return tableID
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func remapTableRows(
+        _ rows: [[TableCellDocument]],
+        attachmentIDs mapping: [String: String]
+    ) -> [[TableCellDocument]] {
+        guard !mapping.isEmpty else { return rows }
+        return rows.map { row in
+            row.map { cell in
+                var cell = cell
+                for index in cell.runs.indices {
+                    guard let oldID = cell.runs[index].attachment?.id,
+                          let newID = mapping[oldID] else { continue }
+                    cell.runs[index].attachment?.id = newID
+                }
+                return cell
+            }
+        }
+    }
+
+    private func requireRestoreState(_ noteID: String, expectedRevision: String?, expectedModified: Date?) throws {
+        guard expectedRevision != nil || expectedModified != nil else { return }
+        let current: Note
+        do { current = try SQLiteNotesStore(refresh: true).note(noteID) }
+        catch {
+            throw NotesError("native_read_failed", "Could not recheck the note before snapshot restore: \(error.localizedDescription)")
+        }
+        if let expectedRevision, NoteRevision.value(current) != expectedRevision {
+            throw NotesError("undo_conflict", "The note changed before snapshot restore could save it.")
+        }
+        if expectedRevision == nil, let expectedModified,
+           current.summary.modified != expectedModified {
+            throw NotesError("undo_conflict", "The note changed before snapshot restore could save it.")
+        }
+    }
+
+    private static func restorePlanError(_ plan: SnapshotRestorePlan) -> NotesError {
+        let refusals = plan.attachments.compactMap { item -> String? in
+            guard case .refuse(let reason) = item.action else { return nil }
+            return "\(item.id):\(reason.rawValue)"
+        }
+        let codes = plan.attachments.compactMap { item -> SnapshotRestoreRefusalReason? in
+            guard case .refuse(let reason) = item.action else { return nil }
+            return reason
+        }
+        let code: String
+        if codes.contains(.invalidSnapshot) || codes.contains(.typeMismatch) || codes.contains(.idCollision) {
+            code = "invalid_snapshot"
+        } else if codes.contains(.missingMaterial) || codes.contains(.missingBlob) {
+            code = "snapshot_material_missing"
+        } else {
+            code = "snapshot_attachment_recreation_unsupported"
+        }
+        return NotesError(code, "Snapshot restore preflight refused attachment recreation: \(refusals.joined(separator: ", ")).")
+    }
+
+    private static func sortedJSON(_ values: [String: String]) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(values), as: UTF8.self)
     }
 
     private struct BuiltSnapshotText {
@@ -1946,15 +6128,28 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return document.runs.compactMap(\.attachment).filter { seen.insert($0.id).inserted }
     }
 
+    private static func nestedMarkerReferences(_ document: NoteDocument) -> [String] {
+        var result: [String] = []
+        for rows in document.tableCells?.values ?? Dictionary<String, [[TableCellDocument]]>().values {
+            for row in rows {
+                for cell in row {
+                    result.append(contentsOf: cell.runs.compactMap(\.attachment?.id))
+                }
+            }
+        }
+        return result
+    }
+
     private struct SnapshotAttachmentReference {
         var id: String
         var typeUTI: String
         var parentID: String?
+        var alternateParentID: String?
     }
 
     private static func attachmentReferences(_ snapshot: Note) throws -> [SnapshotAttachmentReference] {
-        var types: [String: String] = [:], parents: [String: String] = [:]
-        func record(id: String, typeUTI: String, parentID: String?) throws {
+        var types: [String: String] = [:], parents: [String: String] = [:], alternateParents: [String: String] = [:]
+        func record(id: String, typeUTI: String, parentID: String?, alternateParentID: String? = nil) throws {
             if let existing = types[id], existing != typeUTI {
                 throw NotesError("invalid_snapshot", "Attachment \(id) has conflicting saved types.")
             }
@@ -1964,6 +6159,12 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     throw NotesError("invalid_snapshot", "Attachment \(id) has conflicting saved parents.")
                 }
                 parents[id] = parentID
+            }
+            if let alternateParentID {
+                if let existing = alternateParents[id], existing != alternateParentID {
+                    throw NotesError("invalid_snapshot", "Attachment \(id) has conflicting legacy parents.")
+                }
+                alternateParents[id] = alternateParentID
             }
         }
         func collect(_ attachment: Attachment, parentID: String?) throws {
@@ -1977,19 +6178,46 @@ public final class NativeNotesWriter: NotesNativeWriting {
             for child in attachment.childAttachments ?? [] { try collect(child, parentID: attachment.id) }
         }
         for attachment in snapshot.attachments { try collect(attachment, parentID: nil) }
-        func collect(_ document: NoteDocument, parentID: String?) throws {
+        func collectTopLevel(_ document: NoteDocument) throws {
             for reference in document.runs.compactMap(\.attachment) {
-                try record(id: reference.id, typeUTI: reference.typeUTI, parentID: parentID)
+                try record(id: reference.id, typeUTI: reference.typeUTI, parentID: nil)
             }
             for (tableID, rows) in document.tableCells ?? [:] {
-                for row in rows { for cell in row { try collect(cell.document, parentID: tableID) } }
+                for row in rows {
+                    for cell in row {
+                        for reference in cell.runs.compactMap(\.attachment) {
+                            if reference.parentAttachmentCaptured == true {
+                                try record(
+                                    id: reference.id,
+                                    typeUTI: reference.typeUTI,
+                                    parentID: reference.parentAttachmentID
+                                )
+                            } else {
+                                try record(
+                                    id: reference.id,
+                                    typeUTI: reference.typeUTI,
+                                    parentID: nil,
+                                    alternateParentID: tableID
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
-        try collect(snapshot.document!, parentID: nil)
-        guard parents.keys.allSatisfy({ types[$0] != nil && types[parents[$0]!] != nil }) else {
+        try collectTopLevel(snapshot.document!)
+        guard parents.keys.allSatisfy({ types[$0] != nil && types[parents[$0]!] != nil }),
+              alternateParents.keys.allSatisfy({ types[$0] != nil && types[alternateParents[$0]!] != nil }) else {
             throw NotesError("invalid_snapshot", "The snapshot attachment parent graph is incomplete.")
         }
-        return types.keys.sorted().map { SnapshotAttachmentReference(id: $0, typeUTI: types[$0]!, parentID: parents[$0]) }
+        return types.keys.sorted().map {
+            SnapshotAttachmentReference(
+                id: $0,
+                typeUTI: types[$0]!,
+                parentID: parents[$0],
+                alternateParentID: alternateParents[$0]
+            )
+        }
     }
 
     private func attributed(_ document: NoteDocument) throws -> BuiltSnapshotText {
@@ -2018,6 +6246,24 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 if let direction = paragraph.writingDirection {
                     try require(["setWritingDirection:"], of: style as AnyObject)
                     try NCNotesRuntime.setValue(direction, forKey: "writingDirection", of: style as AnyObject)
+                }
+                let paragraphUUID = try paragraph.id.map { value -> UUID in
+                    guard let uuid = UUID(uuidString: value) else {
+                        throw NotesError("invalid_snapshot", "A saved paragraph ID is not a UUID.")
+                    }
+                    return uuid
+                }
+                let checklistUUID = try paragraph.checklistID.map { value -> UUID in
+                    guard let uuid = UUID(uuidString: value) else {
+                        throw NotesError("invalid_snapshot", "A saved checklist ID is not a UUID.")
+                    }
+                    return uuid
+                }
+                if paragraphUUID != nil || checklistUUID != nil {
+                    try NCNotesRuntime.applyParagraphID(
+                        paragraphUUID, checklistID: checklistUUID,
+                        checked: paragraph.checked == true ? 1 : 0, to: style
+                    )
                 }
                 if paragraph.collapsed == true {
                     try require(["uuid", "supportsSectionLinks"], of: style as AnyObject)
@@ -2057,7 +6303,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return BuiltSnapshotText(text: output, collapsedParagraphIDs: collapsed)
     }
 
-    private func restoreTable(_ rows: [[TableCellDocument]], attachment: NSManagedObject) throws {
+    private func restoreTable(_ rows: [[TableCellDocument]], attachment: NSManagedObject,
+                              rightToLeft: Bool) throws {
         guard !rows.isEmpty, let width = rows.map(\.count).max(), width > 0,
               rows.allSatisfy({ $0.count == width }) else {
             throw NotesError("invalid_snapshot", "A saved table has inconsistent dimensions.")
@@ -2071,10 +6318,74 @@ public final class NativeNotesWriter: NotesNativeWriting {
         while columnCount > width { columnCount -= 1; try editor.removeColumn(columnCount) }
         for row in rows.indices {
             for column in rows[row].indices {
-                try editor.setAttributedCell(column: column, row: row, text: attributed(rows[row][column].document).text)
+                let logicalColumn = rightToLeft ? width - column - 1 : column
+                try editor.setAttributedCell(column: logicalColumn, row: row, text: attributed(rows[row][column].document).text)
             }
         }
         try editor.save()
+    }
+
+    private func replaceSnapshotInlineMarker(_ oldID: String, with newID: String,
+                                             note: NSManagedObject, parent: NSManagedObject?) throws {
+        let marker = try NCNotesRuntime.attachmentMarker(
+            id: newID,
+            type: "com.apple.notes.inlinetextattachment.link"
+        )
+        if let parent {
+            let editor = try NCTableEditor(attachment: parent)
+            let rows = try editor.rowCount().intValue
+            let columns = try editor.columnCount().intValue
+            var matches: [(row: Int, column: Int, range: NSRange, text: NSAttributedString)] = []
+            for row in 0..<rows {
+                for column in 0..<columns {
+                    let text = try editor.attributedText(column: column, row: row)
+                    for match in attachmentMarkers(text) where match.2 == oldID {
+                        matches.append((row, column, match.0, text))
+                    }
+                }
+            }
+            guard matches.count == 1, let match = matches.first else {
+                throw NotesError(
+                    "snapshot_attachment_unavailable",
+                    "The provisional self paragraph link marker is unavailable in its parent table."
+                )
+            }
+            let updated = NSMutableAttributedString(attributedString: match.text)
+            var attributes = match.text.attributes(at: match.range.location, effectiveRange: nil)
+            attributes[.init("NSAttachment")] = marker
+            updated.setAttributes(attributes, range: match.range)
+            try editor.setAttributedCell(column: match.column, row: match.row, text: updated)
+            try editor.save()
+            return
+        }
+
+        let editor = try NCBodyEditor(note: note)
+        try editor.prepare(["attributes"])
+        let matches = attachmentMarkers(editor.original).filter { $0.2 == oldID }
+        guard matches.count == 1, let range = matches.first?.0 else {
+            throw NotesError(
+                "snapshot_attachment_unavailable",
+                "The provisional self paragraph link marker is unavailable in the note body."
+            )
+        }
+        var attributes = editor.original.attributes(at: range.location, effectiveRange: nil)
+        attributes[.init("NSAttachment")] = marker
+        try editor.begin(["attributes"])
+        try editor.setAttributes(attributes, range: range)
+        try editor.finish()
+    }
+
+    private func preflightSnapshotDocument(_ document: NoteDocument) throws {
+        _ = try attributed(document)
+        for rows in document.tableCells?.values ?? Dictionary<String, [[TableCellDocument]]>().values {
+            guard !rows.isEmpty, let width = rows.map(\.count).max(), width > 0,
+                  rows.allSatisfy({ $0.count == width }) else {
+                throw NotesError("invalid_snapshot", "A saved table has inconsistent dimensions.")
+            }
+            for row in rows {
+                for cell in row { _ = try attributed(cell.document) }
+            }
+        }
     }
 
     public func insertRecording(_ ref: String, frozen: FrozenAttachmentInput, title: String?, duration: Double,
@@ -2287,7 +6598,7 @@ private final class MarkdownNativeWriter {
         try owner.guardWritable(note, allowShared: allowShared)
         try owner.refreshIfStale(note)
         let editor = try NCBodyEditor(note: note)
-        try editor.prepare(["delete", "insert"])
+        try editor.prepare(["replace"])
         let original = editor.original
         let existing = owner.attachmentMarkers(original)
         let existingByID = Dictionary(grouping: existing, by: { $0.2 }).mapValues { ($0[0].1, $0[0].3) }
@@ -2365,9 +6676,8 @@ private final class MarkdownNativeWriter {
             if next < source.length, built.length > 0 { insertion.append(NSAttributedString(string: "\n")) }
         }
         let expectedText = source.replacingCharacters(in: deletion, with: insertion.string)
-        try editor.begin(["delete", "insert"])
-        if deletion.length > 0 { try editor.delete(deletion) }
-        if insertion.length > 0 { try editor.insert(insertion, at: UInt(deletion.location)) }
+        try editor.begin(["replace"])
+        try editor.replace(deletion, with: insertion)
         try editor.finish()
         try owner.save(context, notes: [note])
         let noteID = owner.id(note), nativeBody = try owner.body(try owner.note(noteID, in: context))
@@ -2393,7 +6703,7 @@ private final class MarkdownNativeWriter {
         }
         var expectedMarkers: [(String, String)] = [], expectedText = ""
         do {
-            let editor = try NCBodyEditor(note: note); try editor.prepare(["delete", "insert"])
+            let editor = try NCBodyEditor(note: note); try editor.prepare(["replace"])
             let existing = owner.attachmentMarkers(editor.original)
             guard Set(preservedIDs).count == preservedIDs.count else { throw NotesError("duplicate_attachment_reference", "Each notescli-attachment ID may appear once.") }
             let existingGroups = Dictionary(grouping: existing, by: { $0.2 })
@@ -2417,7 +6727,9 @@ private final class MarkdownNativeWriter {
             try preserveNativeAttributes(from: editor.original, in: built, mappings: mappings)
             expectedText = built.string
             expectedMarkers = owner.attachmentMarkers(built).map { ($0.2, $0.3) }
-            try editor.begin(["delete", "insert"]); try editor.delete(NSRange(location: 0, length: editor.original.length)); try editor.insert(built, at: 0); try editor.finish()
+            try editor.begin(["replace"])
+            try editor.replace(NSRange(location: 0, length: editor.original.length), with: built)
+            try editor.finish()
             try owner.save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? owner.nativeError(error) }
         let nativeBody = try owner.body(try owner.note(owner.id(note), in: context))

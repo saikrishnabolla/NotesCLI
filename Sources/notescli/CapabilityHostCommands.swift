@@ -50,17 +50,17 @@ enum HostInstallation {
     }
 
     static var requiresInstallOrUpgrade: Bool {
-        guard let source = sourceApp else { return false }
         guard FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path),
-              validSignature(CapabilityHostPaths.app) else { return true }
-        return bundleVersion(source) != bundleVersion(CapabilityHostPaths.app)
+              validSignature(CapabilityHostPaths.app) else { return sourceApp != nil }
+        return bundleVersion(CapabilityHostPaths.app) != [notesCLIVersion, notesCLIVersion]
     }
 
     private static func bundleVersion(_ app: URL) -> [String] {
-        guard let bundle = Bundle(url: app) else { return [] }
-        return ["CFBundleShortVersionString", "CFBundleVersion"].map {
-            bundle.object(forInfoDictionaryKey: $0) as? String ?? ""
-        }
+        let plist = app.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let values = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return [] }
+        return ["CFBundleShortVersionString", "CFBundleVersion"].map { values[$0] as? String ?? "" }
     }
 
     static func launchAgentData() throws -> Data {

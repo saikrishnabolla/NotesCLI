@@ -1,13 +1,42 @@
 import Darwin
 import Foundation
-import NotesHost
+@testable import NotesHost
 import XCTest
 
 final class CapabilityHostTests: XCTestCase {
+    func testRequestCarriesHostProtocolAndCLIRelease() {
+        let request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
+        XCTAssertEqual(request.protocolVersion, 2)
+        XCTAssertEqual(request.clientVersion, "1.1.7")
+    }
+
+    func testVersionMismatchExplainsHowToUpgradeTheHost() {
+        var request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
+        request.clientVersion = "1.1.6"
+        XCTAssertThrowsError(try request.validate(forHostVersion: "1.1.7")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("client is 1.1.6"))
+            XCTAssertTrue(error.localizedDescription.contains("notescli onboard"))
+        }
+
+        request.clientVersion = "1.1.7"
+        request.protocolVersion = 1
+        XCTAssertThrowsError(try request.validate(forHostVersion: "1.1.7")) { error in
+            XCTAssertTrue(error.localizedDescription.contains("notescli onboard"))
+        }
+    }
+
     func testPolicyKeepsPathBearingAndManagementCommandsLocal() {
         XCTAssertTrue(CapabilityHostPolicy.allows(["show", "note-id", "--json"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["mcp", "serve", "--http"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["permissions"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["ocr", "note-id", "--json"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["map", "add", "note-id", "https://maps.apple.com/?q=Apple+Park"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "filter", "note-id", "gallery-id", "page-id", "color"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "state", "note-id", "gallery-id", "page-id"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "rotate", "note-id", "gallery-id", "page-id", "left"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "move", "note-id", "gallery-id", "page-id", "1"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "delete", "note-id", "gallery-id", "page-id"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["settings", "default-style", "--json"]))
         XCTAssertTrue(CapabilityHostPolicy.allows([]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["--json", "--no-recent"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["doctor", "--for-agent", "--json"]))
@@ -22,10 +51,17 @@ final class CapabilityHostTests: XCTestCase {
         XCTAssertFalse(CapabilityHostPolicy.allows(["add", "--file", "/tmp/body.md"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["add", "Title", "--attach", "/tmp/private.pdf"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["attachments", "note", "--save=/tmp/private"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows([
+            "attachments", "note", "--password-stdin", "--save=/tmp/private"
+        ]))
+        XCTAssertFalse(CapabilityHostPolicy.allows([
+            "attachments", "note", "--password-stdin", "--save=/tmp/private", "--preview=/tmp/preview"
+        ]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["write-markdown", "note", "--file=/tmp/private.md"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["native-attachment", "file", "note", "--path=/tmp/private"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["mcp", "install", "--client", "codex"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["recording", "add", "note", "/tmp/audio.m4a"]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["scan", "add", "note", "/tmp/page.png"]))
     }
 
     func testOwnerOnlySocketForwardsArgumentsAndStandardDescriptors() throws {

@@ -32,20 +32,24 @@ let package = Package(
         // macOS: writes through Notes.app scripting, verified by reading back.
         .target(name: "NotesAutomation", dependencies: ["NotesCore"]),
         // macOS: rich writes through NotesShared, loaded only at runtime.
-        .target(name: "NotesNativeObjC", linkerSettings: [.linkedFramework("CoreData"), .linkedFramework("AppKit")]),
+        .target(name: "NotesNativeObjC", linkerSettings: [
+            .linkedFramework("CoreData"), .linkedFramework("AppKit"), .linkedFramework("ImageIO")
+        ]),
         .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"], linkerSettings: [
             .linkedFramework("AVFoundation"), .linkedFramework("Speech"), .linkedFramework("PencilKit")
         ]),
         .target(name: "NotesDiagrams", dependencies: ["NotesCore"], linkerSettings: [
             .linkedFramework("AppKit"), .linkedFramework("CoreGraphics"), .linkedFramework("WebKit")
         ]),
-        .target(name: "NotesHost"),
+        .target(name: "NotesHost", dependencies: ["NotesCore"]),
         .executableTarget(name: "NotesCapabilityHost", dependencies: ["NotesHost"], linkerSettings: [
             .linkedFramework("AppKit"), .linkedFramework("Security")
         ]),
         // MCP server over stdio, same operations as the CLI.
         // Write journal, snapshots/undo, and the write-folder allowlist.
-        .target(name: "NotesSafety", dependencies: ["NotesCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
+        .target(name: "NotesSafety", dependencies: ["NotesCore"], linkerSettings: [
+            .linkedFramework("AVFoundation"), .linkedLibrary("sqlite3")
+        ]),
         .target(name: "NotesMCP", dependencies: ["NotesCore", "NotesIndex", "NotesNative", "NotesSafety", "NotesStore", "NotesSync"], linkerSettings: [
             .linkedFramework("ImageIO"), .linkedFramework("CoreGraphics"), .linkedFramework("Speech")
         ]),
@@ -66,7 +70,7 @@ let package = Package(
         .testTarget(name: "NotesStoreTests", dependencies: ["NotesStore", "NotesCore"]),
         .testTarget(name: "NotesIndexTests", dependencies: ["NotesIndex", "NotesStore", "NotesCore"]),
         .testTarget(name: "NotesAutomationTests", dependencies: ["NotesAutomation", "NotesCore"]),
-        .testTarget(name: "NotesNativeTests", dependencies: ["NotesNative", "NotesAutomation", "NotesCore", "NotesStore"]),
+        .testTarget(name: "NotesNativeTests", dependencies: ["NotesNative", "NotesAutomation", "NotesCore", "NotesSafety", "NotesStore"]),
         .testTarget(name: "NotesSafetyTests", dependencies: ["NotesSafety", "NotesCore"]),
         .testTarget(name: "NotesMCPTests", dependencies: ["NotesMCP", "NotesCore", "NotesSafety"]),
         .testTarget(name: "NotesSyncTests", dependencies: ["NotesSync", "NotesCore"]),

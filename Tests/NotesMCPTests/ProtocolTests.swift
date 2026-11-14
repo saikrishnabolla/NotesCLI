@@ -1,5 +1,7 @@
+import CryptoKit
 import XCTest
 import NotesCore
+import NotesNative
 import NotesSafety
 @testable import NotesMCP
 
@@ -43,6 +45,25 @@ final class ProtocolTests: XCTestCase {
         let value = try XCTUnwrap((try structured(result))["value"] as? [String: Any])
         XCTAssertEqual(value["main_queue_available"] as? Bool, true)
     }
+    func testStdioRejectsOversizedLineAndContinuesWithNextRequest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-stdio-limit-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let inputURL = root.appendingPathComponent("input"), outputURL = root.appendingPathComponent("output")
+        var inputData = Data(repeating: 0x61, count: MCPServer.maximumStdioLineBytes + 1)
+        inputData.append(Data("\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n".utf8))
+        try inputData.write(to: inputURL)
+        XCTAssertTrue(FileManager.default.createFile(atPath: outputURL.path, contents: nil))
+        let input = try FileHandle(forReadingFrom: inputURL), output = try FileHandle(forWritingTo: outputURL)
+        MCPServer(reader: InMemoryNotes.sample()).run(input: input, output: output)
+        try input.close(); try output.close()
+        let lines = try String(contentsOf: outputURL, encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(lines.count, 2)
+        let responses = try lines.map { try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any] }
+        XCTAssertEqual((responses[0]["error"] as? [String: Any])?["code"] as? Int, -32600)
+        XCTAssertEqual((responses[0]["error"] as? [String: Any])?["message"] as? String, "Request exceeds the 4 MiB stdio limit")
+        XCTAssertEqual((responses[1]["id"] as? NSNumber)?.intValue, 7)
+    }
     func testVersionsAndNotifications() throws {
         let server = MCPServer(reader: InMemoryNotes.sample())
         for version in MCPServer.versions + ["future"] {
@@ -61,7 +82,7 @@ final class ProtocolTests: XCTestCase {
             let server = MCPServer(reader: fake, writer: fake, readOnly: readOnly)
             let result = try request(server, method: "tools/list")["result"] as! [String: Any]
             let tools = result["tools"] as! [[String: Any]]
-            XCTAssertEqual(tools.count, readOnly ? 29 : 52)
+            XCTAssertEqual(tools.count, readOnly ? 31 : 54)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "delete_note" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_add" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_prune" }, !readOnly)
@@ -72,7 +93,7 @@ final class ProtocolTests: XCTestCase {
             }
         }
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "pinned_notes", "count_notes", "get_stats", "get_capabilities", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "recording_transcript", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
+        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "history", "diff", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "pinned_notes", "count_notes", "get_stats", "get_capabilities", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "recording_transcript", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
         let defaultTools = (try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
         func readOnlyHint(_ name: String) -> Bool? {
             (defaultTools.first { $0["name"] as? String == name }?["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool
@@ -82,7 +103,12 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 106)
+        XCTAssertEqual(nativeTools.count, 140)
+        for name in ["handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
+            XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
+        }
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "undo" })
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "revert" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "checklist_add" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "move_folder" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_add" })
@@ -94,14 +120,27 @@ final class ProtocolTests: XCTestCase {
             let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
             XCTAssertEqual((properties["transcript_path"] as? [String: Any])?["type"] as? String, "string")
         }
-        for name in ["attach_pasteboard", "add_url", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
-                     "insert_divider", "insert_math", "insert_mention", "table_convert_to_text", "checklist_auto_sort"] {
+        for name in ["attach_pasteboard", "add_url", "link_capture", "smart_folder_create", "smart_folder_rename", "smart_folder_edit_rules", "smart_folder_delete",
+                     "insert_divider", "insert_math", "evaluate_math", "insert_math_result", "insert_mention", "table_convert_to_text", "checklist_auto_sort"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "table_format_cell" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "diagram_add" })
-        for name in ["smart_folder_edit_typed", "get_folder_sort", "set_folder_sort", "set_default_account"] {
+        for name in ["smart_folder_edit_typed", "get_folder_sort", "set_folder_sort", "set_default_account",
+                     "get_folder_date_grouping", "set_folder_date_grouping", "get_default_paragraph_style",
+                     "set_default_paragraph_style", "get_notes_settings", "set_global_note_sort",
+                     "set_global_date_grouping", "set_default_text_size", "set_resume_last_quick_note", "set_auto_convert_tags",
+                     "create_quick_note", "set_quick_note", "ocr_attachment", "map_add", "scan_add",
+                     "scan_page_state", "scan_filter", "scan_rotate", "scan_crop", "scan_move", "scan_delete", "scan_append"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
+        }
+        let scanCrop = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "scan_crop" })
+        let scanCropProperties = try XCTUnwrap((scanCrop["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
+        for name in ["bottom_left_x", "bottom_left_y", "bottom_right_x", "bottom_right_y",
+                     "top_left_x", "top_left_y", "top_right_x", "top_right_y"] {
+            let coordinate = try XCTUnwrap(scanCropProperties[name] as? [String: Any])
+            XCTAssertEqual((coordinate["minimum"] as? NSNumber)?.doubleValue, 0)
+            XCTAssertEqual((coordinate["maximum"] as? NSNumber)?.doubleValue, 1)
         }
         for name in ["drawing_add", "drawing_create", "drawing_export"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
@@ -113,6 +152,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual((drawingProperties["ink"] as? [String: Any])?["enum"] as? [String], ["pen", "marker", "pencil", "monoline"])
         XCTAssertEqual((drawingProperties["fit"] as? [String: Any])?["enum"] as? [String], ["contain", "stretch"])
         XCTAssertEqual((drawingProperties["fill"] as? [String: Any])?["enum"] as? [String], ["outline", "hatch"])
+        XCTAssertEqual((drawingProperties["legacy"] as? [String: Any])?["type"] as? String, "boolean")
         let create = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "create_note" })
         let createProperties = ((create["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
         XCTAssertNotNil(createProperties?["attachments"])
@@ -206,18 +246,95 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try property("format_paragraph", "writing_direction")["enum"] as? [String], ["natural", "left-to-right", "right-to-left"])
         XCTAssertEqual(try property("format_inline", "highlight")["enum"] as? [String], ["purple", "pink", "orange", "mint", "blue"])
         XCTAssertEqual(try property("table_format_cell", "highlight")["enum"] as? [String], ["purple", "pink", "orange", "mint", "blue"])
+        XCTAssertEqual(try property("set_default_text_size", "points")["enum"] as? [Int], [10, 12, 14, 18, 24])
+        XCTAssertEqual(try property("set_auto_convert_tags", "enabled")["type"] as? String, "boolean")
+        XCTAssertEqual(try property("evaluate_math", "expression")["type"] as? String, "string")
+        XCTAssertEqual(try property("insert_math_result", "position")["type"] as? String, "integer")
 
+        let validCrop: [String: Any] = [
+            "ref": "welcome", "attachment_id": "gallery", "page_id": "page",
+            "bottom_left_x": 0.0, "bottom_left_y": 1.0,
+            "bottom_right_x": 1.0, "bottom_right_y": 1.0,
+            "top_left_x": 0.0, "top_left_y": 0.0,
+            "top_right_x": 1.0, "top_right_y": 0.0,
+        ]
+        var negativeCrop = validCrop
+        negativeCrop["bottom_left_x"] = -0.01
+        var oversizedCrop = validCrop
+        oversizedCrop["top_right_y"] = 1.01
         let invalid: [(String, [String: Any], String)] = [
             ("format_paragraph", ["ref": "welcome", "start": 0, "length": 1, "style": "body", "alignment": "diagonal"], "Invalid alignment; use left, right, center, justified, or natural."),
             ("format_paragraph", ["ref": "welcome", "start": 0, "length": 1, "style": "body", "writing_direction": "up"], "Invalid writing_direction; use natural, left-to-right, or right-to-left."),
             ("format_inline", ["ref": "welcome", "start": 0, "length": 1, "highlight": "green"], "Invalid highlight; use purple, pink, orange, mint, or blue."),
-            ("format_inline", ["ref": "welcome", "start": 0, "length": 1, "superscript": true, "subscript": true], "Choose one of superscript, subscript, or clear_script.")
+            ("format_inline", ["ref": "welcome", "start": 0, "length": 1, "superscript": true, "subscript": true], "Choose one of superscript, subscript, or clear_script."),
+            ("set_default_text_size", ["points": 13], "Invalid points; use 10, 12, 14, 18, or 24."),
+            ("scan_crop", negativeCrop, "bottom_left_x must be at least 0"),
+            ("scan_crop", oversizedCrop, "top_right_y must be at most 1")
         ]
         for (name, arguments, message) in invalid {
             let response = try request(server, method: "tools/call", params: ["name": name, "arguments": arguments])
             XCTAssertEqual((response["error"] as? [String: Any])?["message"] as? String, message)
         }
         XCTAssertEqual(dispatchCount, 0)
+    }
+    func testScanAddEnforcesTheMCPPayloadLimitBeforeDispatch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-scan-limit-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fake = InMemoryNotes.sample()
+        var dispatched = 0
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, _ in
+            if tool == "scan_add" { dispatched += 1 }
+            return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+        }, stateRoot: root)
+
+        let tools = ((try request(server, method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]])
+        let scan = try XCTUnwrap(tools.first { $0["name"] as? String == "scan_add" })
+        XCTAssertTrue((scan["description"] as? String)?.contains("at most 4,000,000 base64 characters (3,000,000 decoded bytes)") == true)
+        let pagesSchema = try XCTUnwrap(((scan["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])?["pages"] as? [String: Any])
+        XCTAssertEqual(pagesSchema["maxItems"] as? Int, 100)
+        XCTAssertEqual((pagesSchema["items"] as? [String: Any])?["maxLength"] as? Int, 4_000_000)
+
+        func rejection(_ pages: [String]) throws -> String? {
+            let response = try request(server, method: "tools/call",
+                                       params: ["name": "scan_add", "arguments": ["ref": "welcome", "pages": pages]])
+            let error = try XCTUnwrap(response["error"] as? [String: Any])
+            XCTAssertEqual(error["code"] as? Int, -32602)
+            return (error["data"] as? [String: Any])?["code"] as? String
+        }
+        let overHalf = String(repeating: "A", count: 2_000_004)
+        XCTAssertEqual(try rejection([overHalf, overHalf]), "scan_too_large")
+        let valid = Data([0x89, 0x50, 0x4e]).base64EncodedString()
+        XCTAssertEqual(try rejection([valid, "not base64!"]), "invalid_scan_page")
+        XCTAssertEqual(try rejection([""]), "invalid_scan_page")
+        XCTAssertEqual(dispatched, 0)
+
+        var state: UInt32 = 0x1234_5678
+        func bytes(_ count: Int) -> Data {
+            Data((0..<count).map { _ in
+                state = state &* 1_664_525 &+ 1_013_904_223
+                return UInt8(truncatingIfNeeded: state >> 24)
+            })
+        }
+        let first = bytes(1_500_000), second = bytes(1_500_000)
+        let pages = [first.base64EncodedString(), second.base64EncodedString()]
+        XCTAssertEqual(pages.reduce(0) { $0 + $1.utf8.count }, MCPServer.maximumScanEncodedBytes)
+        let arguments: [String: Any] = ["ref": "welcome", "pages": pages, "page_names": ["one.png", "two.png"]]
+        let wire = try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["name": "scan_add", "arguments": arguments],
+        ] as [String: Any])
+        let defaultHTTPBody = try HTTPMCPServer.Configuration(tokenProvider: { nil }, allowedHosts: ["127.0.0.1"],
+                                                              allowedOrigins: []).maximumBodyBytes
+        XCTAssertLessThanOrEqual(wire.count, defaultHTTPBody)
+
+        let accepted = try call(server, "scan_add", arguments)
+        XCTAssertNotEqual(accepted["isError"] as? Bool, true)
+        XCTAssertEqual(dispatched, 1)
+        let entry = try XCTUnwrap(WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 1).first)
+        let recorded = try XCTUnwrap(JSONSerialization.jsonObject(with: entry.arguments) as? [String: Any])
+        func sha(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+        XCTAssertEqual(recorded["page_sha256"] as? String, sha(first) + "," + sha(second))
+        XCTAssertEqual(recorded["page_count"] as? Int, 2)
+        XCTAssertNil(recorded["pages"])
     }
     func testDiagramSchemaAndValidationUseLiteralNotesDefaults() throws {
         let fake = InMemoryNotes.sample()
@@ -349,6 +466,8 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(dispatchedRef, "welcome")
         XCTAssertEqual(result["engine"] as? String, "native")
         XCTAssertEqual(result["operationID"] as? String, "operation-123")
+        let journalID = try XCTUnwrap(result["journalID"] as? String)
+        XCTAssertEqual((result["result"] as? [String: Any])?["journalID"] as? String, journalID)
 
         _ = try fake.createFolder(name: "Target", parent: nil, account: nil)
         let folders = try fake.folders(account: nil)
@@ -404,6 +523,14 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testNativeSettingAndSmartFolderWritesJournalLiteralPreimages() throws {
+        struct FolderDateGrouping: Encodable { let enabled: Bool; let type: Int }
+        struct NotesSettings: Encodable {
+            let sort = "modified"
+            let groupsByDate = true
+            let defaultTextSize = 12
+            let resumesLastQuickNote = true
+            let autoConvertsToTags = true
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-native-preimages-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let account = Account(id: "account-new", name: "Demo", kind: "local", isDefault: true)
@@ -411,12 +538,40 @@ final class ProtocolTests: XCTestCase {
         let smart = Folder(id: "smart-id", name: "Smart", accountID: account.id, parentID: nil, path: ["Smart"], isSmartFolder: true, isRecentlyDeleted: false, noteCount: 0,
                            smartFolderQuery: #"{"tag":"old"}"#)
         let fake = InMemoryNotes(accounts: [account], folders: [regular, smart])
+        let quickNoteID = try XCTUnwrap(try fake.createNote(title: "Welcome", markdown: "", folder: regular.id).noteID?.uuid)
+        var cropDispatch: [String: Any]?
+        var deleteDispatch: [String: Any]?
+        var undoSortDispatch: [String: Any]?
         let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
             switch tool {
             case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: false)
             case "journal_get_default_account": return try MCPNativeResult(value: "account-old")
             case "journal_get_smart_folder_query": return try MCPNativeResult(value: #"{"tag":"old"}"#)
             case "get_folder_sort": return try MCPNativeResult(value: ["folderID": "regular-id", "order": "created", "direction": "oldest"])
+            case "get_folder_date_grouping": return try MCPNativeResult(value: FolderDateGrouping(enabled: true, type: 0))
+            case "get_default_paragraph_style": return try MCPNativeResult(value: ["style": "title", "value": "0"])
+            case "get_notes_settings": return try MCPNativeResult(value: NotesSettings())
+            case "scan_page_state":
+                return try MCPNativeResult(value: NativeScanPageState(
+                    noteID: quickNoteID, attachmentID: "gallery-1", pageID: "page-1",
+                    pageIDs: ["page-2", "page-1"], filter: .photo, orientation: .right,
+                    crop: ScanCrop(
+                        bottomLeft: ScanPoint(x: 0, y: 1), bottomRight: ScanPoint(x: 1, y: 1),
+                        topLeft: ScanPoint(x: 0, y: 0), topRight: ScanPoint(x: 1, y: 0)),
+                    hasMarkup: false))
+            case "scan_crop":
+                cropDispatch = arguments
+                return try MCPNativeResult(result: WriteResult(outcome: .verified, folderID: arguments["ref"] as? String), value: ["ok": true])
+            case "scan_delete":
+                deleteDispatch = arguments
+                return try MCPNativeResult(result: WriteResult(outcome: .verified, folderID: arguments["ref"] as? String), value: ["ok": true])
+            case "scan_append":
+                return try MCPNativeResult(
+                    result: WriteResult(outcome: .verified, noteID: NoteID(uuid: quickNoteID)),
+                    value: ["pageAttachmentIDs": ["page-3"]])
+            case "set_global_note_sort":
+                if arguments["expected_sort"] != nil { undoSortDispatch = arguments }
+                return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
             default:
                 return try MCPNativeResult(result: WriteResult(outcome: .verified, folderID: arguments["ref"] as? String), value: ["ok": true])
             }
@@ -425,14 +580,72 @@ final class ProtocolTests: XCTestCase {
         _ = try call(server, "checklist_auto_sort", ["enabled": true])
         _ = try call(server, "set_default_account", ["account_id": "account-new"])
         _ = try call(server, "set_folder_sort", ["ref": "Regular", "by": "title", "direction": "ascending"])
+        _ = try call(server, "set_folder_date_grouping", ["ref": "Regular", "enabled": false])
+        _ = try call(server, "set_default_paragraph_style", ["style": "body"])
+        _ = try call(server, "set_global_note_sort", ["sort": "title"])
+        _ = try call(server, "set_global_date_grouping", ["enabled": false])
+        _ = try call(server, "set_default_text_size", ["points": 18])
+        _ = try call(server, "set_resume_last_quick_note", ["enabled": false])
+        _ = try call(server, "set_auto_convert_tags", ["enabled": false])
+        let quickNote = try call(server, "set_quick_note", ["ref": quickNoteID, "enabled": true])
+        XCTAssertNotEqual(quickNote["isError"] as? Bool, true, "\(quickNote)")
         _ = try call(server, "smart_folder_edit_rules", ["ref": "Smart", "query_json": #"{"tag":"new"}"#, "expected_count": 1])
+        _ = try call(server, "scan_filter", ["ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1", "filter": "color"])
+        _ = try call(server, "scan_rotate", ["ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1", "orientation": "upright"])
+        let cropArguments: [String: Any] = [
+            "ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1",
+            "bottom_left_x": 0.1, "bottom_left_y": 0.9,
+            "bottom_right_x": 0.9, "bottom_right_y": 0.9,
+            "top_left_x": 0.1, "top_left_y": 0.1,
+            "top_right_x": 0.9, "top_right_y": 0.1,
+        ]
+        _ = try call(server, "scan_crop", cropArguments)
+        XCTAssertEqual(cropDispatch?["expected_crop"] as? String, "0.0,1.0;1.0,1.0;0.0,0.0;1.0,0.0")
+        _ = try call(server, "scan_move", ["ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1", "to_index": 0])
+        _ = try call(server, "scan_delete", ["ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1"])
+        XCTAssertEqual(deleteDispatch?["expected_page_ids"] as? [String], ["page-2", "page-1"])
+        _ = try call(server, "scan_append", [
+            "ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1",
+            "pages": [Data([1]).base64EncodedString()], "page_names": ["page.png"],
+        ])
 
-        let entries = try WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 10)
+        let entries = try WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 20)
         let actions = try entries.compactMap { try $0.restoreAction() }
         XCTAssertTrue(actions.contains(.checklistAutoSort(enabled: false)))
         XCTAssertTrue(actions.contains(.defaultAccount(identifier: "account-old")))
         XCTAssertTrue(actions.contains(.folderSort(folderID: "regular-id", order: "created", direction: "oldest")))
+        XCTAssertTrue(actions.contains(.folderDateGrouping(folderID: "regular-id", type: 0)))
+        XCTAssertTrue(actions.contains(.defaultParagraphStyle(style: "title")))
+        XCTAssertTrue(actions.contains(.globalNoteSort(sort: "modified")))
+        XCTAssertTrue(actions.contains(.globalDateGrouping(enabled: true)))
+        XCTAssertTrue(actions.contains(.defaultTextSize(points: 12)))
+        XCTAssertTrue(actions.contains(.resumeLastQuickNote(enabled: true)))
+        XCTAssertTrue(actions.contains(.autoConvertToTags(enabled: true)))
+        XCTAssertTrue(actions.contains(.quickNote(noteID: quickNoteID, enabled: false)))
         XCTAssertTrue(actions.contains(.smartFolderQuery(folderID: "smart-id", queryJSON: #"{"tag":"old"}"#)))
+        XCTAssertTrue(actions.contains(.scanFilter(noteID: quickNoteID, attachmentID: "gallery-1", pageID: "page-1", filter: "photo", expectedCurrent: "color")), "\(actions)")
+        XCTAssertTrue(actions.contains(.scanOrientation(noteID: quickNoteID, attachmentID: "gallery-1", pageID: "page-1", orientation: "right", expectedCurrent: "upright")), "\(actions)")
+        XCTAssertTrue(actions.contains(.scanCrop(
+            noteID: quickNoteID, attachmentID: "gallery-1", pageID: "page-1",
+            crop: ScanCrop(
+                bottomLeft: ScanPoint(x: 0, y: 1), bottomRight: ScanPoint(x: 1, y: 1),
+                topLeft: ScanPoint(x: 0, y: 0), topRight: ScanPoint(x: 1, y: 0)),
+            expectedCurrent: ScanCrop(
+                bottomLeft: ScanPoint(x: 0.1, y: 0.9), bottomRight: ScanPoint(x: 0.9, y: 0.9),
+                topLeft: ScanPoint(x: 0.1, y: 0.1), topRight: ScanPoint(x: 0.9, y: 0.1)))), "\(actions)")
+        XCTAssertTrue(actions.contains(.scanMove(noteID: quickNoteID, attachmentID: "gallery-1", pageID: "page-1", index: 1,
+                                                expectedPageIDs: ["page-1", "page-2"])), "\(actions)")
+        XCTAssertTrue(actions.contains(.scanUndelete(noteID: quickNoteID, attachmentID: "gallery-1", pageID: "page-1", index: 1,
+                                                     expectedPageIDs: ["page-2"])), "\(actions)")
+        XCTAssertTrue(actions.contains(.scanDeletePages(
+            noteID: quickNoteID, attachmentID: "gallery-1", pageIDs: ["page-3"],
+            expectedPageIDs: ["page-2", "page-1", "page-3"])), "\(actions)")
+
+        let sortEntry = try XCTUnwrap(entries.first { $0.operation == "set_global_note_sort" })
+        let undo = try call(server, "undo", ["operation_id": sortEntry.id])
+        XCTAssertNotEqual(undo["isError"] as? Bool, true, "\(undo)")
+        XCTAssertEqual(undoSortDispatch?["sort"] as? String, "modified")
+        XCTAssertEqual(undoSortDispatch?["expected_sort"] as? String, "title")
     }
     func testReadAndPaging() throws {
         let server = MCPServer(reader: InMemoryNotes.sample())
@@ -698,6 +911,104 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(items.allSatisfy { $0["error"] == nil })
     }
 
+    func testLinkCaptureIsIdempotentAndExactUndoRestoresItsSnapshot() throws {
+        let fake = InMemoryNotes.sample()
+        let before = try fake.note("welcome").document?.text
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-link-capture-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var captureCalls = 0
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            switch tool {
+            case "link_capture":
+                captureCalls += 1
+                let result = try fake.replaceBody(arguments["ref"] as! String, markdown: "captured link", allowAttachmentLoss: true)
+                return try MCPNativeResult(result: result, value: ["captured": true])
+            case "_journal_restore_snapshot":
+                XCTAssertNil(arguments["snapshot"])
+                XCTAssertNotNil(arguments["_restore_material"] as? SnapshotRestoreMaterial)
+                XCTAssertNotNil(arguments["_expected_revision"] as? String)
+                let snapshot = try XCTUnwrap(arguments["_snapshot_note"] as? Note)
+                let markdown = snapshot.document?.markdown(attachments: snapshot.attachments) ?? ""
+                let result = try fake.replaceBody(arguments["ref"] as! String, markdown: markdown, allowAttachmentLoss: true)
+                return try MCPNativeResult(result: result, value: ["restored": true])
+            default:
+                throw NotesError("unexpected_native_tool", tool)
+            }
+        }, stateRoot: root)
+        let arguments: [String: Any] = ["ref": "welcome", "url": "https://example.com",
+                                        "title": "Example", "idempotency_key": "link-capture-test"]
+
+        let first = try structured(call(server, "link_capture", arguments))
+        let operationID = try XCTUnwrap(first["journalID"] as? String)
+        let replay = try structured(call(server, "link_capture", arguments))
+        XCTAssertEqual(replay["replayed"] as? Bool, true)
+        XCTAssertEqual(captureCalls, 1)
+
+        let journal = try WriteJournal.openReadOnlyIfExists(url: root.appendingPathComponent("journal.sqlite"))
+        let entry = try XCTUnwrap(journal?.entry(id: operationID))
+        XCTAssertNotNil(entry.snapshotID)
+        XCTAssertNotNil(entry.postRevision)
+
+        let undo = try structured(call(server, "undo", ["operation_id": operationID]))
+        XCTAssertNil(undo["error"])
+        XCTAssertEqual(try fake.note("welcome").document?.text, before)
+    }
+
+    func testPrivateSnapshotRestoreOperationIsNotAnMCPTool() throws {
+        let server = MCPServer(reader: InMemoryNotes.sample(), allowNative: true, nativeHandler: { _, _ in
+            XCTFail("A public MCP request reached the private native snapshot operation.")
+            return try MCPNativeResult(value: ["unexpected": true])
+        })
+        let response = try request(
+            server,
+            method: "tools/call",
+            params: ["name": "_journal_restore_snapshot", "arguments": [String: Any]()]
+        )
+        let error = try XCTUnwrap(response["error"] as? [String: Any])
+
+        XCTAssertEqual(error["code"] as? Int, -32602)
+        XCTAssertEqual(error["message"] as? String, "Unknown or unavailable tool")
+    }
+
+    func testHistoryDiffAndConflictSafeUndoUseTheSameSnapshots() throws {
+        let fake = InMemoryNotes.sample()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-history-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            guard tool == "_journal_restore_snapshot",
+                  arguments["snapshot"] == nil,
+                  arguments["_restore_material"] is SnapshotRestoreMaterial,
+                  arguments["_expected_revision"] is String,
+                  let snapshot = arguments["_snapshot_note"] as? Note else {
+                throw NotesError("unexpected_native_tool", tool)
+            }
+            let markdown = snapshot.document?.markdown(attachments: snapshot.attachments) ?? ""
+            let result = try fake.replaceBody(arguments["ref"] as! String, markdown: markdown, allowAttachmentLoss: true)
+            return try MCPNativeResult(result: result, value: ["restored": true])
+        }, stateRoot: root)
+
+        let first = try structured(call(server, "update_note", ["ref": "welcome", "body": "first"]))
+        let firstID = try XCTUnwrap(first["journalID"] as? String)
+        let snapshots = try structured(call(server, "history", ["ref": "welcome"]))["snapshots"] as? [[String: Any]]
+        XCTAssertEqual(snapshots?.count, 1)
+        let snapshotID = try XCTUnwrap(snapshots?.first?["id"] as? String)
+        let diff = try structured(call(server, "diff", ["ref": "welcome", "snapshot": snapshotID]))
+        XCTAssertTrue((diff["diff"] as? String)?.contains("first") == true)
+
+        let second = try structured(call(server, "update_note", ["ref": "welcome", "body": "second"]))
+        let secondID = try XCTUnwrap(second["journalID"] as? String)
+        let conflict = try structured(call(server, "undo", ["operation_id": firstID]))
+        XCTAssertEqual((conflict["error"] as? [String: Any])?["code"] as? String, "undo_conflict")
+
+        let undo = try structured(call(server, "undo", ["operation_id": secondID]))
+        XCTAssertNil(undo["error"])
+        XCTAssertEqual(try fake.note("welcome").document?.text, "first")
+
+        let revert = try structured(call(server, "revert", ["ref": "welcome", "snapshot": snapshotID]))
+        XCTAssertNil(revert["error"])
+        XCTAssertNotEqual(try fake.note("welcome").document?.text, "first")
+    }
+
     func testPerCallWriteFoldersCanNarrowButNotBroadenServerPolicy() throws {
         let fake = InMemoryNotes.sample()
         let serverRestricted = MCPServer(reader: fake, writer: fake, writeFolders: "Personal")
@@ -767,6 +1078,6 @@ final class ServerVersionTests: XCTestCase {
         let server = MCPServer(reader: fake, writer: fake)
         let response = try XCTUnwrap(server.handle(["jsonrpc": "2.0", "id": 1, "method": "initialize", "params": ["protocolVersion": "2025-06-18", "capabilities": [String: Any](), "clientInfo": ["name": "t", "version": "1"]]]))
         let info = try XCTUnwrap((response["result"] as? [String: Any])?["serverInfo"] as? [String: Any])
-        XCTAssertEqual(info["version"] as? String, "1.1.6")
+        XCTAssertEqual(info["version"] as? String, "1.1.7")
     }
 }

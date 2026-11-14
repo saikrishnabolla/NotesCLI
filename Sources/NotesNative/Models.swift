@@ -16,10 +16,52 @@ public struct NativeDoctorReport: Codable, Sendable {
     public static let optionalSelectors: Set<String> = [
         "+[ICInlineAttachment newDividerLineAttachmentWithIdentifier:note:parentAttachment:]",
         "+[ICInlineAttachment newCalculateGraphExpressionAttachmentWithIdentifier:altText:note:parentAttachment:rightToLeft:]",
+        "+[Calculate evaluate:options:error:]",
+        "-[CalculateResult formattedExpression]",
+        "-[CalculateResult formattedResult]",
         "+[ICInlineAttachment newMentionAttachmentWithIdentifier:mentionText:userRecordName:note:parentAttachment:]",
+        "+[ICInlineAttachment newParagraphLinkAttachmentWithIdentifier:toNote:paragraphName:paragraphID:fromNote:parentAttachment:]",
+        "-[SYContentItem initWithDisplayTitle:sourceIdentifier:sourceName:itemURL:]",
+        "-[SYContentItem dataRepresentationWithError:]",
+        "-[SYContentItem initWithData:error:]",
+        "-[SYContentItem displayTitle]",
+        "-[SYContentItem sourceIdentifier]",
+        "-[SYContentItem sourceLastKnownName]",
+        "-[SYContentItem itemURL]",
+        "-[ICNote addSynapseLinkAttachmentWithContentItem:]",
+        "-[ICAttachment hasSynapseLink]",
+        "-[ICAttachment synapseData]",
         "-[ICOutlineState initWithCollapsedUUIDs:]",
         "-[ICOutlineState data]",
         "-[ICOutlineState collapsedUUIDStrings]",
+        "+[ICTextStyle noteDefaultNamedStyle]",
+        "+[ICTextStyle setNoteDefaultNamedStyle:]",
+        "+[ICDocCamImageQuad quadFromCGRect:]",
+        "+[ICGalleryAttachmentUtilities createAndAddSubAttachmentsToGalleryAttachment:fromDocuments:imageCache:context:]",
+        "-[ICDocCamScannedDocumentEditor initWithGalleryAttachment:]",
+        "-[ICDocCamScannedDocumentEditor applyFilter:forAttachmentWithIdentifier:]",
+        "-[ICDocCamScannedDocumentEditor setOrientation:forAttachmentAtIndex:]",
+        "-[ICDocCamScannedDocumentEditor setMarkupData:forAttachmentWithIdentifier:]",
+        "-[ICDocCamScannedDocumentEditor moveObjectWithIdentifier:toIndex:]",
+        "-[ICDocCamScannedDocumentEditor saveAndUpdatePreview:]",
+        "-[ICNote addGalleryAttachmentWithIdentifier:]",
+        "-[ICAttachment addLocationIfNeeded]",
+        "-[ICAttachmentGalleryModel subAttachmentCount]",
+        "-[ICAttachmentGalleryModel subAttachmentIdentifierAtIndex:]",
+        "-[ICFolder applyDateHeadersType:]",
+        "-[ICFolder isShowingDateHeaders]",
+        "-[ICDocCamImageCache initWithDataCryptorDelegate:cachesDirectoryURL:]",
+        "-[ICDocCamImageCache setImage:metaData:]",
+        "-[ICDocCamImageCache getImageURL:]",
+        "-[ICDocCamImageCache deleteAllImages]",
+        "-[ICDocCamDocumentInfo init]",
+        "-[ICDocCamDocumentInfo setFullImageUUID:]",
+        "-[ICDocCamDocumentInfo setCroppedButNotFilteredImageUUID:]",
+        "-[ICDocCamDocumentInfo setCroppedAndFilteredImageUUID:]",
+        "-[ICDocCamDocumentInfo setImageQuad:]",
+        "-[ICDocCamDocumentInfo setMetaData:]",
+        "-[ICDocCamDocumentInfo setCurrentFilter:]",
+        "-[ICDocCamDocumentInfo setCurrentOrientation:]",
     ]
     /// Missing selectors that the whole native engine depends on.
     public var missingCore: [String] { missing.filter { !Self.optionalSelectors.contains($0) } }
@@ -74,6 +116,50 @@ public enum NativeParagraphStyle: String, Codable, Sendable, CaseIterable {
     }
 }
 
+public enum NativeDefaultParagraphStyle: String, Codable, Sendable, CaseIterable {
+    case title, heading, subheading, body, monospaced
+    public var value: Int {
+        switch self { case .title: 0; case .heading: 1; case .subheading: 2; case .body: 3; case .monospaced: 4 }
+    }
+    public init?(value: Int) {
+        guard let style = Self.allCases.first(where: { $0.value == value }) else { return nil }
+        self = style
+    }
+}
+
+public enum NativeGlobalNoteSort: String, Codable, Sendable, CaseIterable {
+    case modified, created, title
+    public var value: Int { switch self { case .modified: 0; case .created: 1; case .title: 2 } }
+    public init?(value: Int) {
+        guard let sort = Self.allCases.first(where: { $0.value == value }) else { return nil }
+        self = sort
+    }
+}
+
+public struct NativeNotesSettings: Codable, Sendable, Equatable {
+    public var sort: NativeGlobalNoteSort
+    public var groupsByDate: Bool
+    public var defaultTextSize: Int
+    public var resumesLastQuickNote: Bool
+    public var autoConvertsToTags: Bool
+    public init(sort: NativeGlobalNoteSort, groupsByDate: Bool, defaultTextSize: Int, resumesLastQuickNote: Bool,
+                autoConvertsToTags: Bool) {
+        self.sort = sort
+        self.groupsByDate = groupsByDate
+        self.defaultTextSize = defaultTextSize
+        self.resumesLastQuickNote = resumesLastQuickNote
+        self.autoConvertsToTags = autoConvertsToTags
+    }
+}
+
+public enum NativeMapURL {
+    public static func validate(_ url: URL) throws {
+        guard url.scheme?.lowercased() == "https", url.host?.lowercased() == "maps.apple.com" else {
+            throw NotesError("invalid_map_url", "Use an https://maps.apple.com URL.")
+        }
+    }
+}
+
 public enum NativeParagraphAlignment: String, Codable, Sendable, CaseIterable {
     case left, right, center, justified, natural
     public var value: Int {
@@ -116,9 +202,18 @@ public struct InlineFormat: Codable, Sendable {
 public struct NativeNoteLink: Codable, Sendable, Equatable {
     public var sourceID: String
     public var targetID: String
+    public var targetParagraphID: String?
+    public var targetParagraphName: String?
     public var text: String
     public var attachmentID: String
     public var range: UTF16Range?
+    public init(sourceID: String, targetID: String, targetParagraphID: String? = nil,
+                targetParagraphName: String? = nil, text: String, attachmentID: String,
+                range: UTF16Range?) {
+        self.sourceID = sourceID; self.targetID = targetID
+        self.targetParagraphID = targetParagraphID; self.targetParagraphName = targetParagraphName
+        self.text = text; self.attachmentID = attachmentID; self.range = range
+    }
 }
 
 public struct NativeAttachmentResult: Codable, Sendable {
@@ -132,6 +227,86 @@ public struct NativeAttachmentResult: Codable, Sendable {
                 storedSHA256: String? = nil, write: NativeWriteResult) {
         self.attachmentID = attachmentID; self.typeUTI = typeUTI; self.position = position
         self.sourceSHA256 = sourceSHA256; self.storedSHA256 = storedSHA256; self.write = write
+    }
+}
+
+public struct NativeScanResult: Codable, Sendable {
+    public var attachmentID: String
+    public var pageAttachmentIDs: [String]
+    public var position: Int
+    public var write: NativeWriteResult
+
+    public init(attachmentID: String, pageAttachmentIDs: [String], position: Int, write: NativeWriteResult) {
+        self.attachmentID = attachmentID
+        self.pageAttachmentIDs = pageAttachmentIDs
+        self.position = position
+        self.write = write
+    }
+}
+
+public enum NativeScanFilter: String, Codable, Sendable, CaseIterable {
+    case photo, color, grayscale, blackAndWhite = "black-and-white", whiteboard
+    public var value: Int {
+        switch self { case .photo: 0; case .color: 1; case .grayscale: 2; case .blackAndWhite: 3; case .whiteboard: 4 }
+    }
+    public init?(value: Int) { guard let item = Self.allCases.first(where: { $0.value == value }) else { return nil }; self = item }
+}
+
+public enum NativeScanOrientation: String, Codable, Sendable, CaseIterable {
+    case upright, upsideDown = "upside-down", left, right
+    public var value: Int { switch self { case .upright: 0; case .upsideDown: 1; case .left: 2; case .right: 3 } }
+    public init?(value: Int) { guard let item = Self.allCases.first(where: { $0.value == value }) else { return nil }; self = item }
+}
+
+public struct NativeScanPageState: Codable, Sendable, Equatable {
+    public var noteID: String
+    public var attachmentID: String
+    public var pageID: String
+    public var pageIDs: [String]
+    public var filter: NativeScanFilter
+    public var orientation: NativeScanOrientation
+    public var crop: ScanCrop?
+    public var hasMarkup: Bool
+    public var hasEmbeddedMarkup: Bool
+
+    public init(noteID: String, attachmentID: String, pageID: String, pageIDs: [String],
+                filter: NativeScanFilter, orientation: NativeScanOrientation,
+                crop: ScanCrop?, hasMarkup: Bool, hasEmbeddedMarkup: Bool = false) {
+        self.noteID = noteID
+        self.attachmentID = attachmentID
+        self.pageID = pageID
+        self.pageIDs = pageIDs
+        self.filter = filter
+        self.orientation = orientation
+        self.crop = crop
+        self.hasMarkup = hasMarkup
+        self.hasEmbeddedMarkup = hasEmbeddedMarkup
+    }
+}
+
+public struct NativeCalculation: Codable, Sendable, Equatable {
+    public var expression: String
+    public var formattedExpression: String
+    public var result: String
+    public var renderedText: String
+
+    public init(expression: String, formattedExpression: String, result: String, renderedText: String) {
+        self.expression = expression
+        self.formattedExpression = formattedExpression
+        self.result = result
+        self.renderedText = renderedText
+    }
+}
+
+public struct NativeMathResult: Codable, Sendable {
+    public var calculation: NativeCalculation
+    public var position: Int
+    public var write: NativeWriteResult
+
+    public init(calculation: NativeCalculation, position: Int, write: NativeWriteResult) {
+        self.calculation = calculation
+        self.position = position
+        self.write = write
     }
 }
 
@@ -167,6 +342,46 @@ public struct NativePaperAttachment: Sendable {
         self.attachmentID = attachmentID
         self.typeUTI = typeUTI
         self.drawings = drawings
+    }
+}
+
+public struct NativeHandwritingResult: Codable, Sendable {
+    public var attachmentID: String
+    public var text: String
+    public var rawText: String
+    public var modelText: String
+    public var score: Double
+    public var strokeCount: Int
+    public var pointCount: Int
+    public var persisted: Bool
+    public var write: NativeWriteResult?
+
+    public init(attachmentID: String, text: String, rawText: String, modelText: String,
+                score: Double, strokeCount: Int, pointCount: Int, persisted: Bool,
+                write: NativeWriteResult? = nil) {
+        self.attachmentID = attachmentID
+        self.text = text
+        self.rawText = rawText
+        self.modelText = modelText
+        self.score = score
+        self.strokeCount = strokeCount
+        self.pointCount = pointCount
+        self.persisted = persisted
+        self.write = write
+    }
+}
+
+public struct NativeFallbackPDFResult: Codable, Sendable {
+    public var attachmentID: String
+    public var byteCount: Int
+    public var path: String
+    public var write: NativeWriteResult
+
+    public init(attachmentID: String, byteCount: Int, path: String, write: NativeWriteResult) {
+        self.attachmentID = attachmentID
+        self.byteCount = byteCount
+        self.path = path
+        self.write = write
     }
 }
 
@@ -206,14 +421,19 @@ public protocol NotesNativeWriting {
     func setAllChecklist(_ ref: String, done: Bool, allowShared: Bool) throws -> NativeWriteResult
     func deleteCompleted(_ ref: String, allowShared: Bool) throws -> NativeWriteResult
     func setPinned(_ ref: String, pinned: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func setQuickNote(_ ref: String, enabled: Bool, allowShared: Bool) throws -> NativeWriteResult
     func addTag(_ ref: String, tag: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func removeTag(_ ref: String, tag: String, allowShared: Bool) throws -> NativeWriteResult
     func renameTag(_ tag: String, to: String, expectedCount: Int, allowShared: Bool) throws -> NativeWriteResult
     func deleteTag(_ tag: String, expectedCount: Int, allowShared: Bool) throws -> NativeWriteResult
-    func insertNoteLink(_ ref: String, target: String, text: String?, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func insertNoteLink(_ ref: String, target: String, text: String?, paragraphID: String?,
+                        paragraphName: String?, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func insertDivider(_ ref: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func insertMathExpression(_ ref: String, expression: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func evaluateMath(_ expression: String) throws -> NativeCalculation
+    func insertMathResult(_ ref: String, expression: String, position: Int?, allowShared: Bool) throws -> NativeMathResult
     func insertMention(_ ref: String, text: String, userRecordName: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func insertMap(_ ref: String, url: URL, position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func links(_ ref: String) throws -> [NativeNoteLink]
     func backlinks(_ ref: String) throws -> [NativeNoteLink]
     func insertText(_ ref: String, text: String, position: Int, allowShared: Bool) throws -> NativeWriteResult
@@ -226,8 +446,28 @@ public protocol NotesNativeWriting {
     func setInlineFormat(_ ref: String, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult
     func insertFile(_ ref: String, file: URL, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
     func insertDrawing(_ ref: String, drawing: PKDrawing, position: Int?, allowShared: Bool) throws -> NativeAttachmentResult
+    func insertLegacyDrawing(_ ref: String, records: [LegacyDrawingStrokeRecord], position: Int?, allowShared: Bool) throws -> NativeAttachmentResult
     func insertFrozenFile(_ ref: String, frozen: FrozenAttachmentInput, position: Int?, imageView: String?, allowShared: Bool) throws -> NativeAttachmentResult
+    func insertScan(_ ref: String, pages: [FrozenAttachmentInput], position: Int?, allowShared: Bool) throws -> NativeScanResult
+    func appendScanPages(_ ref: String, attachmentID: String, pages: [FrozenAttachmentInput],
+                         expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeScanResult
+    func scanPageState(_ ref: String, attachmentID: String, pageID: String) throws -> NativeScanPageState
+    func setScanFilter(_ ref: String, attachmentID: String, pageID: String, filter: NativeScanFilter,
+                       expectedCurrent: NativeScanFilter?, allowShared: Bool) throws -> NativeWriteResult
+    func setScanOrientation(_ ref: String, attachmentID: String, pageID: String, orientation: NativeScanOrientation,
+                            expectedCurrent: NativeScanOrientation?, allowShared: Bool) throws -> NativeWriteResult
+    func setScanCrop(_ ref: String, attachmentID: String, pageID: String, crop: ScanCrop,
+                     expectedCurrent: ScanCrop?, allowShared: Bool) throws -> NativeWriteResult
+    func moveScanPage(_ ref: String, attachmentID: String, pageID: String, toIndex: Int,
+                      expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
+    func deleteScanPage(_ ref: String, attachmentID: String, pageID: String,
+                        expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
+    func restoreScanPage(_ ref: String, attachmentID: String, pageID: String, toIndex: Int,
+                         expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
+    func deleteScanPages(_ ref: String, attachmentID: String, pageIDs: [String],
+                         expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
     func createNote(title: String, markdown: String, folder: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult
+    func createQuickNote(title: String, markdown: String, folder: String?, allowShared: Bool) throws -> NativeCreateResult
     func insertRecording(_ ref: String, frozen: FrozenAttachmentInput, title: String?, duration: Double,
                          transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult
     func createRecordingNote(folder: String?, title: String, frozen: FrozenAttachmentInput, duration: Double,
@@ -235,6 +475,8 @@ public protocol NotesNativeWriting {
     func writeRecordingTranscripts(_ ref: String, transcripts: [String: [TranscriptWord]], allowShared: Bool) throws -> NativeWriteResult
     func createDrawingNote(title: String, folder: String?, drawing: PKDrawing, allowShared: Bool) throws -> NativeCreateResult
     func insertURL(_ ref: String, url: URL, card: Bool, position: Int?, allowShared: Bool) throws -> NativeWriteResult
+    func insertSynapseLink(_ ref: String, url: URL, title: String,
+                           position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func deleteAttachment(_ ref: String, attachmentID: String, allowShared: Bool) throws -> NativeWriteResult
     func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult
     func editTable(_ ref: String, attachmentID: String, row: Int, column: Int, text: String, allowShared: Bool) throws -> NativeWriteResult
@@ -242,10 +484,20 @@ public protocol NotesNativeWriting {
     func resizeTable(_ ref: String, attachmentID: String, axis: String, index: Int, add: Bool, allowShared: Bool) throws -> NativeWriteResult
     func convertTableToText(_ ref: String, attachmentID: String, separator: String, allowShared: Bool) throws -> NativeWriteResult
     func duplicate(_ ref: String, title: String?, allowShared: Bool) throws -> NativeWriteResult
+    func deleteNote(_ ref: String, allowShared: Bool) throws -> NativeWriteResult
     func restore(_ ref: String, folder: String?, allowShared: Bool) throws -> NativeWriteResult
     func moveFolder(_ ref: String, parent: String?, allowShared: Bool) throws -> NativeWriteResult
     func folderSort(_ ref: String) throws -> NativeFolderSortSetting
     func setFolderSort(_ ref: String, order: NativeFolderSortOrder, direction: NativeFolderSortDirection) throws -> NativeWriteResult
+    func setFolderDateGrouping(_ ref: String, grouped: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func notesSettings() throws -> NativeNotesSettings
+    func setGlobalNoteSort(_ sort: NativeGlobalNoteSort) throws -> NativeWriteResult
+    func setGlobalDateGrouping(_ enabled: Bool) throws -> NativeWriteResult
+    func setDefaultTextSize(_ points: Int) throws -> NativeWriteResult
+    func setResumeLastQuickNote(_ enabled: Bool) throws -> NativeWriteResult
+    func setAutoConvertToTags(_ enabled: Bool) throws -> NativeWriteResult
+    func defaultParagraphStyle() throws -> NativeDefaultParagraphStyle
+    func setDefaultParagraphStyle(_ style: NativeDefaultParagraphStyle) throws -> NativeWriteResult
     func defaultAccountIdentifier() throws -> String
     func setDefaultAccount(_ identifier: String) throws -> NativeWriteResult
     func createSmartFolder(name: String, tags: [String], matchAll: Bool) throws -> NativeWriteResult

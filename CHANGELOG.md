@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.7
+
+### Added
+
+- History, undo, and revert can recreate scans and markup, recordings, Paper documents, modern and classic drawings, rich links, maps, tables, paragraph links, inline objects, and generic files.
+- Native note links can target a paragraph, and history preserves paragraph and checklist identities.
+- Password-supplied reads support V1 and V1 Neo locked-note bodies and attachments.
+
+### Changed
+
+- Snapshot restoration now checks object structure, private payloads, and archived media through fresh native and database reads.
+- Body replacement uses Notes' atomic range operation, and changed bodies are checked before Core Data saves them.
+- Automatic routing skips an outdated capability host. Forced routing explains how to update it with `notescli onboard`.
+
 ## 1.1.6
 
 ### Fixed

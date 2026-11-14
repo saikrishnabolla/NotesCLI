@@ -17,7 +17,7 @@ if [[ "$IDENTITY" != "-" && -z "$NOTARY_PROFILE" ]]; then
     exit 1
 fi
 
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR" "$ROOT/.build"
 STAGING="$(mktemp -d "$ROOT/.build/notescli-release.XXXXXX")"
 trap 'rm -rf -- "$STAGING"' EXIT
 RELEASE_INFO_PLIST="$STAGING/Info.plist"

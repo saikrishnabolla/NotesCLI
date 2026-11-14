@@ -438,9 +438,10 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         guard !rows.isEmpty else { try body(note); return }
         let scope = try LockedAttachmentExtractionScope()
         defer { scope.cleanup() }
-        let extractor = LockedAttachmentExtractor(
+        var extractor = LockedAttachmentExtractor(
             library: library, container: container, accountID: opened.summary.accountID,
             password: password, scope: scope)
+        extractor.noteMainKey = opened.mainKey
         var extractedByPK: [Int64: LockedAttachmentResult] = [:]
         for row in rows {
             guard let pk = row.int("Z_PK") else { continue }
@@ -473,7 +474,7 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
     }
 
     private func openLockedNote(_ ref: String, password: String) throws
-        -> (summary: NoteSummary, notePK: Int64, data: Data) {
+        -> (summary: NoteSummary, notePK: Int64, data: Data, mainKey: Data?) {
         let summary = try resolve(ref)
         guard summary.isLocked else { throw NotesError("note_not_locked", "The note is not locked.") }
         guard let pk = notePKs[summary.id.uuid.lowercased()], let encrypted = library.bodies[pk], !encrypted.isEmpty else {
@@ -490,8 +491,9 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
             legacy = .init(salt: salt, iterations: iterations, wrappedKey: wrapped, iv: iv, tag: tag,
                            ciphertext: encrypted, authenticatedData: nil)
         } else { legacy = nil }
-        let (data, _) = try LockedNoteCrypto.open(password: password, encryptedBody: encrypted, legacy: legacy)
-        return (summary, pk, data)
+        let opened = try LockedNoteCrypto.openVerifyingMainKey(
+            password: password, encryptedBody: encrypted, legacy: legacy)
+        return (summary, pk, opened.plaintext, opened.mainKey)
     }
 
     private func decodedNote(summary: NoteSummary, notePK pk: Int64, data: Data,

@@ -71,14 +71,21 @@ struct LockedAttachmentExtractor {
     let accountID: String
     let password: String
     let scope: LockedAttachmentExtractionScope
+    /// Verified V1-Neo main key from the owning note's body, if any.
+    var noteMainKey: Data? = nil
 
     func extract(_ original: StoreRow) throws -> LockedAttachmentResult {
         try rejectUnappliedRecord(original)
-        var row = try decryptedValues(in: original).map { applying($0, to: original) } ?? original
+        // Objects whose own password envelope opened, keyed by identifier.
+        var sidecarOwners: [String: LockedNoteCrypto.NeoSidecarKeys] = [:]
+        var row = try decryptedValues(in: original, owners: &sidecarOwners)
+            .map { applying($0, to: original) } ?? original
         let media = row.int("ZMEDIA").flatMap { library.objects[$0] }
         if let media { try rejectUnappliedRecord(media) }
-        let mediaValues = try media.flatMap(decryptedValues)
+        let mediaValues = try media.flatMap { try decryptedValues(in: $0, owners: &sidecarOwners) }
         if let mediaValues { row = applying(mediaValues, to: row) }
+        // Notes' parentEncryptableObject chain: media -> attachment -> note.
+        let encryptableChain = [media, original].compactMap { $0 }
         let filename = mediaValues?["filename"] as? String ?? media?.string("ZFILENAME") ?? row.string("ZFILENAME")
         if let filename, !Self.safePathComponent(filename) {
             throw NotesError("locked_attachment_invalid", "The locked attachment filename is invalid.")
@@ -99,6 +106,8 @@ struct LockedAttachmentExtractor {
             plaintext = try openNeoEnvelope(
                 ciphertext,
                 expectedObjectIdentifier: expectedObjectIdentifier,
+                sidecarKeys: sidecarKeys(
+                    owner: expectedObjectIdentifier, chain: encryptableChain, verified: sidecarOwners),
                 failureMessage: "A locked attachment could not be authenticated.")
         } else {
             guard let iv = choice.iv, let tag = choice.tag else {
@@ -128,6 +137,33 @@ struct LockedAttachmentExtractor {
         return LockedAttachmentResult(row: row, filename: outputFilename, filePath: path.path)
     }
 
+    /// Mirrors Notes' strategy and key choice for a sidecar owner. The cipher
+    /// version comes from the nearest object, starting at the owner, that has
+    /// encrypted data (`ICCryptoStrategyFactory primaryEncryptedDataForObject:`).
+    /// If that is the owner, only the key that opened its values works. If it
+    /// is a parent, `cachedMainKeyForObject:` accepts that parent's verified
+    /// key, because `mainKeyDecryptsPrimaryData:` returns YES for an owner
+    /// with no wrapped key of its own. The chain is media, attachment, then
+    /// the note body.
+    private func sidecarKeys(owner identifier: String, chain: [StoreRow],
+                             verified: [String: LockedNoteCrypto.NeoSidecarKeys]) -> LockedNoteCrypto.NeoSidecarKeys? {
+        guard let start = chain.firstIndex(where: { $0.string("ZIDENTIFIER") == identifier }) else { return nil }
+        for (offset, object) in chain[start...].enumerated() {
+            guard Self.hasPrimaryEncryptedData(object) else { continue }
+            guard let objectID = object.string("ZIDENTIFIER"), let keys = verified[objectID] else {
+                // Legacy values select Notes' V1 strategy, whose sidecars are
+                // raw tag, IV, and ciphertext, never cipher-3 envelopes.
+                return nil
+            }
+            return offset == 0 ? keys : .init(mainKey: keys.mainKey, encryptedValues: nil)
+        }
+        return noteMainKey.map { .init(mainKey: $0, encryptedValues: nil) }
+    }
+
+    private static func hasPrimaryEncryptedData(_ row: StoreRow) -> Bool {
+        row.data("ZENCRYPTEDVALUESJSON")?.isEmpty == false
+    }
+
     private func rejectUnappliedRecord(_ row: StoreRow) throws {
         if row.data("ZUNAPPLIEDENCRYPTEDRECORDDATA", "ZUNAPPLIEDENCRYPTEDRECORD")?.isEmpty == false {
             throw NotesError(
@@ -136,17 +172,23 @@ struct LockedAttachmentExtractor {
         }
     }
 
-    private func decryptedValues(in row: StoreRow) throws -> [String: Any]? {
+    private func decryptedValues(in row: StoreRow,
+                                 owners: inout [String: LockedNoteCrypto.NeoSidecarKeys]) throws -> [String: Any]? {
         guard let encrypted = row.data("ZENCRYPTEDVALUESJSON"), !encrypted.isEmpty else { return nil }
         let plaintext: Data
+        var neoOwner: (identifier: String, mainKey: Data)?
         if encrypted.starts(with: Data("bplist00".utf8)) {
             guard let objectIdentifier = row.string("ZIDENTIFIER") else {
                 throw NotesError("locked_attachment_invalid", "The locked attachment metadata has no object identifier.")
             }
-            plaintext = try openNeoEnvelope(
-                encrypted,
-                expectedObjectIdentifier: objectIdentifier,
-                failureMessage: "The locked attachment metadata could not be authenticated.")
+            let opened = try mapNeoErrors("The locked attachment metadata could not be authenticated.") {
+                try LockedNoteCrypto.openNeoEnvelopeVerifyingMainKey(
+                    password: password,
+                    data: encrypted,
+                    expectedObjectIdentifier: objectIdentifier)
+            }
+            plaintext = opened.plaintext
+            neoOwner = (objectIdentifier, opened.mainKey)
         } else {
             guard let iv = row.data("ZCRYPTOINITIALIZATIONVECTOR"),
                   let tag = row.data("ZCRYPTOTAG") else {
@@ -168,6 +210,9 @@ struct LockedAttachmentExtractor {
         }
         guard let values = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any] else {
             throw NotesError("locked_attachment_invalid", "The locked attachment metadata is not valid JSON.")
+        }
+        if let neoOwner {
+            owners[neoOwner.identifier] = .init(mainKey: neoOwner.mainKey, encryptedValues: values)
         }
         return values
     }
@@ -264,12 +309,20 @@ struct LockedAttachmentExtractor {
     }
 
     private func openNeoEnvelope(_ data: Data, expectedObjectIdentifier: String,
+                                 sidecarKeys: LockedNoteCrypto.NeoSidecarKeys?,
                                  failureMessage: String) throws -> Data {
-        do {
-            return try LockedNoteCrypto.openNeoEnvelope(
+        try mapNeoErrors(failureMessage) {
+            try LockedNoteCrypto.openNeoEnvelope(
                 password: password,
                 data: data,
-                expectedObjectIdentifier: expectedObjectIdentifier)
+                expectedObjectIdentifier: expectedObjectIdentifier,
+                sidecarKeys: sidecarKeys)
+        }
+    }
+
+    private func mapNeoErrors<T>(_ failureMessage: String, _ body: () throws -> T) throws -> T {
+        do {
+            return try body()
         } catch let error as NotesError {
             switch error.code {
             case "wrong_password", "locked_attachment_identity_mismatch",

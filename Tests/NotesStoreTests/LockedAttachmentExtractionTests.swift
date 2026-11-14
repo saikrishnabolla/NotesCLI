@@ -169,6 +169,141 @@ final class LockedAttachmentExtractionTests: XCTestCase {
         }
     }
 
+    func testNeoSidecarFileOpensWithOwnersStoredSidecarKey() throws {
+        let fixture = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        var extractedPath: String?
+        try fixture.withExtractedAttachment { attachment in
+            extractedPath = try XCTUnwrap(attachment.filePath)
+            XCTAssertEqual(attachment.filename, "drawing.png")
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: extractedPath!)), fixture.plaintext)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(extractedPath)))
+    }
+
+    func testNeoSidecarFileFallsBackToOwnersMainKey() throws {
+        let fixture = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        try fixture.replaceSource(with: AppleSidecarFixtures.sidecarWrappedWithMainKey)
+        try fixture.withExtractedAttachment { attachment in
+            XCTAssertEqual(
+                try Data(contentsOf: URL(fileURLWithPath: XCTUnwrap(attachment.filePath))),
+                AppleSidecarFixtures.fallbackPayload)
+        }
+    }
+
+    func testNeoSidecarFileWithoutAnyVerifiedKeyIsUnsupported() throws {
+        let fixture = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        try fixture.removeAttachmentEncryptedValues()
+        XCTAssertThrowsError(try fixture.withExtractedAttachment { _ in
+            XCTFail("The callback must not run.")
+        }) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_sidecar_unsupported")
+        }
+    }
+
+    func testNeoSidecarOwnerWithoutValuesUsesNoteMainKey() throws {
+        // Notes' cachedMainKeyForObject: walks media -> attachment -> note. An
+        // owner without its own encrypted values takes the note's key.
+        let fixture = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        try fixture.removeAttachmentEncryptedValues()
+        try fixture.replaceSource(with: AppleSidecarFixtures.sidecarWrappedWithMainKey)
+        try fixture.withExtractedAttachment(noteMainKey: AppleSidecarFixtures.mainKey) { attachment in
+            XCTAssertEqual(
+                try Data(contentsOf: URL(fileURLWithPath: XCTUnwrap(attachment.filePath))),
+                AppleSidecarFixtures.fallbackPayload)
+        }
+
+        // With no stored sidecarMainKey, a sidecar wrapped with one cannot open.
+        try fixture.replaceSource(with: AppleSidecarFixtures.sidecarWrappedWithStoredKey)
+        XCTAssertThrowsError(try fixture.withExtractedAttachment(noteMainKey: AppleSidecarFixtures.mainKey) { _ in
+            XCTFail("The callback must not run.")
+        }) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed")
+        }
+    }
+
+    func testNeoSidecarOwnerWithOwnValuesIgnoresNoteMainKey() throws {
+        // An owner with its own values accepts only the key that opened them,
+        // even when a parent key would unwrap the sidecar.
+        let fixture = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        try fixture.setAttachmentEncryptedValues(AppleSidecarFixtures.valuesWithoutSidecarKey)
+        XCTAssertThrowsError(try fixture.withExtractedAttachment(noteMainKey: AppleSidecarFixtures.sidecarKey) { _ in
+            XCTFail("The callback must not run.")
+        }) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed")
+        }
+    }
+
+    func testStoreReadsSidecarWithNeoNoteBodyKey() throws {
+        let fixture = try LockedAttachmentFixture(variant: .neoSidecarNoteKey)
+        var path: String?
+        try fixture.store().withPasswordUnlockedNote("LOCKED", password: fixture.password) { note in
+            let attachment = try XCTUnwrap(note.attachments.first)
+            path = try XCTUnwrap(attachment.filePath)
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path!)), fixture.plaintext)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try XCTUnwrap(path)))
+    }
+
+    func testNeoSidecarFileTamperingAndWrongPasswordFailClosed() throws {
+        let tampered = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        try tampered.tamperSourceTail()
+        XCTAssertThrowsError(try tampered.withExtractedAttachment { _ in
+            XCTFail("The callback must not run.")
+        }) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed")
+        }
+
+        let wrongPassword = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        XCTAssertThrowsError(try wrongPassword.withExtractedAttachment(password: "wrong") { _ in
+            XCTFail("The callback must not run.")
+        }) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "wrong_password")
+        }
+    }
+
+    func testUnusableStoredSidecarKeyFallsBackToOwnersMainKey() throws {
+        // The owner's Apple-encrypted values hold sidecarMainKey "!!!". Notes
+        // decodes that as no key and falls back to the main key.
+        let fixture = try LockedAttachmentFixture(variant: .neoSidecarFallbackImage)
+        try fixture.setAttachmentEncryptedValues(AppleSidecarFixtures.valuesWithMalformedSidecarKey)
+        try fixture.replaceSource(with: AppleSidecarFixtures.sidecarWrappedWithMainKey)
+        try fixture.withExtractedAttachment { attachment in
+            XCTAssertEqual(
+                try Data(contentsOf: URL(fileURLWithPath: XCTUnwrap(attachment.filePath))),
+                AppleSidecarFixtures.fallbackPayload)
+        }
+
+        try fixture.replaceSource(with: AppleSidecarFixtures.sidecarWrappedWithStoredKey)
+        XCTAssertThrowsError(try fixture.withExtractedAttachment { _ in
+            XCTFail("The callback must not run.")
+        }) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed")
+        }
+    }
+
+    func testMediaSidecarWithoutValuesUsesAttachmentKey() throws {
+        // Media without values: the nearest object with encrypted data is the
+        // V1-Neo attachment, so its verified key opens the media's sidecar.
+        let fixture = try LockedAttachmentFixture(variant: .neoMediaSidecar(legacyParent: false))
+        try fixture.withExtractedAttachment { attachment in
+            XCTAssertEqual(
+                try Data(contentsOf: URL(fileURLWithPath: XCTUnwrap(attachment.filePath))),
+                AppleSidecarFixtures.mediaPayload)
+        }
+    }
+
+    func testMediaSidecarUnderLegacyAttachmentIsUnsupported() throws {
+        // The nearest object with encrypted data is a legacy attachment, so
+        // Notes picks its V1 strategy, which never reads cipher-3 envelopes.
+        // A V1-Neo note key further up does not change that.
+        let fixture = try LockedAttachmentFixture(variant: .neoMediaSidecar(legacyParent: true))
+        XCTAssertThrowsError(try fixture.withExtractedAttachment(noteMainKey: AppleSidecarFixtures.mainKey) { _ in
+            XCTFail("The callback must not run.")
+        }) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_sidecar_unsupported")
+        }
+    }
+
     func testDeviceKeyLockedAttachmentIsExplicitlyUnsupported() throws {
         let fixture = try LockedAttachmentFixture(variant: .deviceKeyAsset)
         XCTAssertThrowsError(try fixture.store().withPasswordUnlockedNote(
@@ -208,9 +343,10 @@ final class LockedAttachmentExtractionTests: XCTestCase {
 }
 
 private final class LockedAttachmentFixture {
-    enum Variant {
+    enum Variant: Equatable {
         case asset, fallbackImage, fallbackPDF, olderFallbackPDF, preview
-        case neoAsset, neoFallbackImage, deviceKeyAsset
+        case neoAsset, neoFallbackImage, neoSidecarFallbackImage, neoSidecarNoteKey, deviceKeyAsset
+        case neoMediaSidecar(legacyParent: Bool)
     }
 
     let password: String
@@ -222,10 +358,21 @@ private final class LockedAttachmentFixture {
 
     init(variant: Variant) throws {
         let isNeo = variant == .neoAsset || variant == .neoFallbackImage
-        password = isNeo ? "Cafe\u{301}-neo" : "fixture-password"
-        plaintext = isNeo
-            ? Data(base64Encoded: "iVBORw0KGgoBAgMEBQYHCA==")!
-            : Data("exact locked attachment bytes\u{0}\u{1}".utf8)
+        if case .neoMediaSidecar = variant {
+            password = AppleSidecarFixtures.password
+            plaintext = AppleSidecarFixtures.mediaPayload
+        } else if variant == .neoSidecarFallbackImage {
+            password = AppleSidecarFixtures.password
+            plaintext = AppleSidecarFixtures.storedPayload
+        } else if variant == .neoSidecarNoteKey {
+            password = AppleSidecarFixtures.password
+            plaintext = AppleSidecarFixtures.fallbackPayload
+        } else {
+            password = isNeo ? "Cafe\u{301}-neo" : "fixture-password"
+            plaintext = isNeo
+                ? Data(base64Encoded: "iVBORw0KGgoBAgMEBQYHCA==")!
+                : Data("exact locked attachment bytes\u{0}\u{1}".utf8)
+        }
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("notescli-locked-attachment-fixture-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -266,7 +413,17 @@ private final class LockedAttachmentFixture {
         """)
 
         let body = Self.protobufBody("Locked body")
-        if variant == .deviceKeyAsset {
+        if variant == .neoSidecarNoteKey {
+            // A V1-Neo note body under the same account key Notes derived
+            // for the Apple fixtures (salt C0...DF, 2,000 iterations).
+            let envelope = try Self.currentEnvelope(
+                password: password.precomposedStringWithCanonicalMapping, body: body, deviceKey: false,
+                salt: Data((0xc0...0xdf).map(UInt8.init)), iterations: 2_000, objectIdentifier: "LOCKED")
+            try sql("""
+            INSERT INTO ZICNOTEDATA (Z_PK,Z_ENT,ZNOTE,ZDATA)
+              VALUES (30,6,3,X'\(envelope.hex)');
+            """)
+        } else if variant == .deviceKeyAsset {
             let envelope = try Self.currentEnvelope(
                 password: password, body: body, deviceKey: true)
             try sql("""
@@ -355,6 +512,69 @@ private final class LockedAttachmentFixture {
             """)
             source = directory.appendingPathComponent(
                 "Accounts/account/FallbackImages/ATTACHMENT-ID/generation/FallbackImage.png.encrypted")
+        case .neoSidecarFallbackImage:
+            // The attachment's own password envelope holds the stored
+            // sidecarMainKey; the file on disk is a cipher-3 sidecar.
+            sourceData = AppleSidecarFixtures.sidecarWrappedWithStoredKey
+            try sql("""
+            UPDATE ZICCLOUDSYNCINGOBJECT SET
+              ZIDENTIFIER='\(AppleSidecarFixtures.objectIdentifier)', ZMEDIA=NULL,
+              ZFALLBACKIMAGEGENERATION='generation',
+              ZENCRYPTEDVALUESJSON=X'\(AppleSidecarFixtures.valuesWithSidecarKey.hex)',
+              ZFALLBACKIMAGECRYPTOINITIALIZATIONVECTOR=zeroblob(16),
+              ZFALLBACKIMAGECRYPTOTAG=zeroblob(16)
+            WHERE Z_PK=4;
+            """)
+            source = directory.appendingPathComponent(
+                "Accounts/account/FallbackImages/\(AppleSidecarFixtures.objectIdentifier)/generation/FallbackImage.png.encrypted")
+        case .neoSidecarNoteKey:
+            // The attachment has no encrypted values, so Notes uses the note's key.
+            sourceData = AppleSidecarFixtures.sidecarWrappedWithMainKey
+            try sql("""
+            UPDATE ZICCLOUDSYNCINGOBJECT SET
+              ZIDENTIFIER='\(AppleSidecarFixtures.objectIdentifier)', ZMEDIA=NULL,
+              ZFALLBACKIMAGEGENERATION='generation',
+              ZFALLBACKIMAGECRYPTOINITIALIZATIONVECTOR=zeroblob(16),
+              ZFALLBACKIMAGECRYPTOTAG=zeroblob(16)
+            WHERE Z_PK=4;
+            """)
+            source = directory.appendingPathComponent(
+                "Accounts/account/FallbackImages/\(AppleSidecarFixtures.objectIdentifier)/generation/FallbackImage.png.encrypted")
+        case .neoMediaSidecar(let legacyParent):
+            // The media row has no encrypted values; the file is a cipher-3
+            // sidecar owned by the media.
+            sourceData = AppleSidecarFixtures.mediaSidecarWrappedWithMainKey
+            try sql("""
+            UPDATE ZICCLOUDSYNCINGOBJECT SET
+              ZIDENTIFIER='\(AppleSidecarFixtures.mediaObjectIdentifier)',
+              ZASSETCRYPTOINITIALIZATIONVECTOR=zeroblob(16), ZASSETCRYPTOTAG=zeroblob(16)
+            WHERE Z_PK=5;
+            """)
+            if legacyParent {
+                let attachmentCrypto = try Self.crypto(
+                    password: password.precomposedStringWithCanonicalMapping, seed: 90)
+                let values = try JSONSerialization.data(withJSONObject: ["filename": "drawing.png"])
+                let sealed = try attachmentCrypto.seal(values, ivByte: 91)
+                try sql("""
+                UPDATE ZICCLOUDSYNCINGOBJECT SET
+                  ZIDENTIFIER='\(AppleSidecarFixtures.objectIdentifier)',
+                  ZCRYPTOSALT=X'\(attachmentCrypto.salt.hex)',
+                  ZCRYPTOITERATIONCOUNT=\(attachmentCrypto.iterations),
+                  ZCRYPTOWRAPPEDKEY=X'\(attachmentCrypto.wrappedKey.hex)',
+                  ZCRYPTOINITIALIZATIONVECTOR=X'\(sealed.iv.hex)', ZCRYPTOTAG=X'\(sealed.tag.hex)',
+                  ZENCRYPTEDVALUESJSON=X'\(sealed.ciphertext.hex)'
+                WHERE Z_PK=4;
+                """)
+            } else {
+                try sql("""
+                UPDATE ZICCLOUDSYNCINGOBJECT SET
+                  ZIDENTIFIER='\(AppleSidecarFixtures.objectIdentifier)',
+                  ZENCRYPTEDVALUESJSON=X'\(AppleSidecarFixtures.valuesWithSidecarKey.hex)'
+                WHERE Z_PK=4;
+                """)
+            }
+            source = directory.appendingPathComponent(
+                "Accounts/account/Media/\(AppleSidecarFixtures.mediaObjectIdentifier)/generation/\(AppleSidecarFixtures.mediaObjectIdentifier)")
         }
         try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
         try sourceData.write(to: source)
@@ -388,18 +608,46 @@ private final class LockedAttachmentFixture {
 
     func sourceBytes() throws -> Data { try Data(contentsOf: source) }
 
-    func withExtractedAttachment(_ body: (LockedAttachmentResult) throws -> Void) throws {
+    func withExtractedAttachment(password: String? = nil, noteMainKey: Data? = nil,
+                                 _ body: (LockedAttachmentResult) throws -> Void) throws {
         let library = try SQLiteSnapshot.load(database)
         let row = try XCTUnwrap(library.objects[4])
         let scope = try LockedAttachmentExtractionScope()
         defer { scope.cleanup() }
-        try body(try LockedAttachmentExtractor(
+        var extractor = LockedAttachmentExtractor(
             library: library,
             container: directory,
             accountID: "account",
-            password: password,
-            scope: scope
-        ).extract(row))
+            password: password ?? self.password,
+            scope: scope)
+        extractor.noteMainKey = noteMainKey
+        try body(try extractor.extract(row))
+    }
+
+    func replaceSource(with data: Data) throws {
+        try data.write(to: source)
+    }
+
+    func tamperSourceTail() throws {
+        var data = try Data(contentsOf: source)
+        // Flip the last GCM tag byte inside the archived encryptedData blob
+        // (plaintext + IV32 + tag16), leaving the archive itself well formed.
+        let archive = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        let objects = try XCTUnwrap(archive["$objects"] as? [Any])
+        let encrypted = try XCTUnwrap(objects.compactMap { $0 as? Data }
+            .first { $0.count == plaintext.count + 48 })
+        let range = try XCTUnwrap(data.range(of: encrypted))
+        data[range.upperBound - 1] ^= 0x01
+        try data.write(to: source)
+    }
+
+    func removeAttachmentEncryptedValues() throws {
+        try sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZENCRYPTEDVALUESJSON=NULL WHERE Z_PK=4;")
+    }
+
+    func setAttachmentEncryptedValues(_ data: Data) throws {
+        try sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZENCRYPTEDVALUESJSON=X'\(data.hex)' WHERE Z_PK=4;")
     }
 
     func replaceNeoMediaFileWithFallbackEnvelope() throws {
@@ -464,19 +712,21 @@ private final class LockedAttachmentFixture {
                           wrappedKey: try wrap(dataKey, with: kek))
     }
 
-    private static func currentEnvelope(password: String, body: Data, deviceKey: Bool) throws -> Data {
-        let salt = Data((0..<32).map(UInt8.init))
+    private static func currentEnvelope(password: String, body: Data, deviceKey: Bool,
+                                        salt: Data = Data((0..<32).map(UInt8.init)),
+                                        iterations: Int = 1_000,
+                                        objectIdentifier: String = "fixture") throws -> Data {
         let dataKey = Data((32..<64).map(UInt8.init))
         let iv = Data((64..<96).map(UInt8.init))
-        var metadataValues: [String: Any] = ["cipherVersion": 2, "objectIdentifier": "fixture"]
+        var metadataValues: [String: Any] = ["cipherVersion": 2, "objectIdentifier": objectIdentifier]
         if deviceKey { metadataValues["accountKeyIdentifier"] = "fixture-device-key" }
         let metadata = try PropertyListSerialization.data(
             fromPropertyList: metadataValues,
             format: .binary, options: 0)
         let unauthenticated = try PropertyListSerialization.data(
-            fromPropertyList: ["passphraseSalt": salt, "passphraseIterationCount": 1_000],
+            fromPropertyList: ["passphraseSalt": salt, "passphraseIterationCount": iterations],
             format: .binary, options: 0)
-        let kek = try derive(password: password, salt: salt, iterations: 1_000, count: dataKey.count)
+        let kek = try derive(password: password, salt: salt, iterations: iterations, count: dataKey.count)
         let wrapped = try wrap(dataKey, with: kek)
         let sealed = try AES.GCM.seal(
             body, using: SymmetricKey(data: dataKey), nonce: AES.GCM.Nonce(data: iv),

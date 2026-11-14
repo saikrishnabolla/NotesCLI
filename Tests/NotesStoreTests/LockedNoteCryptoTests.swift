@@ -190,6 +190,320 @@ final class LockedNoteCryptoTests: XCTestCase {
         }
     }
 
+    // MARK: Cipher-3 sidecars (Apple runtime fixtures)
+
+    func testAppleMainKeyDerivationMatchesNotesShared() throws {
+        let opened = try LockedNoteCrypto.openNeoEnvelopeVerifyingMainKey(
+            password: AppleSidecarFixtures.password,
+            data: AppleSidecarFixtures.valuesWithSidecarKey,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier)
+        XCTAssertEqual(opened.mainKey, AppleSidecarFixtures.mainKey)
+        let values = try XCTUnwrap(JSONSerialization.jsonObject(with: opened.plaintext) as? [String: Any])
+        XCTAssertEqual(values["filename"] as? String, "drawing.png")
+        XCTAssertEqual(
+            LockedNoteCrypto.storedSidecarMainKey(in: values),
+            AppleSidecarFixtures.sidecarKey)
+
+        // Opening a V1-Neo body returns the same verified main key.
+        let body = try LockedNoteCrypto.openVerifyingMainKey(
+            password: AppleSidecarFixtures.password,
+            encryptedBody: AppleSidecarFixtures.valuesWithSidecarKey,
+            legacy: nil)
+        XCTAssertEqual(body.format, .v1Neo)
+        XCTAssertEqual(body.mainKey, AppleSidecarFixtures.mainKey)
+    }
+
+    func testSidecarOpensWithStoredSidecarKey() throws {
+        let keys = try sidecarKeys(AppleSidecarFixtures.valuesWithSidecarKey)
+        XCTAssertEqual(
+            try LockedNoteCrypto.openNeoEnvelope(
+                password: AppleSidecarFixtures.password,
+                data: AppleSidecarFixtures.sidecarWrappedWithStoredKey,
+                expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                sidecarKeys: keys),
+            AppleSidecarFixtures.storedPayload)
+
+        // The main key alone cannot open a sidecar wrapped with the stored key.
+        XCTAssertThrowsError(try LockedNoteCrypto.openNeoEnvelope(
+            password: AppleSidecarFixtures.password,
+            data: AppleSidecarFixtures.sidecarWrappedWithStoredKey,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+            sidecarKeys: try sidecarKeys(AppleSidecarFixtures.valuesWithoutSidecarKey))) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed")
+        }
+    }
+
+    func testSidecarFallsBackToMainKey() throws {
+        for values in [AppleSidecarFixtures.valuesWithSidecarKey, AppleSidecarFixtures.valuesWithoutSidecarKey] {
+            XCTAssertEqual(
+                try LockedNoteCrypto.openNeoEnvelope(
+                    password: AppleSidecarFixtures.password,
+                    data: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+                    expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                    sidecarKeys: try sidecarKeys(values)),
+                AppleSidecarFixtures.fallbackPayload)
+        }
+        XCTAssertEqual(
+            try LockedNoteCrypto.openNeoSidecarEnvelope(
+                data: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+                expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                mainKey: AppleSidecarFixtures.mainKey,
+                storedSidecarKey: nil),
+            AppleSidecarFixtures.fallbackPayload)
+    }
+
+    func testSidecarRejectsWrongObjectIdentity() throws {
+        let keys = try sidecarKeys(AppleSidecarFixtures.valuesWithSidecarKey)
+        XCTAssertThrowsError(try LockedNoteCrypto.openNeoEnvelope(
+            password: AppleSidecarFixtures.password,
+            data: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+            expectedObjectIdentifier: "OTHER-OBJECT",
+            sidecarKeys: keys)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_identity_mismatch")
+        }
+
+    }
+
+    func testStoredSidecarKeyFromRenamedObjectStillOpens() throws {
+        // Notes never rewrites a stored sidecarMainKey or checks its object
+        // identifier, so an object whose identifier changed keeps the old one.
+        let renamedKey = try serializedSidecarKey(authenticated: [
+            "cipherVersion": 3, "objectIdentifier": "OTHER-OBJECT",
+        ])
+        XCTAssertEqual(try LockedNoteCrypto.openNeoEnvelope(
+            password: AppleSidecarFixtures.password,
+            data: AppleSidecarFixtures.sidecarWrappedWithStoredKey,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+            sidecarKeys: .init(
+                mainKey: AppleSidecarFixtures.mainKey,
+                encryptedValues: ["sidecarMainKey": renamedKey.base64EncodedString()])),
+            AppleSidecarFixtures.storedPayload)
+    }
+
+    func testSidecarRejectsTamperedMetadataTagAndWrappedKey() throws {
+        let keys = try sidecarKeys(AppleSidecarFixtures.valuesWithSidecarKey)
+        var fields = try appleEnvelopeFields(AppleSidecarFixtures.sidecarWrappedWithStoredKey)
+        fields.metadata = try PropertyListSerialization.data(
+            fromPropertyList: ["cipherVersion": 3, "objectIdentifier": AppleSidecarFixtures.objectIdentifier,
+                               "tampered": true],
+            format: .binary, options: 0)
+        let tamperedMetadata = try archivedEnvelope(fields)
+
+        fields = try appleEnvelopeFields(AppleSidecarFixtures.sidecarWrappedWithStoredKey)
+        fields.encryptedData[fields.encryptedData.count - 1] ^= 0x01
+        let tamperedTag = try archivedEnvelope(fields)
+
+        fields = try appleEnvelopeFields(AppleSidecarFixtures.sidecarWrappedWithStoredKey)
+        fields.wrappedEncryptionKey[0] ^= 0x01
+        let tamperedWrappedKey = try archivedEnvelope(fields)
+
+        // The untouched re-archive still opens, so failures come from tampering.
+        XCTAssertEqual(
+            try LockedNoteCrypto.openNeoEnvelope(
+                password: AppleSidecarFixtures.password,
+                data: archivedEnvelope(appleEnvelopeFields(AppleSidecarFixtures.sidecarWrappedWithStoredKey)),
+                expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                sidecarKeys: keys),
+            AppleSidecarFixtures.storedPayload)
+        for envelope in [tamperedMetadata, tamperedTag, tamperedWrappedKey] {
+            XCTAssertThrowsError(try LockedNoteCrypto.openNeoEnvelope(
+                password: AppleSidecarFixtures.password,
+                data: envelope,
+                expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                sidecarKeys: keys)) {
+                XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed")
+            }
+        }
+    }
+
+    func testUnusableStoredSidecarKeyFallsBackToMainKey() throws {
+        // Notes gets no usable stored key from any of these, so
+        // decryptSidecarData: falls back to the main key. Each entry uses the
+        // real sidecar key bytes where its shape allows, to prove it is ignored.
+        let key = AppleSidecarFixtures.sidecarKey
+        let cipher3: [String: Any] = ["cipherVersion": 3, "objectIdentifier": AppleSidecarFixtures.objectIdentifier]
+        let unusable: [String: Any] = [
+            "invalid base64": "not base64 !",
+            "not a string": 42,
+            "empty": "",
+            "not a plist": Data("not a plist".utf8).base64EncodedString(),
+            "empty key": try serializedSidecarKey(key: Data(), authenticated: cipher3).base64EncodedString(),
+            "16-byte key": try serializedSidecarKey(key: key.prefix(16), authenticated: cipher3).base64EncodedString(),
+            "missing metadata": try plist(["key": key, "authenticatedData": try plist(cipher3)]).base64EncodedString(),
+            "metadata not a dictionary": try plist([
+                "key": key, "metadata": Data("bad".utf8), "authenticatedData": try plist(cipher3),
+            ]).base64EncodedString(),
+            "authenticated data not a plist": try plist([
+                "key": key, "metadata": try plist([String: Any]()), "authenticatedData": Data("bad".utf8),
+            ]).base64EncodedString(),
+            "cipher 3 without object ID": try serializedSidecarKey(authenticated: ["cipherVersion": 3])
+                .base64EncodedString(),
+            "cipher 2 without passphrase": try serializedSidecarKey(authenticated: [
+                "cipherVersion": 2, "objectIdentifier": AppleSidecarFixtures.objectIdentifier,
+            ]).base64EncodedString(),
+            "cipher 1 without account key": try serializedSidecarKey(authenticated: ["cipherVersion": 1])
+                .base64EncodedString(),
+            "cipher 0 without salt": try serializedSidecarKey(authenticated: ["objectIdentifier": "X"])
+                .base64EncodedString(),
+        ]
+        for (name, value) in unusable {
+            let keys = LockedNoteCrypto.NeoSidecarKeys(
+                mainKey: AppleSidecarFixtures.mainKey, encryptedValues: ["sidecarMainKey": value])
+            XCTAssertEqual(
+                try LockedNoteCrypto.openNeoEnvelope(
+                    password: AppleSidecarFixtures.password,
+                    data: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+                    expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                    sidecarKeys: keys),
+                AppleSidecarFixtures.fallbackPayload, name)
+            // A payload only the stored key could open still fails safely.
+            XCTAssertThrowsError(try LockedNoteCrypto.openNeoEnvelope(
+                password: AppleSidecarFixtures.password,
+                data: AppleSidecarFixtures.sidecarWrappedWithStoredKey,
+                expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                sidecarKeys: keys)) {
+                XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed", name)
+            }
+        }
+    }
+
+    func testStoredSidecarKeyUsesNotesAcceptanceRules() throws {
+        // ICEncryptionKey only needs key data and metadata that validates for
+        // its own cipher version, so Notes still tries these stored keys.
+        let salted = ["passphraseSalt": Data(repeating: 1, count: 32), "passphraseIterationCount": 1_000] as [String: Any]
+        let usable: [String: Data] = [
+            "cipher 3 with account key": try serializedSidecarKey(authenticated: [
+                "cipherVersion": 3, "objectIdentifier": "X", "accountKeyIdentifier": "device",
+            ]),
+            "cipher 2 with passphrase": try serializedSidecarKey(
+                authenticated: ["cipherVersion": 2, "objectIdentifier": "X"], unauthenticated: salted),
+            "cipher 1 with account key": try serializedSidecarKey(authenticated: [
+                "cipherVersion": 1, "accountKeyIdentifier": "device",
+            ]),
+            "cipher 0 with salt": try serializedSidecarKey(authenticated: ["objectIdentifier": "X"],
+                                                           unauthenticated: salted),
+            "unknown cipher version": try serializedSidecarKey(authenticated: ["cipherVersion": 7]),
+            "metadata only": try plist([
+                "key": AppleSidecarFixtures.sidecarKey,
+                "metadata": try plist(["cipherVersion": 3, "objectIdentifier": "X"]),
+            ]),
+        ]
+        for (name, serialized) in usable {
+            XCTAssertEqual(LockedNoteCrypto.sidecarMainKey(serialized: serialized), AppleSidecarFixtures.sidecarKey, name)
+            XCTAssertEqual(
+                try LockedNoteCrypto.openNeoEnvelope(
+                    password: AppleSidecarFixtures.password,
+                    data: AppleSidecarFixtures.sidecarWrappedWithStoredKey,
+                    expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+                    sidecarKeys: .init(
+                        mainKey: AppleSidecarFixtures.mainKey,
+                        encryptedValues: ["sidecarMainKey": serialized.base64EncodedString()])),
+                AppleSidecarFixtures.storedPayload, name)
+        }
+    }
+
+    func testSidecarWrongPasswordAndWrongMainKeyFail() throws {
+        XCTAssertThrowsError(try LockedNoteCrypto.openNeoEnvelopeVerifyingMainKey(
+            password: "wrong",
+            data: AppleSidecarFixtures.valuesWithSidecarKey,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "wrong_password")
+        }
+        XCTAssertThrowsError(try LockedNoteCrypto.openNeoSidecarEnvelope(
+            data: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+            mainKey: Data(repeating: 9, count: 32),
+            storedSidecarKey: nil)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_decryption_failed")
+        }
+        XCTAssertThrowsError(try LockedNoteCrypto.openNeoSidecarEnvelope(
+            data: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+            mainKey: Data(repeating: 9, count: 16),
+            storedSidecarKey: nil)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_sidecar_key_invalid")
+        }
+    }
+
+    func testSidecarDeviceKeyAndPasswordOnlyPathsStayRejected() throws {
+        var fields = try appleEnvelopeFields(AppleSidecarFixtures.sidecarWrappedWithMainKey)
+        fields.metadata = try PropertyListSerialization.data(
+            fromPropertyList: ["cipherVersion": 3, "objectIdentifier": AppleSidecarFixtures.objectIdentifier,
+                               "accountKeyIdentifier": "device-key"],
+            format: .binary, options: 0)
+        XCTAssertThrowsError(try LockedNoteCrypto.openNeoEnvelope(
+            password: AppleSidecarFixtures.password,
+            data: archivedEnvelope(fields),
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier,
+            sidecarKeys: try sidecarKeys(AppleSidecarFixtures.valuesWithSidecarKey))) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "device_key_locked_unsupported")
+        }
+
+        XCTAssertThrowsError(try LockedNoteCrypto.openNeoEnvelope(
+            password: AppleSidecarFixtures.password,
+            data: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_sidecar_unsupported")
+        }
+        XCTAssertThrowsError(try LockedNoteCrypto.open(
+            password: AppleSidecarFixtures.password,
+            encryptedBody: AppleSidecarFixtures.sidecarWrappedWithMainKey,
+            legacy: nil)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "locked_attachment_sidecar_unsupported")
+        }
+    }
+
+    private func sidecarKeys(_ valuesEnvelope: Data) throws -> LockedNoteCrypto.NeoSidecarKeys {
+        let opened = try LockedNoteCrypto.openNeoEnvelopeVerifyingMainKey(
+            password: AppleSidecarFixtures.password,
+            data: valuesEnvelope,
+            expectedObjectIdentifier: AppleSidecarFixtures.objectIdentifier)
+        return .init(
+            mainKey: opened.mainKey,
+            encryptedValues: try JSONSerialization.jsonObject(with: opened.plaintext) as? [String: Any])
+    }
+
+    private func serializedSidecarKey(key: Data = AppleSidecarFixtures.sidecarKey,
+                                      authenticated: [String: Any],
+                                      unauthenticated: [String: Any] = [:]) throws -> Data {
+        try plist([
+            "key": key,
+            "metadata": try plist(unauthenticated),
+            "authenticatedData": try plist(authenticated),
+        ])
+    }
+
+    private func plist(_ value: [String: Any]) throws -> Data {
+        try PropertyListSerialization.data(fromPropertyList: value, format: .binary, options: 0)
+    }
+
+    private struct EnvelopeFields {
+        var metadata: Data
+        var unauthenticatedMetadata: Data
+        var wrappedEncryptionKey: Data
+        var encryptedData: Data
+    }
+
+    private func appleEnvelopeFields(_ data: Data) throws -> EnvelopeFields {
+        let unarchiver = try NSKeyedUnarchiver(forReadingFrom: data)
+        unarchiver.setClass(EnvelopeFieldsReader.self, forClassName: "ICCryptoEncryptionObject")
+        let reader = try XCTUnwrap(unarchiver.decodeObject(
+            of: EnvelopeFieldsReader.self, forKey: NSKeyedArchiveRootObjectKey))
+        return EnvelopeFields(
+            metadata: reader.metadata,
+            unauthenticatedMetadata: reader.unauthenticatedMetadata,
+            wrappedEncryptionKey: reader.wrappedEncryptionKey,
+            encryptedData: reader.encryptedData)
+    }
+
+    private func archivedEnvelope(_ fields: EnvelopeFields) throws -> Data {
+        try archivedEnvelope(
+            metadata: fields.metadata,
+            unauthenticated: fields.unauthenticatedMetadata,
+            wrappedKey: fields.wrappedEncryptionKey,
+            encryptedData: fields.encryptedData)
+    }
+
     private func hex(_ value: String) throws -> Data {
         guard value.count.isMultiple(of: 2) else { throw CocoaError(.coderInvalidValue) }
         return try stride(from: 0, to: value.count, by: 2).map { offset -> UInt8 in
@@ -329,4 +643,28 @@ private final class EnvelopeFixture: NSObject, NSSecureCoding {
         coder.encode(wrappedEncryptionKey as NSData, forKey: "wrappedEncryptionKey")
         coder.encode(encryptedData as NSData, forKey: "encryptedData")
     }
+}
+
+@objc(NotesCLILockedEnvelopeFieldsReader)
+private final class EnvelopeFieldsReader: NSObject, NSSecureCoding {
+    static var supportsSecureCoding: Bool { true }
+    let metadata: Data
+    let unauthenticatedMetadata: Data
+    let wrappedEncryptionKey: Data
+    let encryptedData: Data
+
+    required init?(coder: NSCoder) {
+        guard let metadata = coder.decodeObject(of: NSData.self, forKey: "metadata") as? Data,
+              let unauthenticated = coder.decodeObject(of: NSData.self, forKey: "unauthenticatedMetadata") as? Data,
+              let wrapped = coder.decodeObject(of: NSData.self, forKey: "wrappedEncryptionKey") as? Data,
+              let encrypted = coder.decodeObject(of: NSData.self, forKey: "encryptedData") as? Data else {
+            return nil
+        }
+        self.metadata = metadata
+        unauthenticatedMetadata = unauthenticated
+        wrappedEncryptionKey = wrapped
+        encryptedData = encrypted
+    }
+
+    func encode(with coder: NSCoder) {}
 }

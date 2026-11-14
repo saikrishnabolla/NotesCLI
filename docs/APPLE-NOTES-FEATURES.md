@@ -2,7 +2,7 @@
 
 Verified on macOS 27.2.1 on 2026-11-13. Apple documents the user-facing features in the [Notes User Guide](https://support.apple.com/guide/notes/welcome/mac), including [formatting](https://support.apple.com/en-ca/guide/notes/apd1955d3b21/mac), [lists](https://support.apple.com/en-ca/guide/notes/apd93c815aa0/mac), [attachments](https://support.apple.com/en-ae/guide/notes/not95edd2813/mac), [sorting and pinning](https://support.apple.com/en-ie/guide/notes/apdb54e469b6/mac), [Smart Folders](https://support.apple.com/en-ph/guide/notes/apd58edc7964/mac), [sharing](https://support.apple.com/en-ie/guide/notes/apda5307056b/mac), and [settings](https://support.apple.com/en-ie/guide/notes/apd97da26aed/mac). Runtime inspection of Notes.app and NotesShared found `ICTTParagraphStyle`, `ICTTFont`, `TTEmphasis`, `NSSuperScript`, `TTColor`, `ICOutlineState`, and their checked setters. Protobuf probes confirmed paragraph fields 1, 2, 3, 4, 6, 7, and 9, plus highlight field 14. The field-14 result agrees with [apple_cloud_notes_parser's schema](https://github.com/threeplanetssoftware/apple_cloud_notes_parser/blob/master/proto/notestore.proto). “Read” and “Write” below describe NotesCLI, not Notes.app.
 
-Read status: 87 Done, 5 Partial, and 3 Not possible. Write status: 71 Done, 8 Partial, and 16 Not possible. The matrix has 95 rows and no Missing status. `notescli capabilities` and MCP `get_capabilities` use the same feature names and statuses; a literal parity test checks this table against the runtime catalog.
+Read status: 87 Done, 5 Partial, and 3 Not possible. Write status: 72 Done, 8 Partial, and 15 Not possible. The matrix has 95 rows and no Missing status. `notescli capabilities` and MCP `get_capabilities` use the same feature names and statuses; a literal parity test checks this table against the runtime catalog.
 
 | Feature | Read | Write | Notes |
 | --- | --- | --- | --- |
@@ -82,7 +82,7 @@ Read status: 87 Done, 5 Partial, and 3 Not possible. Write status: 71 Done, 8 Pa
 | Search by title and body | Done | Not possible | NotesShared exposes fetch/search paths, but search is a read operation with no persistent object to mutate. |
 | Search filters and Boolean queries | Done | Not possible | Dates, tags, pins, folders, and attachment kinds are query predicates; runtime inspection found no writable query object on notes. |
 | OCR and image labels | Done | Not possible | Stored OCR, image labels, and summaries are readable. `ocr` and MCP `ocr_attachment` can run Notes' checked image recognizer on a downloaded image without changing the attachment. NotesCLI cannot persist Notes' private recognition payloads. |
-| Handwriting recognition | Done | Not possible | Paper attachments expose stored handwriting text, but no selector starts recognition or writes its result. |
+| Handwriting recognition | Done | Done | `handwriting recognize --persist` runs Apple's checked recognizer and saves its text. `handwriting set` replaces or clears the stored handwriting summary. Native and SQLite readback verify the saved value. |
 | PDF text search | Done | Not possible | NotesShared exposes cached PDF text for reads but no setter or indexing request selector. |
 | Audio transcript search | Done | Not possible | Transcript text is readable; search has no persistent write target or runtime mutation selector. |
 | Import plain text, HTML, and Markdown | Done | Done | New and existing notes support file, standard input, and Markdown workflows. |

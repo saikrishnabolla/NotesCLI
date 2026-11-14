@@ -356,9 +356,9 @@ final class SafetyTests: XCTestCase {
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 87)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 5)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 3)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 71)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 72)
         XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 8)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 16)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 15)
 
         let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)
         let matrix = parity.components(separatedBy: "## 2. CLI commands")[0]

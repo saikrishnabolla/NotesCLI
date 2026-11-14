@@ -111,7 +111,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Search by title and body", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Search filters and Boolean queries", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "OCR and image labels", read: "Done", write: "Not possible"),
-        FeatureDefinition(feature: "Handwriting recognition", read: "Done", write: "Not possible"),
+        FeatureDefinition(feature: "Handwriting recognition", read: "Done", write: "Done"),
         FeatureDefinition(feature: "PDF text search", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Audio transcript search", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Import plain text, HTML, and Markdown", read: "Done", write: "Done"),

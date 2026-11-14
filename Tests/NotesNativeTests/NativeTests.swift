@@ -420,10 +420,18 @@ final class NativeTests: XCTestCase {
     }
 
     func testMissingOptionalSelectorDisablesOnlyItsFeature() {
-        let divider = "+[ICInlineAttachment newDividerLineAttachmentWithIdentifier:note:parentAttachment:]"
-        let optional = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2", missing: [divider], error: nil, classes: [:])
+        let featureSelectors = [
+            "+[ICInlineAttachment newDividerLineAttachmentWithIdentifier:note:parentAttachment:]",
+            "-[ICDocCamScannedDocumentEditor setQuad:forAttachmentWithIdentifier:]",
+            "-[ICDocCamScannedDocumentEditor deletePagesAtIndexes:]",
+            "-[ICDocCamScannedDocumentEditor undeleteSubAttachment:]",
+            "-[ICDocCamScannedDocumentEditor galleryModel]",
+            "-[ICAttachmentGalleryModel indexOfSubAttachmentWithIdentifier:]",
+            "-[ICAttachmentGalleryModel insertSubAttachment:atIndex:]",
+        ]
+        let optional = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2", missing: featureSelectors, error: nil, classes: [:])
         XCTAssertTrue(optional.usable)
-        XCTAssertEqual(optional.missingOptional, [divider])
+        XCTAssertEqual(optional.missingOptional, featureSelectors)
         XCTAssertEqual(optional.missingCore, [])
         let core = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2", missing: ["-[ICNote saveNoteData]"], error: nil, classes: [:])
         XCTAssertFalse(core.usable)

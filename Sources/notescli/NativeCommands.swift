@@ -156,7 +156,7 @@ enum UnifiedNative {
     static func engine(_ options: GlobalOptions, scriptingAvailable: Bool, fake: Bool) throws -> WriteEngine {
         switch options.resolvedEngine {
         case .native:
-            guard nativeAvailable() else { throw NotesError("native_unavailable", "The native Notes framework check failed. Run notescli engine doctor --json.") }
+            guard fake || nativeAvailable() else { throw NotesError("native_unavailable", "The native Notes framework check failed. Run notescli engine doctor --json.") }
             return .native
         case .scripting:
             guard scriptingAvailable else {

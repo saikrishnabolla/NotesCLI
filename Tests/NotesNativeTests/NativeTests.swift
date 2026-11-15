@@ -98,6 +98,76 @@ final class NativeTests: XCTestCase {
         XCTAssertLessThan(committed.lowerBound, move.lowerBound)
     }
 
+    func testBoundedProcessWaiterStopsAChildAfterTimeout() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["5"]
+        try process.run()
+
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = BoundedProcessWaiter.wait(
+            process,
+            timeout: 0.02,
+            terminationGrace: 0.1,
+            killGrace: 0.5
+        )
+
+        guard case .timedOut(let reaped) = result else { return XCTFail("Expected a timeout.") }
+        XCTAssertTrue(reaped)
+        XCTAssertFalse(process.isRunning)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1.0)
+    }
+
+    func testBoundedProcessWaiterReportsNormalExit() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try process.run()
+
+        guard case .exited = BoundedProcessWaiter.wait(process, timeout: 1) else {
+            return XCTFail("Expected a normal exit.")
+        }
+        XCTAssertEqual(process.terminationStatus, 0)
+    }
+
+    func testBoundedProcessWaiterKillsAChildThatIgnoresTerminate() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "trap '' TERM; while :; do :; done"]
+        try process.run()
+
+        let result = BoundedProcessWaiter.wait(
+            process,
+            timeout: 0.02,
+            terminationGrace: 0.02,
+            killGrace: 0.5
+        )
+
+        guard case .timedOut(let reaped) = result else { return XCTFail("Expected a timeout.") }
+        XCTAssertTrue(reaped)
+        XCTAssertFalse(process.isRunning)
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+    }
+
+    func testAppleMoveMarksTheOperationCommittedBeforeItsBoundedWait() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("Sources/NotesNative/NativeNotesWriter.swift"),
+                                encoding: .utf8)
+        let moveStart = try XCTUnwrap(source.range(of: "fileprivate func appleMove("))
+        let moveEnd = try XCTUnwrap(source.range(of: "public func restore(", range: moveStart.upperBound..<source.endIndex))
+        let move = source[moveStart.lowerBound..<moveEnd.lowerBound]
+        let run = try XCTUnwrap(move.range(of: "try process.run()"))
+        let committed = try XCTUnwrap(move.range(of: "operation?.committed = true", range: run.upperBound..<move.endIndex))
+        let wait = try XCTUnwrap(move.range(of: "BoundedProcessWaiter.wait", range: committed.upperBound..<move.endIndex))
+
+        XCTAssertLessThan(run.lowerBound, committed.lowerBound)
+        XCTAssertLessThan(committed.lowerBound, wait.lowerBound)
+        XCTAssertFalse(move.contains("waitUntilExit"))
+        XCTAssertFalse(move.contains("Pipe()"))
+        XCTAssertTrue(move.contains("process.standardInput = FileHandle.nullDevice"))
+        XCTAssertTrue(move.contains(".posixPermissions: 0o600"))
+    }
+
     func testNoteLinkVerificationDoesNotReenterWriterLockAcrossContextQueue() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()

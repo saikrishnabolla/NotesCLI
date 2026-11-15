@@ -394,9 +394,14 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
                                  engine: selected.rawValue)
     let renamePlan = selected == .native || current.summary.title == snapshot.note.summary.title ? nil :
         DryRunPlan(operation: "renameNote", target: target, arguments: ["title": snapshot.note.summary.title], resultingHTML: replacePlan.resultingHTML)
-    let destination = snapshot.note.summary.folderPath.joined(separator: " > ")
-    let movePlan = current.summary.folderPath == snapshot.note.summary.folderPath ? nil :
-        DryRunPlan(operation: "moveNote", target: target, arguments: ["folder": destination], resultingHTML: replacePlan.resultingHTML)
+    let destination = SnapshotRestorePolicy.destinationFolderPath(
+        current: current.summary.folderPath,
+        snapshot: snapshot.note.summary.folderPath,
+        snapshotIsDeleted: snapshot.note.summary.isDeleted
+    )?.joined(separator: " > ")
+    let movePlan = destination.map {
+        DryRunPlan(operation: "moveNote", target: target, arguments: ["folder": $0], resultingHTML: replacePlan.resultingHTML)
+    }
     if write.dryRun {
         let plans = [replacePlan, renamePlan, movePlan].compactMap { $0 }
         for plan in plans {
@@ -450,7 +455,7 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
             plan: renamePlan,
             action: { try scriptingWriter.renameNote(target, title: snapshot.note.summary.title) })
     }
-    if let movePlan {
+    if let movePlan, let destination {
         followupWrite.idempotencyKey = write.idempotencyKey.map { "\($0):move" }
         _ = try SafetyExecutor.run(options: followupWrite, operation: "moveNote", arguments: ["ref": target, "folder": destination],
             note: try backend.reader.note(target), allowedPaths: paths, destructive: true,

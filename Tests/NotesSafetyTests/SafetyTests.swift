@@ -4,6 +4,24 @@ import NotesCore
 @testable import NotesSafety
 
 final class SafetyTests: XCTestCase {
+    func testSnapshotRestoreDoesNotMoveAnActiveNoteBackIntoRecentlyDeleted() {
+        XCTAssertNil(SnapshotRestorePolicy.destinationFolderPath(
+            current: ["notescli-test"],
+            snapshot: ["Recently Deleted"],
+            snapshotIsDeleted: true
+        ))
+        XCTAssertNil(SnapshotRestorePolicy.destinationFolderPath(
+            current: ["Notes"],
+            snapshot: ["Notes"],
+            snapshotIsDeleted: false
+        ))
+        XCTAssertEqual(SnapshotRestorePolicy.destinationFolderPath(
+            current: ["Notes"],
+            snapshot: ["Archive"],
+            snapshotIsDeleted: false
+        ), ["Archive"])
+    }
+
     func testNotesPreferenceJournalRecordsThePreimageAndRefusesMissingState() throws {
         func entry(_ operation: String, _ json: String) -> JournalEntry {
             JournalEntry(id: "pref", operation: operation, argumentsHash: "", arguments: Data(json.utf8),

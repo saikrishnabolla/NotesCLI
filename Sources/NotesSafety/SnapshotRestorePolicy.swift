@@ -2,6 +2,12 @@ import Foundation
 import NotesCore
 
 public enum SnapshotRestorePolicy {
+    public static func destinationFolderPath(current: [String], snapshot: [String],
+                                             snapshotIsDeleted: Bool) -> [String]? {
+        guard !snapshotIsDeleted, current != snapshot else { return nil }
+        return snapshot
+    }
+
     public static func nativeRequiredFeatures(_ note: Note) -> [String] {
         NativeOnlyFeatures.detect(in: note)
     }

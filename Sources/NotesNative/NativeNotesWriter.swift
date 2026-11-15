@@ -17,6 +17,38 @@ fileprivate struct UnsafeSendableBox<Value>: @unchecked Sendable {
     let value: Value
 }
 
+enum BoundedProcessWaiter {
+    enum Result {
+        case exited
+        case timedOut(reaped: Bool)
+    }
+
+    static func wait(_ process: Process, timeout: TimeInterval,
+                     terminationGrace: TimeInterval = 0.2,
+                     killGrace: TimeInterval = 1.0) -> Result {
+        precondition(timeout.isFinite && timeout >= 0)
+        precondition(terminationGrace.isFinite && terminationGrace >= 0)
+        precondition(killGrace.isFinite && killGrace >= 0)
+        guard !waitForExit(process, timeout: timeout) else { return .exited }
+        if process.isRunning { process.terminate() }
+        if !waitForExit(process, timeout: terminationGrace), process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            _ = waitForExit(process, timeout: killGrace)
+        }
+        return .timedOut(reaped: !process.isRunning)
+    }
+
+    private static func waitForExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        while process.isRunning {
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return false }
+            Thread.sleep(forTimeInterval: min(0.01, remaining))
+        }
+        return true
+    }
+}
+
 fileprivate struct PaperCleanupScope {
     let accountID: String
     let rootURL: URL
@@ -234,7 +266,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
                     folderID: operation.folderID,
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
+                    message: "The write may have committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -268,7 +300,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
                     folderID: operation.folderID,
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
+                    message: "The write may have committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -294,7 +326,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 writeResult: WriteResult(
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
+                    message: "The write may have committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -323,7 +355,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 writeResult: WriteResult(
                     outcome: .unknown,
                     noteID: operation.noteID.map { NoteID(uuid: $0) },
-                    message: "The Core Data save committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
+                    message: "The write may have committed, but follow-up failed. Do not retry. operation_id=\(operation.id): \(String(describing: error))",
                     operationID: operation.id
                 ),
                 verification: NativeVerification(nativeReadback: [:], sqliteReadback: nil),
@@ -3809,7 +3841,49 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     fileprivate func appleMove(_ note: NSManagedObject, to folder: NSManagedObject) throws {
-        let script = "on run argv\ntell application \"Notes\" to move note id (item 1 of argv) to folder id (item 2 of argv)\nend run", process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); process.arguments = ["-e", script, "--", note.objectID.uriRepresentation().absoluteString, folder.objectID.uriRepresentation().absoluteString]; let errorPipe = Pipe(); process.standardError = errorPipe; process.standardOutput = FileHandle.nullDevice; try process.run(); process.waitUntilExit(); guard process.terminationStatus == 0 else { throw NotesError("native_sync_failed", String(decoding: errorPipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)) }
+        let script = "on run argv\ntell application \"Notes\" to move note id (item 1 of argv) to folder id (item 2 of argv)\nend run"
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notescli-move-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+        } catch {
+            throw NotesError("native_sync_failed", "Could not create private storage for the Notes.app move helper.")
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let errorURL = directory.appendingPathComponent("stderr")
+        guard FileManager.default.createFile(atPath: errorURL.path, contents: nil,
+                                             attributes: [.posixPermissions: 0o600]) else {
+            throw NotesError("native_sync_failed", "Could not create private output for the Notes.app move helper.")
+        }
+        let errorFile: FileHandle
+        do { errorFile = try FileHandle(forWritingTo: errorURL) }
+        catch { throw NotesError("native_sync_failed", "Could not open private output for the Notes.app move helper.") }
+        defer { try? errorFile.close() }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script, "--", note.objectID.uriRepresentation().absoluteString,
+                             folder.objectID.uriRepresentation().absoluteString]
+        process.standardError = errorFile
+        process.standardOutput = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do { try process.run() }
+        catch { throw NotesError("native_sync_failed", "Could not start the Notes.app move helper: \(error.localizedDescription)") }
+        operation?.committed = true
+        operation?.noteID = id(note)
+        switch BoundedProcessWaiter.wait(process, timeout: 20) {
+        case .exited:
+            break
+        case .timedOut(let reaped):
+            let detail = reaped ? "" : " The helper could not be reaped after SIGKILL."
+            throw NotesError("native_sync_failed", "Notes.app did not finish moving the note within 20 seconds.\(detail)")
+        }
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+            try? errorFile.synchronize()
+            let detail = String(decoding: (try? Data(contentsOf: errorURL)) ?? Data(), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw NotesError("native_sync_failed", detail.isEmpty ? "Notes.app did not accept the move request." : detail)
+        }
     }
     public func restore(_ ref: String, folder destination: String?, allowShared: Bool) throws -> NativeWriteResult {
         return try performWrite { context in

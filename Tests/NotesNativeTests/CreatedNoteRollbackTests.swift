@@ -114,7 +114,7 @@ final class CreatedNoteRollbackTests: XCTestCase {
         let result = try create(savedByNotes: true, committed: true)
         XCTAssertEqual(result.writeResult.outcome, .unknown)
         XCTAssertEqual(result.writeResult.message?.hasPrefix(
-            "The Core Data save committed, but follow-up failed. Do not retry. operation_id=operation-create: "), true)
+            "The write may have committed, but follow-up failed. Do not retry. operation_id=operation-create: "), true)
         XCTAssertEqual(calls.removed, [])
         XCTAssertEqual(try trashed(), false)
     }

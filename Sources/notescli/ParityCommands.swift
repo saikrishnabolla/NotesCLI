@@ -177,6 +177,7 @@ struct QuickNoteSetCommand: ParsableCommand {
                                             note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan) {
             if backend.isFake { return FakeParityWrite.result(note, storing: "Quick Note state") }
             let value = try NativeNotesWriter().setQuickNote(note.summary.id.uuid, enabled: enabled,
+                                                             expectedCurrent: previous,
                                                              allowShared: write.allowShared)
             captured = value
             return value.writeResult
@@ -402,7 +403,9 @@ struct FolderGroupByDateCommand: ParsableCommand {
         let result = try SafetyExecutor.run(options: write, operation: "folderDateGrouping", arguments: arguments,
                                             allowedPaths: [folder.path], plan: plan) {
             if backend.isFake { return FakeParityWrite.folder(folder, storing: "folder date grouping") }
-            let value = try writer.setFolderDateGrouping(folder.id, grouped: enabled, allowShared: write.allowShared)
+            let value = try writer.setFolderDateGrouping(folder.id, type: enabled ? 2 : 1,
+                                                          expectedCurrentType: previousType,
+                                                          allowShared: write.allowShared)
             captured = value
             return value.writeResult
         }
@@ -490,7 +493,7 @@ private func runPreferenceCommand(_ setting: NativeNotesPreference, enabled: Boo
                         arguments: ["setting": setting.rawValue, "state": state.rawValue,
                                     "previous_state": current.state.rawValue],
                         description: "the \(setting.rawValue) setting") {
-        try NativeNotesWriter().setNotesPreference(setting, state: state, expectedCurrent: nil)
+        try NativeNotesWriter().setNotesPreference(setting, state: state, expectedCurrent: current.state)
     }
 }
 
@@ -565,7 +568,9 @@ struct GlobalNoteSortCommand: ParsableCommand {
         let previous: NativeGlobalNoteSort = backend.isFake ? .modified : try NativeNotesWriter().notesSettings().sort
         try runSettingWrite(options: options, write: write, operation: "globalNoteSort",
                             arguments: ["sort": set.rawValue, "previous_sort": previous.rawValue],
-                            description: "the global note sort") { try NativeNotesWriter().setGlobalNoteSort(set) }
+                            description: "the global note sort") {
+            try NativeNotesWriter().setGlobalNoteSort(set, expectedCurrent: previous)
+        }
     }
 }
 
@@ -587,7 +592,9 @@ struct GlobalDateGroupingCommand: ParsableCommand {
         let previous = backend.isFake ? true : try NativeNotesWriter().notesSettings().groupsByDate
         try runSettingWrite(options: options, write: write, operation: "globalDateGrouping",
                             arguments: ["enabled": String(enabled), "previous_enabled": String(previous)],
-                            description: "global date grouping") { try NativeNotesWriter().setGlobalDateGrouping(enabled) }
+                            description: "global date grouping") {
+            try NativeNotesWriter().setGlobalDateGrouping(enabled, expectedCurrent: previous)
+        }
     }
 }
 
@@ -612,7 +619,9 @@ struct DefaultTextSizeCommand: ParsableCommand {
         let previous = backend.isFake ? 12 : try NativeNotesWriter().notesSettings().defaultTextSize
         try runSettingWrite(options: options, write: write, operation: "defaultTextSize",
                             arguments: ["points": String(points), "previous_points": String(previous)],
-                            description: "the default note text size") { try NativeNotesWriter().setDefaultTextSize(points) }
+                            description: "the default note text size") {
+            try NativeNotesWriter().setDefaultTextSize(points, expectedCurrent: previous)
+        }
     }
 }
 
@@ -634,7 +643,9 @@ struct ResumeQuickNoteCommand: ParsableCommand {
         let previous = backend.isFake ? true : try NativeNotesWriter().notesSettings().resumesLastQuickNote
         try runSettingWrite(options: options, write: write, operation: "resumeLastQuickNote",
                             arguments: ["enabled": String(enabled), "previous_enabled": String(previous)],
-                            description: "the Quick Note resume setting") { try NativeNotesWriter().setResumeLastQuickNote(enabled) }
+                            description: "the Quick Note resume setting") {
+            try NativeNotesWriter().setResumeLastQuickNote(enabled, expectedCurrent: previous)
+        }
     }
 }
 
@@ -656,7 +667,9 @@ struct AutoConvertTagsCommand: ParsableCommand {
         let previous = backend.isFake ? true : try NativeNotesWriter().notesSettings().autoConvertsToTags
         try runSettingWrite(options: options, write: write, operation: "autoConvertToTags",
                             arguments: ["enabled": String(enabled), "previous_enabled": String(previous)],
-                            description: "automatic tag conversion") { try NativeNotesWriter().setAutoConvertToTags(enabled) }
+                            description: "automatic tag conversion") {
+            try NativeNotesWriter().setAutoConvertToTags(enabled, expectedCurrent: previous)
+        }
     }
 }
 
@@ -684,7 +697,7 @@ struct DefaultParagraphStyleCommand: ParsableCommand {
         let result = try SafetyExecutor.run(options: write, operation: "defaultParagraphStyle", arguments: arguments,
                                             allowedPaths: [], plan: plan) {
             if backend.isFake { return FakeParityWrite.setting("the default paragraph style") }
-            let value = try writer.setDefaultParagraphStyle(set)
+            let value = try writer.setDefaultParagraphStyle(set, expectedCurrent: previous)
             captured = value
             return value.writeResult
         }

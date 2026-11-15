@@ -766,6 +766,7 @@ final class ProtocolTests: XCTestCase {
         var undoSortDispatch: [String: Any]?
         var preferenceWrite: [String: Any]?
         var preferenceUndoDispatch: [String: Any]?
+        var settingWrites: [String: [String: Any]] = [:]
         let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
             switch tool {
             case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: false)
@@ -802,7 +803,14 @@ final class ProtocolTests: XCTestCase {
                 preferenceUndoDispatch = arguments
                 return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
             case "set_global_note_sort":
-                if arguments["expected_sort"] != nil { undoSortDispatch = arguments }
+                if arguments["sort"] as? String == "modified" { undoSortDispatch = arguments }
+                else { settingWrites[tool] = arguments }
+                return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+            case "checklist_auto_sort", "set_default_account", "set_folder_sort", "set_folder_date_grouping",
+                 "set_default_paragraph_style", "set_global_date_grouping", "set_default_text_size",
+                 "set_resume_last_quick_note", "set_auto_convert_tags", "set_quick_note",
+                 "smart_folder_edit_rules", "smart_folder_edit_typed":
+                settingWrites[tool] = arguments
                 return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
             default:
                 return try MCPNativeResult(result: WriteResult(outcome: .verified, folderID: arguments["ref"] as? String), value: ["ok": true])
@@ -823,6 +831,7 @@ final class ProtocolTests: XCTestCase {
         let quickNote = try call(server, "set_quick_note", ["ref": quickNoteID, "enabled": true])
         XCTAssertNotEqual(quickNote["isError"] as? Bool, true, "\(quickNote)")
         _ = try call(server, "smart_folder_edit_rules", ["ref": "Smart", "query_json": #"{"tag":"new"}"#, "expected_count": 1])
+        _ = try call(server, "smart_folder_edit_typed", ["ref": "Smart", "expected_count": 1, "tags": ["new"]])
         _ = try call(server, "scan_filter", ["ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1", "filter": "color"])
         _ = try call(server, "scan_rotate", ["ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1", "orientation": "upright"])
         let cropArguments: [String: Any] = [
@@ -842,7 +851,23 @@ final class ProtocolTests: XCTestCase {
             "pages": [try imageData(width: 8, height: 6).base64EncodedString()], "page_names": ["page.jpg"],
         ])
 
-        let entries = try WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 20)
+        XCTAssertEqual(settingWrites["checklist_auto_sort"]?["expected_enabled"] as? Bool, false)
+        XCTAssertEqual(settingWrites["set_default_account"]?["expected_account_id"] as? String, "account-old")
+        XCTAssertEqual(settingWrites["set_folder_sort"]?["expected_by"] as? String, "created")
+        XCTAssertEqual(settingWrites["set_folder_sort"]?["expected_direction"] as? String, "oldest")
+        XCTAssertEqual(settingWrites["set_folder_date_grouping"]?["expected_type"] as? Int, 0)
+        XCTAssertEqual(settingWrites["set_default_paragraph_style"]?["expected_style"] as? String, "title")
+        XCTAssertEqual(settingWrites["set_global_note_sort"]?["expected_sort"] as? String, "modified")
+        XCTAssertEqual(settingWrites["set_global_date_grouping"]?["expected_enabled"] as? Bool, true)
+        XCTAssertEqual(settingWrites["set_default_text_size"]?["expected_points"] as? Int, 12)
+        XCTAssertEqual(settingWrites["set_resume_last_quick_note"]?["expected_enabled"] as? Bool, true)
+        XCTAssertEqual(settingWrites["set_auto_convert_tags"]?["expected_enabled"] as? Bool, true)
+        XCTAssertEqual(settingWrites["set_quick_note"]?["expected_enabled"] as? Bool, false)
+        XCTAssertEqual(settingWrites["smart_folder_edit_rules"]?["expected_query_json"] as? String, #"{"tag":"old"}"#)
+        XCTAssertEqual(settingWrites["smart_folder_edit_typed"]?["expected_query_json"] as? String, #"{"tag":"old"}"#)
+        XCTAssertEqual(preferenceWrite?["expected_state"] as? String, "default")
+
+        let entries = try WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 30)
         let actions = try entries.compactMap { try $0.restoreAction() }
         XCTAssertTrue(actions.contains(.checklistAutoSort(enabled: false)))
         XCTAssertTrue(actions.contains(.defaultAccount(identifier: "account-old")))

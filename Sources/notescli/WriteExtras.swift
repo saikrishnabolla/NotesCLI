@@ -228,7 +228,10 @@ struct SmartFolderEditRules: ParsableCommand {
         let plan = DryRunPlan(operation: "smartFolderEditRules", target: folder.id, arguments: ["query_json": queryJSON, "expected_count": String(expectedCount)], resultingHTML: nil, engine: "native")
         var captured: NativeWriteResult?
         let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditRules", arguments: ["ref": folder.id, "stable_id": folder.id, "query_json": queryJSON, "previous_query_json": previousQuery, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
-            let value = try writer.editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
+            let value = try writer.editSmartFolderRules(folder.id, queryJSON: queryJSON,
+                                                        expectedCount: expectedCount,
+                                                        expectedCurrentQuery: previousQuery)
+            captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: options)
@@ -261,7 +264,10 @@ struct SmartFolderEditTyped: ParsableCommand {
         let plan = DryRunPlan(operation: "smartFolderEditTyped", target: folder.id, arguments: ["query_json": queryJSON, "expected_count": String(expectedCount)], resultingHTML: nil, engine: "native")
         var captured: NativeWriteResult?
         let result = try SafetyExecutor.run(options: write, operation: "smartFolderEditTyped", arguments: ["ref": folder.id, "stable_id": folder.id, "query_json": queryJSON, "previous_query_json": previousQuery, "expected_count": String(expectedCount), "engine": "native"], allowedPaths: [folder.path], destructive: true, plan: plan) {
-            let value = try writer.editSmartFolderRules(folder.id, queryJSON: queryJSON, expectedCount: expectedCount); captured = value; return value.writeResult
+            let value = try writer.editSmartFolderRules(folder.id, queryJSON: queryJSON,
+                                                        expectedCount: expectedCount,
+                                                        expectedCurrentQuery: previousQuery)
+            captured = value; return value.writeResult
         }
         guard let result else { return }
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: options)

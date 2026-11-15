@@ -1586,8 +1586,10 @@ public final class MCPServer: @unchecked Sendable {
             }
             var recorded = arguments
             recorded["previous_enabled"] = previous
+            var dispatch = arguments
+            dispatch["expected_enabled"] = previous
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
-                let value = try nativeHandler(tool.name, arguments)
+                let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
@@ -1599,8 +1601,10 @@ public final class MCPServer: @unchecked Sendable {
             }
             var recorded = arguments
             recorded["previous_account_id"] = previous
+            var dispatch = arguments
+            dispatch["expected_account_id"] = previous
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
-                let value = try nativeHandler(tool.name, arguments)
+                let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
@@ -1618,8 +1622,10 @@ public final class MCPServer: @unchecked Sendable {
             recorded["setting"] = setting
             recorded["state"] = enabled ? "on" : "off"
             recorded["previous_state"] = previous
+            var dispatch = arguments
+            dispatch["expected_state"] = previous
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
-                let value = try nativeHandler(tool.name, arguments)
+                let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
@@ -1632,8 +1638,10 @@ public final class MCPServer: @unchecked Sendable {
             }
             var recorded = arguments
             recorded["previous_style"] = previous
+            var dispatch = arguments
+            dispatch["expected_style"] = previous
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
-                let value = try nativeHandler(tool.name, arguments)
+                let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
@@ -1644,36 +1652,42 @@ public final class MCPServer: @unchecked Sendable {
                 throw NotesError("invalid_native_result", "The native engine did not return the Notes settings preimage.")
             }
             var recorded = arguments
+            var dispatch = arguments
             switch tool.name {
             case "set_global_note_sort":
                 guard let previous = settings["sort"] as? String else {
                     throw NotesError("invalid_native_result", "The native engine did not return the global-sort preimage.")
                 }
                 recorded["previous_sort"] = previous
+                dispatch["expected_sort"] = previous
             case "set_global_date_grouping":
                 guard let previous = settings["groupsByDate"] as? Bool else {
                     throw NotesError("invalid_native_result", "The native engine did not return the date-grouping preimage.")
                 }
                 recorded["previous_enabled"] = previous
+                dispatch["expected_enabled"] = previous
             case "set_default_text_size":
                 guard let previous = settings["defaultTextSize"] as? Int else {
                     throw NotesError("invalid_native_result", "The native engine did not return the text-size preimage.")
                 }
                 recorded["previous_points"] = previous
+                dispatch["expected_points"] = previous
             case "set_resume_last_quick_note":
                 guard let previous = settings["resumesLastQuickNote"] as? Bool else {
                     throw NotesError("invalid_native_result", "The native engine did not return the Quick Note resume preimage.")
                 }
                 recorded["previous_enabled"] = previous
+                dispatch["expected_enabled"] = previous
             case "set_auto_convert_tags":
                 guard let previous = settings["autoConvertsToTags"] as? Bool else {
                     throw NotesError("invalid_native_result", "The native engine did not return the automatic-tag-conversion preimage.")
                 }
                 recorded["previous_enabled"] = previous
+                dispatch["expected_enabled"] = previous
             default: break
             }
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
-                let value = try nativeHandler(tool.name, arguments)
+                let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
@@ -1720,6 +1734,7 @@ public final class MCPServer: @unchecked Sendable {
                         throw NotesError("invalid_native_result", "The native engine did not return the Smart Folder query preimage.")
                     }
                     recorded["previous_query_json"] = query
+                    dispatch["expected_query_json"] = query
                 }
             }
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: paths, engine: "native") {
@@ -1742,6 +1757,8 @@ public final class MCPServer: @unchecked Sendable {
             recorded["stable_id"] = target.id
             recorded["previous_by"] = previousOrder
             recorded["previous_direction"] = previousDirection
+            dispatch["expected_by"] = previousOrder
+            dispatch["expected_direction"] = previousDirection
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [target.path], engine: "native") {
                 let value = try nativeHandler(tool.name, dispatch)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
@@ -1758,6 +1775,7 @@ public final class MCPServer: @unchecked Sendable {
             }
             var dispatch = arguments
             dispatch["ref"] = target.id
+            dispatch["expected_type"] = previousType
             var recorded = arguments
             recorded["stable_id"] = target.id
             recorded["previous_type"] = String(previousType)
@@ -1786,7 +1804,9 @@ public final class MCPServer: @unchecked Sendable {
         }
         var recordedArguments = arguments
         if tool.name == "set_quick_note", let note {
-            recordedArguments["previous_enabled"] = note.summary.isSystemPaper == true
+            let previous = note.summary.isSystemPaper == true
+            recordedArguments["previous_enabled"] = previous
+            dispatchArguments["expected_enabled"] = previous
         }
         if ["scan_filter", "scan_rotate", "scan_crop", "scan_move", "scan_delete", "scan_append"].contains(tool.name) {
             let current = try nativeHandler("scan_page_state", dispatchArguments)

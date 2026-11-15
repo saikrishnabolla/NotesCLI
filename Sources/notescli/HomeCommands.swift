@@ -99,15 +99,21 @@ struct Capabilities: ParsableCommand {
         EXAMPLES:
           notescli capabilities
           notescli capabilities --json
+          notescli capabilities --write "Print" --json
         """)
     @OptionGroup var options: GlobalOptions
+    @Option(help: "Require full write support for one feature.") var write: String?
     func run() throws {
+        if let write { try CapabilityCatalog.requireWrite(write) }
         let report = CapabilityReporter.report()
         if options.json { try Output.json(report); return }
-        Output.table(["FEATURE", "READ", "WRITE", "READ ENGINE", "WRITE ENGINE", "FDA", "AUTOMATION", "SPEECH", "NATIVE"], report.features.map {
-            [$0.feature, $0.read, $0.write, $0.readEngine, $0.writeEngine,
-             $0.permissions["fullDiskAccess"] ?? "", $0.permissions["automation"] ?? "",
-             $0.permissions["speech"] ?? "", $0.nativeSelectors]
+        Output.table(["FEATURE", "READ", "WRITE", "REASON", "READ ENGINE", "WRITE ENGINE", "FDA", "AUTOMATION", "SPEECH", "NATIVE"], report.features.map { feature in
+            let reasons = feature.reasons.keys.sorted().compactMap { operation in
+                feature.reasons[operation].map { "\(operation)=\($0.reason)" }
+            }.joined(separator: ",")
+            return [feature.feature, feature.read, feature.write, reasons, feature.readEngine, feature.writeEngine,
+                    feature.permissions["fullDiskAccess"] ?? "", feature.permissions["automation"] ?? "",
+                    feature.permissions["speech"] ?? "", feature.nativeSelectors]
         })
     }
 }

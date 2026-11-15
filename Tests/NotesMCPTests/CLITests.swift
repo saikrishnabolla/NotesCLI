@@ -671,6 +671,19 @@ final class CLITests: XCTestCase {
         let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(capabilities.1.utf8)) as? [String: Any])
         XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 95)
 
+        let blocked = try run(["--backend", "fake", "capabilities", "--write", "Print", "--json"])
+        XCTAssertNotEqual(blocked.0, 0)
+        let blockedError = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(blocked.2.utf8)) as? [String: Any])
+        XCTAssertEqual(blockedError["code"] as? String, "apple_blocked")
+        XCTAssertTrue((blockedError["message"] as? String)?.contains("blocked by Apple") == true)
+
+        let forcedHost = try run(["capabilities", "--json"], environment: ["NOTESCLI_CAPABILITY_HOST": "force"])
+        XCTAssertEqual(forcedHost.0, 0, forcedHost.2)
+        let forcedReport = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(forcedHost.1.utf8)) as? [String: Any])
+        let forcedFeatures = try XCTUnwrap(forcedReport["features"] as? [[String: Any]])
+        XCTAssertEqual(forcedFeatures.count, 95)
+        XCTAssertNotNil(forcedFeatures.first { $0["feature"] as? String == "Print" }?["reasons"])
+
         let help = try run(["help", "search"])
         XCTAssertEqual(help.0, 0, help.2)
         XCTAssertTrue(help.1.contains("EXAMPLES:"), help.1)

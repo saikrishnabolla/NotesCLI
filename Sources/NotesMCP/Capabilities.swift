@@ -1,5 +1,6 @@
 import Carbon
 import Foundation
+import NotesCore
 import NotesNative
 import Speech
 
@@ -23,6 +24,17 @@ public struct CapabilityFeature: Codable, Sendable {
     public var writeEngine: String
     public var permissions: [String: String]
     public var nativeSelectors: String
+    public var reasons: [String: CapabilityLimitation]
+}
+
+public struct CapabilityLimitation: Codable, Sendable, Equatable {
+    public var reason: String
+    public var detail: String
+
+    public init(reason: String, detail: String) {
+        self.reason = reason
+        self.detail = detail
+    }
 }
 
 public struct CapabilityReport: Codable, Sendable {
@@ -132,6 +144,82 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Multiple iCloud, local, and IMAP accounts", read: "Partial", write: "Partial"),
     ]
 
+    private static func limitation(_ reason: String, _ detail: String) -> CapabilityLimitation {
+        CapabilityLimitation(reason: reason, detail: detail)
+    }
+
+    private static func apple(_ evidence: String) -> CapabilityLimitation {
+        limitation("apple_blocked", "macOS 27.2.1 (26B131) evidence: \(evidence)")
+    }
+
+    public static let limitations: [String: [String: CapabilityLimitation]] = [
+        "Mentions": ["write": limitation("needs_fixture", "Mention insertion is implemented, but participant notification needs a shared-note fixture and second account.")],
+        "Contact cards": ["write": apple("NotesShared and Notes.app expose contact display selectors but no checked contact-card attachment constructor; a public.vcard insert becomes a generic attachment.")],
+        "Scanned documents": ["write": limitation("partial_impl", "Native scan pages are implemented; camera capture, shape editing, crop clearing, and exported-PDF proof remain.")],
+        "Image and PDF markup": [
+            "read": limitation("partial_impl", "NotesCLI reads recognized AnnotationKit archives but does not decode editable shapes."),
+            "write": limitation("partial_impl", "NotesCLI preserves and reuses complete markup archives but does not edit shapes or prove Notes.app editability after reload.")
+        ],
+        "Recording summaries and call metadata": ["write": limitation("needs_fixture", "Summary deletion is implemented, but this Mac has no recording with an Apple-generated summary.")],
+        "Math expressions, results, and graphs": ["write": apple("Calculate and checked native insertion cover stored expressions and plain-text results; interactive recognition and graph rendering remain inside Notes.app.")],
+        "Locked-note state": ["write": apple("ICNote exposes lock-state getters, but runtime inspection found no authenticated unlock or key-management contract for a background client.")],
+        "Share state and participants": ["write": apple("share and participant objects expose read properties, but runtime selector inspection found no stable invitation, removal, or access-right mutation contract.")],
+        "Edit an existing shared note": [
+            "read": limitation("needs_fixture", "Shared-note reading is implemented, but this Mac has no active owner or participant fixture."),
+            "write": limitation("needs_fixture", "Guarded native editing is implemented, but owner, read-write, read-only, and concurrent-edit fixtures have not run.")
+        ],
+        "Collaboration activity and changes": [
+            "read": limitation("needs_fixture", "Raw activity export is implemented, but this Mac has no activity-bearing shared-note fixture."),
+            "write": apple("collaboration records are managed by Notes and CloudKit; runtime inspection found no supported mutation contract.")
+        ],
+        "Accounts and default location": ["write": apple("NotesCLI can select the default account, but account creation and account settings remain system-owned.")],
+        "Quick Notes": ["write": apple("NotesCLI can target the Quick Notes folder, but hot-corner and capture metadata are owned by Notes.app and system UI.")],
+        "Folder list and gallery views": [
+            "read": apple("the only readable value is Notes' last-saved windowStateArchive, not live window state."),
+            "write": apple("Notes rewrites windowStateArchive, and the inspected write paths are Notes.app menu and link actions.")
+        ],
+        "Note display order": ["write": apple("SQLite stores ZSORTORDER, but runtime inspection found no checked ICNote.setSortOrder: selector.")],
+        "Search by title and body": ["write": limitation("not_applicable", "Search is a read operation and has no persistent object to write.")],
+        "Search filters and Boolean queries": ["write": limitation("not_applicable", "Filters and queries are read predicates, not writable Notes objects.")],
+        "PDF text search": ["write": limitation("not_applicable", "PDF search reads Apple's cached index; there is no user-facing value to write.")],
+        "Audio transcript search": ["write": limitation("not_applicable", "Transcript search is a read operation and has no persistent search object to write.")],
+        "Print": [
+            "read": apple("Notes.app exposes print-panel UI actions but no headless NotesShared print contract."),
+            "write": apple("Notes.app exposes print-panel UI actions but no headless NotesShared print contract.")
+        ],
+        "Widgets": [
+            "read": apple("widget state lives in system UI extensions and NotesShared exposes no widget state property."),
+            "write": apple("widget state lives in system UI extensions and NotesShared exposes no widget mutation selector.")
+        ],
+        "Note notifications": [
+            "read": apple("the mention-notification subscription state is a CloudKit subscription that needs Notes' entitlements."),
+            "write": apple("ICCloudNotificationsController changes a CloudKit subscription using Notes' entitlements, not a writable preference.")
+        ],
+        "Notes settings": [
+            "read": apple("the remaining settings require account lifecycle, locked-note authentication, or Notes-entitled CloudKit access."),
+            "write": apple("the remaining settings require account lifecycle, locked-note authentication, or Notes-entitled CloudKit access.")
+        ],
+        "Version history, diff, undo, and revert": [
+            "read": apple("Apple exposes no complete Notes version-history API for edits made outside NotesCLI."),
+            "write": apple("Apple exposes no complete Notes version-history API for edits made outside NotesCLI.")
+        ],
+        "Multiple iCloud, local, and IMAP accounts": [
+            "read": limitation("partial_impl", "The full-fidelity reader maps ZACCOUNTTYPE 3 to IMAP but opens only NoteStore.sqlite. This Mac also has a separate NotesV7.storedata legacy schema, and no IMAP fixture proves current placement."),
+            "write": limitation("needs_fixture", "Account-aware writes route through Notes.app, but local and IMAP account fixtures have not run.")
+        ],
+    ]
+
+    public static func requireWrite(_ featureName: String) throws {
+        guard let feature = features.first(where: { $0.feature.caseInsensitiveCompare(featureName) == .orderedSame }) else {
+            throw NotesError("feature_not_found", "No capability matches \"\(featureName)\".")
+        }
+        guard feature.write != "Done", let limitation = limitations[feature.feature]?["write"] else { return }
+        if limitation.reason == "apple_blocked" {
+            throw NotesError("apple_blocked", "\(feature.feature) is blocked by Apple. \(limitation.detail)")
+        }
+        throw NotesError(limitation.reason, limitation.detail)
+    }
+
     private static let nativeWrites: Set<String> = [
         "Title style", "Heading style", "Subheading style", "Body style", "Monospaced style", "Block quote",
         "Paragraph indentation", "Left, center, right, and justified alignment",
@@ -220,7 +308,8 @@ public enum CapabilityReporter {
                     "automation": writeEngine == "scripting" ? permissionStates["automation"]! : "not required",
                     "speech": audioFeature ? permissionStates["speech"]! : "not required"
                 ],
-                nativeSelectors: writeEngine == "native" ? (nativeAvailable && CapabilityCatalog.optionalSelectorsPresent(for: definition.feature, missing: doctor.missingOptional) ? "available" : "missing") : "not required"
+                nativeSelectors: writeEngine == "native" ? (nativeAvailable && CapabilityCatalog.optionalSelectorsPresent(for: definition.feature, missing: doctor.missingOptional) ? "available" : "missing") : "not required",
+                reasons: CapabilityCatalog.limitations[definition.feature] ?? [:]
             )
         }
         return CapabilityReport(macOS: ProcessInfo.processInfo.operatingSystemVersionString,

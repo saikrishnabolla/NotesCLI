@@ -252,6 +252,31 @@ final class ProtocolTests: XCTestCase {
         let diagrams = (capabilities["features"] as? [[String: Any]])?.first { $0["feature"] as? String == "Editorial SVG and HTML diagrams" }
         XCTAssertEqual(diagrams?["readEngine"] as? String, "database")
         XCTAssertEqual(diagrams?["writeEngine"] as? String, "native")
+
+        let limited = try XCTUnwrap(capabilities["features"] as? [[String: Any]])
+        var reasonCounts: [String: Int] = [:]
+        for feature in limited {
+            let reasons = feature["reasons"] as? [String: [String: String]] ?? [:]
+            if feature["read"] as? String != "Done" { XCTAssertNotNil(reasons["read"], feature["feature"] as? String ?? "") }
+            if feature["write"] as? String != "Done" { XCTAssertNotNil(reasons["write"], feature["feature"] as? String ?? "") }
+            for (operation, reason) in reasons {
+                let code = try XCTUnwrap(reason["reason"])
+                reasonCounts[code, default: 0] += 1
+                if code == "needs_fixture" {
+                    XCTAssertNotEqual(feature[operation] as? String, "Done", "\(feature["feature"] ?? "") \(operation)")
+                }
+            }
+            for reason in reasons.values where reason["reason"] == "apple_blocked" {
+                XCTAssertTrue(reason["detail"]?.contains("macOS 27.2.1 (26B131)") == true,
+                              feature["feature"] as? String ?? "")
+            }
+        }
+        XCTAssertEqual(reasonCounts, ["apple_blocked": 20, "needs_fixture": 6, "partial_impl": 4, "not_applicable": 4])
+
+        let blocked = try call(server, "get_capabilities", ["write": "Print"])
+        let error = try XCTUnwrap(try structured(blocked)["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "apple_blocked")
+        XCTAssertTrue((error["message"] as? String)?.contains("blocked by Apple") == true)
     }
 
     func testMCPNoteReferencesRejectNumberTitleCollisionsAndAcceptExplicitSyntax() throws {

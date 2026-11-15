@@ -157,7 +157,7 @@ public final class MCPServer: @unchecked Sendable {
             t("count_notes", "Count notes matching filters.", [], filters),
             t("get_stats", "Get note, folder, account, and attachment-kind counts."),
             // MARK: w9-ux begin
-            t("get_capabilities", "Report Apple Notes feature, engine, permission, and native selector support."),
+            t("get_capabilities", "Report Apple Notes feature, engine, permission, and native selector support.", [], ["write": string]),
             // MARK: w9-ux end
             t("get_raw_note", "Read decoded raw note protobuf data with paging.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
             t("related_notes", "Find notes related by links or tags.", ["ref"], ["ref": string].merging(page) { old, _ in old }),
@@ -1194,6 +1194,7 @@ public final class MCPServer: @unchecked Sendable {
             return try content(["total": notes.count, "by_folder": folders, "by_account": accounts, "by_kind": reader.attachmentKindCounts()])
         // MARK: w9-ux begin
         case "get_capabilities":
+            if let feature = s("write") { try CapabilityCatalog.requireWrite(feature) }
             return try content(try NotePresentation.object(CapabilityReporter.report()) as! [String: Any])
         // MARK: w9-ux end
         case "get_raw_note":

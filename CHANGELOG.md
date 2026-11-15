@@ -4,7 +4,7 @@
 
 ### Added
 
-- Password-backed V1 Neo reads can decrypt cipher-3 sidecar attachments with Apple's stored sidecar key or verified main-key fallback.
+- Password-backed V1 Neo reads can decrypt cipher-3 sidecar attachments with Apple's stored sidecar key or verified main-key fallback. This follows Apple's format and passes Apple-generated fixtures; no real cipher-3 note exists on this Mac.
 - `collaboration activity` and MCP `collaboration_activity` export stored collaboration events as bounded raw data and hashes without changing Notes.
 - Handwriting recognition results can be saved, replaced, and cleared with native and database readback.
 

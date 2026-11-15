@@ -149,6 +149,7 @@ notescli recording create --folder <folder> --title <title> --file <audio> [--tr
 notescli recording transcribe-file --file <audio> --output <json> [--locale <locale>]
 notescli recording transcribe <ref> [--attachment <id>] [--locale <locale>] [--transcript-file <json>]
 notescli recording transcript <ref> [--format text|srt|vtt|json]
+notescli recording clear-summary <ref> <attachment-id>
 notescli drawing add <ref> --svg <file> [--ink pen|marker|pencil|monoline]
                 [--width <width>] [--color <hex>] [--bw] [--size <width>x<height>]
                 [--fit contain|stretch] [--fill outline|hatch]

@@ -309,6 +309,16 @@ public final class MCPServer: @unchecked Sendable {
                   ["ref": string, "attachment_id": string], write: true, native: true),
                 t("map_add", "Insert a native Apple Maps location card.", ["ref", "url"],
                   ["ref": string, "url": string, "position": integer], write: true, native: true),
+                t("camera_devices", "List AVCapture video devices. Continuity Camera entries are iPhone webcams, not Notes' Scan Documents UI.",
+                  [], [:], native: true),
+                t("camera_photo", "Capture and insert one or more native photo attachments.", ["ref"],
+                  ["ref": string, "device": string, "delay": ["type": "number", "minimum": 0, "maximum": 300],
+                   "count": ["type": "integer", "minimum": 1, "maximum": 100], "position": integer],
+                  write: true, native: true),
+                t("camera_scan", "Capture, detect edges, perspective-correct, and insert a native scanned document.", ["ref"],
+                  ["ref": string, "device": string, "delay": ["type": "number", "minimum": 0, "maximum": 300],
+                   "count": ["type": "integer", "minimum": 1, "maximum": 100], "position": integer],
+                  write: true, native: true),
                 t("scan_add", "Create a native scanned document from 1 to 100 base64-encoded image pages. All pages together may hold at most 4,000,000 base64 characters (3,000,000 decoded bytes). Use the notescli scan add command with local files for larger scans.", ["ref", "pages"],
                   ["ref": string,
                    "pages": ["type": "array", "minItems": 1, "maxItems": 100,
@@ -340,6 +350,20 @@ public final class MCPServer: @unchecked Sendable {
                    "top_right_x": coordinate, "top_right_y": coordinate], write: true, native: true),
                 t("scan_move", "Move a scanned-document page to a zero-based index.", ["ref", "attachment_id", "page_id", "to_index"],
                   ["ref": string, "attachment_id": string, "page_id": string, "to_index": ["type": "integer", "minimum": 0]], write: true, native: true),
+                t("scan_reorder", "Set the complete scanned-document page order in one checked operation.",
+                  ["ref", "attachment_id", "page_id", "page_ids"],
+                  ["ref": string, "attachment_id": string, "page_id": string, "page_ids": strings],
+                  write: true, native: true),
+                t("scan_replace", "Replace one scanned-document page from a base64 image.",
+                  ["ref", "attachment_id", "page_id", "page"],
+                  ["ref": string, "attachment_id": string, "page_id": string,
+                   "page": ["type": "string", "contentEncoding": "base64", "minLength": 1,
+                            "maxLength": Self.maximumScanEncodedBytes],
+                   "page_name": string, "perspective_correct": bool], write: true, native: true, destructive: true),
+                t("scan_correct", "Re-detect edges and perspective-correct an existing scanned-document page.",
+                  ["ref", "attachment_id", "page_id"],
+                  ["ref": string, "attachment_id": string, "page_id": string],
+                  write: true, native: true, destructive: true),
                 t("scan_delete", "Delete one page from a multi-page scanned document.", ["ref", "attachment_id", "page_id"],
                   ["ref": string, "attachment_id": string, "page_id": string], write: true, native: true, destructive: true),
                 // MARK: w4-format end
@@ -362,6 +386,26 @@ public final class MCPServer: @unchecked Sendable {
                 // MARK: w9-diagram end
                 t("attachment_markup_inspect", "Inspect bounded editable markup metadata for an image or PDF attachment.",
                   ["ref", "attachment_id"], ["ref": string, "attachment_id": string], native: true),
+                t("attachment_markup_list", "List individual editable annotations in an image or PDF attachment.",
+                  ["ref", "attachment_id"], ["ref": string, "attachment_id": string], native: true),
+                t("attachment_markup_add", "Add a basic editable annotation to an image or PDF attachment.",
+                  ["ref", "attachment_id", "kind"],
+                  ["ref": string, "attachment_id": string,
+                   "kind": ["type": "string", "enum": AttachmentMarkupAnnotationKind.allCases.map(\.rawValue)],
+                   "x": ["type": "number", "minimum": 0], "y": ["type": "number", "minimum": 0],
+                   "width": ["type": "number", "minimum": 0], "height": ["type": "number", "minimum": 0],
+                   "text": string,
+                   "points": ["type": "array", "items": ["type": "object", "required": ["x", "y"],
+                                                                  "properties": ["x": ["type": "number"], "y": ["type": "number"]]]],
+                   "stroke_width": ["type": "number", "exclusiveMinimum": 0], "color": string],
+                  write: true, native: true),
+                t("attachment_markup_remove", "Remove one editable annotation from an image or PDF attachment.",
+                  ["ref", "attachment_id", "annotation_id"],
+                  ["ref": string, "attachment_id": string, "annotation_id": string],
+                  write: true, native: true, destructive: true),
+                t("attachment_markup_render", "Render image or PDF attachment markup to a new PNG file.",
+                  ["ref", "attachment_id", "output"], ["ref": string, "attachment_id": string, "output": string],
+                  write: true, native: true),
                 t("attachment_markup_export", "Export an image or PDF attachment's bounded editable markup payload to a new file.",
                   ["ref", "attachment_id", "output"], ["ref": string, "attachment_id": string, "output": string],
                   write: true, native: true),
@@ -410,7 +454,7 @@ public final class MCPServer: @unchecked Sendable {
         let pathTools: Set<String> = [
             "save_attachment", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes",
             "recording_add", "recording_create", "attach_file", "diagram_add", "drawing_add", "drawing_create",
-            "attachment_markup_export", "attachment_markup_set",
+            "attachment_markup_export", "attachment_markup_render", "attachment_markup_set",
         ]
         exposed.removeAll { pathTools.contains($0.name) }
         exposed = exposed.map { tool in
@@ -764,6 +808,26 @@ public final class MCPServer: @unchecked Sendable {
             }
             if let names = args["page_names"] as? [String], names.count != pages.count {
                 return "page_names must have the same count as pages"
+            }
+        }
+        if ["camera_photo", "camera_scan"].contains(tool.name) {
+            let count = (args["count"] as? NSNumber)?.intValue ?? 1
+            if !(1...CameraCaptureRequest.maximumCount).contains(count) {
+                return "count must be between 1 and \(CameraCaptureRequest.maximumCount)"
+            }
+        }
+        if tool.name == "scan_reorder" {
+            guard let pageIDs = args["page_ids"] as? [String], !pageIDs.isEmpty,
+                  Set(pageIDs).count == pageIDs.count else {
+                return "page_ids must contain unique page IDs"
+            }
+        }
+        if tool.name == "scan_replace" {
+            guard let encoded = args["page"] as? String,
+                  encoded.utf8.count <= Self.maximumScanEncodedBytes,
+                  let data = Data(base64Encoded: encoded),
+                  data.count <= Self.maximumScanDecodedBytes else {
+                return "page must be a valid base64 image within the MCP scan limits"
             }
         }
         if tool.name == "scan_crop" {
@@ -1570,7 +1634,7 @@ public final class MCPServer: @unchecked Sendable {
         }
         if tool.name == "undo" { return try callNativeUndo(tool, arguments, nativeHandler: nativeHandler) }
         if tool.name == "revert" { return try callNativeRevert(tool, arguments, nativeHandler: nativeHandler) }
-        if tool.name == "attachment_markup_export" {
+        if ["attachment_markup_export", "attachment_markup_render"].contains(tool.name) {
             let note = try reader.note(arguments["ref"] as! String)
             if arguments["dry_run"] as? Bool == true {
                 return try content(["dry_run": true, "tool": tool.name, "engine": "native",
@@ -1583,7 +1647,7 @@ public final class MCPServer: @unchecked Sendable {
         }
         if !tool.write {
             var dispatch = arguments
-            if tool.name == "attachment_markup_inspect" {
+            if ["attachment_markup_inspect", "attachment_markup_list"].contains(tool.name) {
                 dispatch["ref"] = try reader.note(arguments["ref"] as! String).summary.id.uuid
             }
             let value = try nativeHandler(tool.name, dispatch)
@@ -1858,7 +1922,7 @@ public final class MCPServer: @unchecked Sendable {
             recordedArguments["previous_enabled"] = previous
             dispatchArguments["expected_enabled"] = previous
         }
-        if ["scan_filter", "scan_rotate", "scan_crop", "scan_move", "scan_delete", "scan_append"].contains(tool.name) {
+        if ["scan_filter", "scan_rotate", "scan_crop", "scan_move", "scan_reorder", "scan_replace", "scan_correct", "scan_delete", "scan_append"].contains(tool.name) {
             let current = try nativeHandler("scan_page_state", dispatchArguments)
             let state = try JSONDecoder().decode(NativeScanPageState.self, from: current.value)
             guard state.noteID == note?.summary.id.uuid,
@@ -1922,6 +1986,17 @@ public final class MCPServer: @unchecked Sendable {
                 recordedArguments["previous_page_order"] = state.pageIDs
                 recordedArguments["applied_page_order"] = applied
                 dispatchArguments["expected_page_ids"] = state.pageIDs
+            case "scan_reorder":
+                guard let target = arguments["page_ids"] as? [String] else {
+                    throw NotesError("invalid_scan_page_order", "page_ids must contain every page ID.")
+                }
+                try NativeNotesWriter.validateScanOrder(current: state.pageIDs, requested: target)
+                recordedArguments["previous_page_order"] = state.pageIDs
+                recordedArguments["applied_page_order"] = target
+                dispatchArguments["expected_page_ids"] = state.pageIDs
+            case "scan_replace", "scan_correct":
+                recordedArguments["previous_page_order"] = state.pageIDs
+                dispatchArguments["expected_page_ids"] = state.pageIDs
             case "scan_delete":
                 guard state.pageIDs.count > 1,
                       let previous = state.pageIDs.firstIndex(of: pageID) else {
@@ -1936,6 +2011,12 @@ public final class MCPServer: @unchecked Sendable {
                 dispatchArguments["expected_page_ids"] = state.pageIDs
             default: break
             }
+        }
+        if tool.name == "scan_replace", let encoded = arguments["page"] as? String,
+           let data = Data(base64Encoded: encoded) {
+            recordedArguments.removeValue(forKey: "page")
+            recordedArguments["source_page_sha256"] = FrozenAttachmentInput.hash(data)
+            recordedArguments["page_bytes"] = data.count
         }
         if ["scan_add", "scan_append"].contains(tool.name), let pages = arguments["pages"] as? [String] {
             recordedArguments.removeValue(forKey: "pages")

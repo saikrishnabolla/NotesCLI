@@ -669,7 +669,7 @@ final class CLITests: XCTestCase {
         let capabilities = try run(["--backend", "fake", "capabilities", "--json"])
         XCTAssertEqual(capabilities.0, 0, capabilities.2)
         let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(capabilities.1.utf8)) as? [String: Any])
-        XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 95)
+        XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 96)
 
         let blocked = try run(["--backend", "fake", "capabilities", "--write", "Print", "--json"])
         XCTAssertNotEqual(blocked.0, 0)
@@ -681,7 +681,7 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(forcedHost.0, 0, forcedHost.2)
         let forcedReport = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(forcedHost.1.utf8)) as? [String: Any])
         let forcedFeatures = try XCTUnwrap(forcedReport["features"] as? [[String: Any]])
-        XCTAssertEqual(forcedFeatures.count, 95)
+        XCTAssertEqual(forcedFeatures.count, 96)
         XCTAssertNotNil(forcedFeatures.first { $0["feature"] as? String == "Print" }?["reasons"])
 
         let help = try run(["help", "search"])

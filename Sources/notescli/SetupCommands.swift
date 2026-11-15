@@ -170,6 +170,16 @@ private struct MCPAttachmentMarkupExportValue: Codable {
     var path: String
 }
 
+private struct MCPAttachmentMarkupRenderValue: Codable {
+    var path: String
+    var byteCount: Int
+}
+
+private struct MCPCameraPhotoValue: Codable {
+    var attachmentIDs: [String]
+    var capturedCount: Int
+}
+
 private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: any NotesReading) throws -> MCPNativeResult {
     func string(_ key: String) -> String? { arguments[key] as? String }
     func integer(_ key: String) -> Int? { (arguments[key] as? NSNumber)?.intValue }
@@ -196,6 +206,9 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
     }
     func result(_ value: NativeScanResult) throws -> MCPNativeResult {
+        try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    }
+    func result(_ value: NativeScanPageReplacementResult) throws -> MCPNativeResult {
         try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
     }
     func enumValue<T: RawRepresentable>(_ key: String, as type: T.Type, choices: String) throws -> T? where T.RawValue == String {
@@ -257,6 +270,30 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         throw NotesError("native_unavailable", "Editable markup is unavailable with the fake backend.")
     }
     switch tool {
+    case "camera_devices":
+        return try MCPNativeResult(value: AVCaptureCameraImageSource().devices())
+    case "camera_photo":
+        let request = try CameraCaptureRequest(device: string("device"), delay: number("delay") ?? 0,
+                                               count: integer("count") ?? 1)
+        let images = try AVCaptureCameraImageSource().capture(request)
+        var attachments: [NativeAttachmentResult] = []
+        for (index, image) in images.enumerated() {
+            attachments.append(try writer.insertFrozenFile(
+                ref(), frozen: image, position: integer("position").map { $0 + index },
+                imageView: nil, allowShared: allowShared
+            ))
+        }
+        let last = attachments.last!
+        return try MCPNativeResult(result: last.write.writeResult, operationID: last.write.operationID,
+                                   value: MCPCameraPhotoValue(attachmentIDs: attachments.map(\.attachmentID),
+                                                              capturedCount: images.count))
+    case "camera_scan":
+        let request = try CameraCaptureRequest(device: string("device"), delay: number("delay") ?? 0,
+                                               count: integer("count") ?? 1)
+        let captured = try AVCaptureCameraImageSource().capture(request)
+        let pages = try captured.map(ScanCorrection.correctedPage)
+        return try result(writer.insertScan(ref(), pages: pages, position: integer("position"),
+                                            allowShared: allowShared))
     case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: writer.checklistAutoSortEnabled())
     case "journal_get_default_account": return try MCPNativeResult(value: writer.defaultAccountIdentifier())
     case "journal_get_smart_folder_query": return try MCPNativeResult(value: writer.smartFolderQuery(ref()))
@@ -543,6 +580,29 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         return try result(writer.moveScanPage(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
                                               toIndex: integer("to_index")!, expectedPageIDs: arguments["expected_page_ids"] as? [String],
                                               allowShared: allowShared))
+    case "scan_reorder":
+        guard let pageIDs = arguments["page_ids"] as? [String] else {
+            throw NotesError("invalid_scan_page_order", "page_ids must be an array of strings.")
+        }
+        return try result(writer.reorderScanPages(
+            ref(), attachmentID: string("attachment_id")!, pageIDs: pageIDs,
+            expectedPageIDs: arguments["expected_page_ids"] as? [String], allowShared: allowShared
+        ))
+    case "scan_replace":
+        guard let encoded = string("page"), let data = Data(base64Encoded: encoded) else {
+            throw NotesError("invalid_scan_page", "page must be valid base64.")
+        }
+        let source = try FrozenAttachmentInput(data: data, suggestedName: string("page_name") ?? "replacement.png")
+        let page = boolean("perspective_correct") == true ? try ScanCorrection.correctedPage(source) : source
+        return try result(writer.replaceScanPage(
+            ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!, page: page,
+            expectedPageIDs: arguments["expected_page_ids"] as? [String], allowShared: allowShared
+        ))
+    case "scan_correct":
+        return try result(writer.correctScanPage(
+            ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
+            expectedPageIDs: arguments["expected_page_ids"] as? [String], allowShared: allowShared
+        ))
     case "scan_delete":
         return try result(writer.deleteScanPage(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
                                                 expectedPageIDs: arguments["expected_page_ids"] as? [String],
@@ -725,6 +785,43 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         return try MCPNativeResult(value: writer.attachmentMarkupMetadata(
             ref(), attachmentID: string("attachment_id")!
         ))
+    case "attachment_markup_list":
+        return try MCPNativeResult(value: writer.attachmentMarkupAnnotations(
+            ref(), attachmentID: string("attachment_id")!
+        ))
+    case "attachment_markup_add":
+        guard let kind = AttachmentMarkupAnnotationKind(rawValue: string("kind") ?? "") else {
+            throw NotesError("invalid_arguments", "Unknown markup annotation kind.")
+        }
+        let pointValues = arguments["points"] as? [[String: Any]] ?? []
+        let points = try pointValues.map { value -> ScanPoint in
+            guard let x = (value["x"] as? NSNumber)?.doubleValue,
+                  let y = (value["y"] as? NSNumber)?.doubleValue else {
+                throw NotesError("invalid_arguments", "Each markup point requires numeric x and y values.")
+            }
+            return ScanPoint(x: x, y: y)
+        }
+        let input = AttachmentMarkupAnnotationInput(
+            kind: kind, x: number("x") ?? 0, y: number("y") ?? 0,
+            width: number("width") ?? 0, height: number("height") ?? 0,
+            text: string("text"), points: points, strokeWidth: number("stroke_width") ?? 2,
+            color: string("color") ?? "007aff"
+        )
+        return try result(writer.addAttachmentMarkupAnnotation(
+            ref(), attachmentID: string("attachment_id")!, input: input, allowShared: allowShared
+        ))
+    case "attachment_markup_remove":
+        return try result(writer.removeAttachmentMarkupAnnotation(
+            ref(), attachmentID: string("attachment_id")!, identifier: string("annotation_id")!,
+            allowShared: allowShared
+        ))
+    case "attachment_markup_render":
+        let data = try writer.renderAttachmentMarkup(ref(), attachmentID: string("attachment_id")!)
+        let target = URL(fileURLWithPath: NSString(string: string("output")!).expandingTildeInPath).standardizedFileURL
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do { try data.write(to: target, options: .withoutOverwriting) }
+        catch CocoaError.fileWriteFileExists { throw NotesError("file_exists", "Refusing to replace an existing render file.") }
+        return try MCPNativeResult(value: MCPAttachmentMarkupRenderValue(path: target.path, byteCount: data.count))
     case "attachment_markup_export":
         let value = try writer.attachmentMarkupData(ref(), attachmentID: string("attachment_id")!)
         let output = URL(fileURLWithPath: NSString(string: string("output")!).expandingTildeInPath)
@@ -1361,6 +1458,16 @@ enum PermissionGuide {
         case .restricted: warning("Speech Recognition: restricted by system policy.")
         case .notDetermined: warning("Speech Recognition: no decision was recorded.")
         @unknown default: warning("Speech Recognition: unknown status.")
+        }
+
+        do {
+            try AVCaptureCameraImageSource.requestAccessForPermissions()
+            info("Camera: authorized for NotesCLI Capability Host.")
+        } catch let error as NotesError where error.code == "camera_access_denied" {
+            warning("Camera: \(error.message)")
+            if let hint = error.hint { warning(hint) }
+        } catch {
+            warning("Camera permission could not be checked: \(error.localizedDescription)")
         }
 
         info("Full Disk Access is required for full-fidelity Apple Notes reads.")

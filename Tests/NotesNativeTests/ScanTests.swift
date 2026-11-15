@@ -9,6 +9,28 @@ import NotesSafety
 import NotesStore
 
 final class ScanTests: XCTestCase {
+    func testNotesOwnedScanPageCanBeFrozenOutsidePublicInputRoots() throws {
+        let source = URL(fileURLWithPath: #filePath)
+        XCTAssertThrowsError(try FrozenAttachmentInput(file: source)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "input_path_refused")
+        }
+        let frozen = try FrozenAttachmentInput(notesFile: source)
+        XCTAssertEqual(try Data(contentsOf: frozen.url), try Data(contentsOf: source))
+    }
+
+    func testBatchScanOrderRequiresExactPermutation() throws {
+        XCTAssertNoThrow(try NativeNotesWriter.validateScanOrder(
+            current: ["a", "b", "c"], requested: ["c", "a", "b"]
+        ))
+        for invalid in [["a", "b"], ["a", "a", "c"], ["a", "b", "d"], []] {
+            XCTAssertThrowsError(try NativeNotesWriter.validateScanOrder(
+                current: ["a", "b", "c"], requested: invalid
+            )) {
+                XCTAssertEqual(($0 as? NotesError)?.code, "invalid_scan_page_order")
+            }
+        }
+    }
+
     private func png(width: Int = 8, height: Int = 4) throws -> FrozenAttachmentInput {
         let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
                                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,

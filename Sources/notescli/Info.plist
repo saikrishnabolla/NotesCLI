@@ -8,5 +8,9 @@
     <string>notescli</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>NotesCLI captures photos you ask it to add to Apple Notes.</string>
+	<key>NSCameraUseContinuityCameraDeviceType</key>
+	<true/>
 </dict>
 </plist>

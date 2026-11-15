@@ -90,6 +90,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Native tags", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Mentions", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Photos and images", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Camera capture", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Editorial SVG and HTML diagrams", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Videos", read: "Done", write: "Done"),
         FeatureDefinition(feature: "PDFs", read: "Done", write: "Done"),
@@ -97,7 +98,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Maps and location cards", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Contact cards", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Scanned documents", read: "Done", write: "Partial"),
-        FeatureDefinition(feature: "Image and PDF markup", read: "Partial", write: "Partial"),
+        FeatureDefinition(feature: "Image and PDF markup", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Classic drawings and sketches", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Audio file attachments", read: "Done", write: "Done"),
@@ -155,11 +156,9 @@ public enum CapabilityCatalog {
     public static let limitations: [String: [String: CapabilityLimitation]] = [
         "Mentions": ["write": limitation("needs_fixture", "Mention insertion is implemented, but participant notification needs a shared-note fixture and second account.")],
         "Contact cards": ["write": apple("NotesShared and Notes.app expose contact display selectors but no checked contact-card attachment constructor; a public.vcard insert becomes a generic attachment.")],
-        "Scanned documents": ["write": limitation("partial_impl", "Native scan pages are implemented; camera capture, shape editing, crop clearing, and exported-PDF proof remain.")],
-        "Image and PDF markup": [
-            "read": limitation("partial_impl", "NotesCLI reads recognized AnnotationKit archives but does not decode editable shapes."),
-            "write": limitation("partial_impl", "NotesCLI preserves and reuses complete markup archives but does not edit shapes or prove Notes.app editability after reload.")
-        ],
+        "Camera capture": ["write": limitation("needs_fixture", "Device listing and injected photo and scan writes passed live readback; physical frame capture needs camera permission for the Capability Host.")],
+        "Scanned documents": ["write": limitation("partial_impl", "Native scan pages, filters, reorder, replacement, and correction are implemented; crop clearing, iPhone Scan Documents, and exported-PDF proof remain.")],
+        "Image and PDF markup": ["write": limitation("needs_fixture", "Shape-level add, list, remove, and render pass native readback; select-and-move editing in Notes.app after reload is unverified.")],
         "Recording summaries and call metadata": ["write": limitation("needs_fixture", "Summary deletion is implemented, but this Mac has no recording with an Apple-generated summary.")],
         "Math expressions, results, and graphs": ["write": apple("Calculate and checked native insertion cover stored expressions and plain-text results; interactive recognition and graph rendering remain inside Notes.app.")],
         "Locked-note state": ["write": apple("ICNote exposes lock-state getters, but runtime inspection found no authenticated unlock or key-management contract for a background client.")],

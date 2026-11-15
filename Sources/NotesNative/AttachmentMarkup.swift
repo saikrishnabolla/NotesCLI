@@ -3,7 +3,129 @@ import Compression
 import Darwin
 import Foundation
 import NotesCore
+import NotesNativeObjC
 import UniformTypeIdentifiers
+
+public enum AttachmentMarkupAnnotationKind: String, Codable, Sendable, CaseIterable {
+    case text, rectangle, oval, arrow, line, ink, highlight
+}
+
+public struct AttachmentMarkupAnnotation: Codable, Sendable, Equatable {
+    public var id: String
+    public var type: String
+    public var page: Int
+    public var index: Int
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+    public var text: String?
+
+    public init(id: String, type: String, page: Int, index: Int, x: Double, y: Double,
+                width: Double, height: Double, text: String? = nil) {
+        self.id = id; self.type = type; self.page = page; self.index = index
+        self.x = x; self.y = y; self.width = width; self.height = height; self.text = text
+    }
+}
+
+public struct AttachmentMarkupAnnotationInput: Sendable, Equatable {
+    public var kind: AttachmentMarkupAnnotationKind
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+    public var text: String?
+    public var points: [ScanPoint]
+    public var strokeWidth: Double
+    public var color: String
+
+    public init(kind: AttachmentMarkupAnnotationKind, x: Double = 0, y: Double = 0,
+                width: Double = 0, height: Double = 0, text: String? = nil,
+                points: [ScanPoint] = [], strokeWidth: Double = 2,
+                color: String = "007aff") {
+        self.kind = kind; self.x = x; self.y = y; self.width = width; self.height = height
+        self.text = text; self.points = points; self.strokeWidth = strokeWidth; self.color = color
+    }
+
+    public func validate() throws {
+        let values = [x, y, width, height, strokeWidth] + points.flatMap { [$0.x, $0.y] }
+        guard values.allSatisfy(\.isFinite), x >= 0, y >= 0, width >= 0, height >= 0,
+              strokeWidth > 0, strokeWidth <= 1_000 else {
+            throw NotesError("invalid_markup_geometry", "Markup geometry must be finite and nonnegative, with a positive stroke width.")
+        }
+        if kind == .ink, points.count < 2 {
+            throw NotesError("invalid_markup_geometry", "Ink annotations require at least two x,y points.")
+        }
+        if kind != .ink, (width <= 0 || height <= 0) {
+            throw NotesError("invalid_markup_geometry", "This annotation requires positive width and height.")
+        }
+        if kind == .text, text?.isEmpty != false {
+            throw NotesError("invalid_markup_text", "Text annotations require nonempty text.")
+        }
+        let hex = color.hasPrefix("#") ? String(color.dropFirst()) : color
+        guard [6, 8].contains(hex.count), UInt64(hex, radix: 16) != nil else {
+            throw NotesError("invalid_markup_color", "Markup color must be an RRGGBB or RRGGBBAA hex value.")
+        }
+    }
+}
+
+public enum AttachmentMarkupArchive {
+    public static func adding(_ input: AttachmentMarkupAnnotationInput, to data: Data?) throws -> FrozenAttachmentMarkup {
+        try input.validate()
+        let points = input.points.flatMap { [NSNumber(value: $0.x), NSNumber(value: $0.y)] }
+        do {
+            let result = try NCNotesRuntime.attachmentMarkupData(
+                adding: input.kind.rawValue, data: data, x: input.x, y: input.y,
+                width: input.width, height: input.height, text: input.text,
+                points: points, strokeWidth: input.strokeWidth, color: input.color
+            )
+            return try FrozenAttachmentMarkup(data: result)
+        } catch { throw NotesError("markup_annotation_failed", error.localizedDescription) }
+    }
+
+    public static func annotations(in data: Data) throws -> [AttachmentMarkupAnnotation] {
+        let values: [[String: Any]]
+        do { values = try NCNotesRuntime.attachmentMarkupAnnotations(data: data) }
+        catch { throw NotesError("markup_annotation_failed", error.localizedDescription) }
+        return try values.map { value in
+            guard let id = value["id"] as? String, let type = value["type"] as? String,
+                  let page = (value["page"] as? NSNumber)?.intValue,
+                  let index = (value["index"] as? NSNumber)?.intValue,
+                  let x = (value["x"] as? NSNumber)?.doubleValue,
+                  let y = (value["y"] as? NSNumber)?.doubleValue,
+                  let width = (value["width"] as? NSNumber)?.doubleValue,
+                  let height = (value["height"] as? NSNumber)?.doubleValue else {
+                throw NotesError("invalid_attachment_markup", "MarkupUI returned incomplete annotation metadata.")
+            }
+            return AttachmentMarkupAnnotation(id: id, type: type, page: page, index: index,
+                                              x: x, y: y, width: width, height: height,
+                                              text: value["text"] as? String)
+        }
+    }
+
+    public static func removing(_ identifier: String, from data: Data) throws -> FrozenAttachmentMarkup? {
+        guard !identifier.isEmpty else { throw NotesError("invalid_markup_annotation_id", "Annotation ID cannot be empty.") }
+        do {
+            let result = try NCNotesRuntime.attachmentMarkupData(removing: identifier, data: data)
+            return result.isEmpty ? nil : try FrozenAttachmentMarkup(data: result)
+        } catch { throw NotesError("markup_annotation_failed", error.localizedDescription) }
+    }
+
+    public static func renderedPNG(data: Data, baseImageURL: URL) throws -> Data {
+        do { return try NCNotesRuntime.renderAttachmentMarkup(data: data, baseImageURL: baseImageURL) }
+        catch { throw NotesError("markup_render_failed", error.localizedDescription) }
+    }
+
+    public static func imageData(embedding data: Data?, baseImageURL: URL) throws -> Data {
+        do { return try NCNotesRuntime.attachmentImageData(embedding: data, baseImageURL: baseImageURL) }
+        catch { throw NotesError("markup_embed_failed", error.localizedDescription) }
+    }
+
+    public static func embeddedData(at imageURL: URL) throws -> Data {
+        do { return try NCNotesRuntime.embeddedAttachmentMarkupData(at: imageURL) }
+        catch { throw NotesError("attachment_markup_not_found", error.localizedDescription) }
+    }
+}
 
 public struct FrozenAttachmentMarkup: Sendable {
     public static let maximumBytes = 50 * 1024 * 1024
@@ -322,5 +444,9 @@ enum AttachmentMarkupPolicy {
     static func supports(_ typeUTI: String) -> Bool {
         guard let type = UTType(typeUTI) else { return false }
         return type.conforms(to: .image) || type.conforms(to: .pdf)
+    }
+
+    static func embedsInMedia(_ typeUTI: String) -> Bool {
+        UTType(typeUTI)?.conforms(to: .image) == true
     }
 }

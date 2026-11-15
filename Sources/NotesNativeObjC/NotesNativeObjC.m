@@ -1774,6 +1774,352 @@ static id<NCScanEditor> NCNewScanEditor(NSManagedObject *gallery, NSError **erro
     return result.length ? result : nil;
 }
 
+static BOOL NCLoadAttachmentMarkup(NSError **error) {
+    return NCLoadFramework(@"/System/Library/PrivateFrameworks/AnnotationKit.framework/AnnotationKit", @"AnnotationKit", error) &&
+        NCLoadFramework(@"/System/Library/PrivateFrameworks/MarkupUI.framework/MarkupUI", @"MarkupUI", error);
+}
+
+static id NCNewAttachmentMarkupController(NSData *data, NSError **error) {
+    if (!NCLoadAttachmentMarkup(error)) return nil;
+    Class controllerClass = NSClassFromString(@"AKController");
+    Class modelClass = NSClassFromString(@"AKModelController");
+    Class pageClass = NSClassFromString(@"AKPageModelController");
+    if (!NCRequireInstanceClass(controllerClass, @[@"initForTesting", @"modelController", @"setModelController:"], @"opening attachment markup", error) ||
+        !NCRequireInstanceClass(modelClass, @[@"pageModelControllers", @"insertObject:inPageModelControllersAtIndex:"], @"opening attachment markup", error) ||
+        !NCRequireInstanceClass(pageClass, @[@"annotations", @"insertObject:inAnnotationsAtIndex:", @"removeObjectFromAnnotationsAtIndex:"], @"opening attachment markup", error)) return nil;
+    __block id controller = nil;
+    if (!NCCatch(@"opening attachment markup", error, ^{
+        controller = ((id (*)(id, SEL))objc_msgSend)([controllerClass alloc], NSSelectorFromString(@"initForTesting"));
+        id model = ((id (*)(id, SEL))objc_msgSend)(controller, NSSelectorFromString(@"modelController"));
+        if (!model) {
+            model = [modelClass new];
+            ((void (*)(id, SEL, id))objc_msgSend)(controller, NSSelectorFromString(@"setModelController:"), model);
+        }
+        if (data.length) {
+            Class readerClass = NSClassFromString(@"MUImageReader");
+            if (!NCRequireInstanceClass(readerClass, @[@"readAnnotationsFromArchivedModelData:toController:"], @"decoding attachment markup", error)) {
+                controller = nil;
+                return;
+            }
+            id reader = [readerClass new];
+            BOOL decoded = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(reader,
+                NSSelectorFromString(@"readAnnotationsFromArchivedModelData:toController:"), data, controller);
+            if (!decoded) {
+                if (error && !*error) *error = NCError(@"MarkupUI could not decode the attachment markup archive");
+                controller = nil;
+                return;
+            }
+        }
+        model = ((id (*)(id, SEL))objc_msgSend)(controller, NSSelectorFromString(@"modelController"));
+        NSArray *pages = ((id (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"pageModelControllers"));
+        if (!pages.count) {
+            id page = [pageClass new];
+            ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(model,
+                NSSelectorFromString(@"insertObject:inPageModelControllersAtIndex:"), page, 0);
+        }
+    })) return nil;
+    return controller;
+}
+
+static NSData *NCEncodeAttachmentMarkup(id controller, NSError **error) {
+    Class writerClass = NSClassFromString(@"MUImageWriter");
+    if (!NCRequireInstanceClass(writerClass, @[@"encodedModelFromAnnotationsController:encrypt:"], @"encoding attachment markup", error)) return nil;
+    __block NSData *result = nil;
+    if (!NCCatch(@"encoding attachment markup", error, ^{
+        result = ((id (*)(id, SEL, id, BOOL))objc_msgSend)([writerClass new],
+            NSSelectorFromString(@"encodedModelFromAnnotationsController:encrypt:"), controller, NO);
+    })) return nil;
+    if (!result.length && error && !*error) *error = NCError(@"MarkupUI returned empty attachment markup data");
+    return result.length ? result : nil;
+}
+
+static NSArray *NCMarkupPages(id controller) {
+    id model = ((id (*)(id, SEL))objc_msgSend)(controller, NSSelectorFromString(@"modelController"));
+    return ((id (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"pageModelControllers"));
+}
+
+static id NCMarkupBaseImage(NSURL *url, NSError **error) {
+    Class readerClass = NSClassFromString(@"MUImageReader");
+    if (!NCRequireInstanceClass(readerClass, @[@"readBaseImageFromImageAtURL:baseWasValid:"],
+                                @"reading the markup base image", error)) return nil;
+    __block id image = nil;
+    __block BOOL valid = NO;
+    if (!NCCatch(@"reading the markup base image", error, ^{
+        image = ((id (*)(id, SEL, id, BOOL *))objc_msgSend)([readerClass new],
+            NSSelectorFromString(@"readBaseImageFromImageAtURL:baseWasValid:"), url, &valid);
+    })) return nil;
+    if (!image && error && !*error) *error = NCError(@"MarkupUI could not read the attachment base image");
+    return image;
+}
+
+static NSColor *NCMarkupColor(NSString *hex, NSError **error) {
+    NSString *value = [hex hasPrefix:@"#"] ? [hex substringFromIndex:1] : hex;
+    if (value.length != 6 && value.length != 8) {
+        if (error) *error = NCError(@"Markup colors must be RRGGBB or RRGGBBAA hex values");
+        return nil;
+    }
+    unsigned long long raw = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:value];
+    if (![scanner scanHexLongLong:&raw] || !scanner.isAtEnd) {
+        if (error) *error = NCError(@"Markup colors must be valid hex values");
+        return nil;
+    }
+    double red, green, blue, alpha = 1;
+    if (value.length == 8) {
+        red = ((raw >> 24) & 255) / 255.0; green = ((raw >> 16) & 255) / 255.0;
+        blue = ((raw >> 8) & 255) / 255.0; alpha = (raw & 255) / 255.0;
+    } else {
+        red = ((raw >> 16) & 255) / 255.0; green = ((raw >> 8) & 255) / 255.0;
+        blue = (raw & 255) / 255.0;
+    }
+    return [NSColor colorWithSRGBRed:red green:green blue:blue alpha:alpha];
+}
+
++ (NSData *)attachmentMarkupDataByAddingType:(NSString *)type data:(NSData *)data
+                                           x:(double)x y:(double)y width:(double)width height:(double)height
+                                        text:(NSString *)text points:(NSArray<NSNumber *> *)points
+                                 strokeWidth:(double)strokeWidth color:(NSString *)color error:(NSError **)error {
+    NSArray *values = @[@(x), @(y), @(width), @(height), @(strokeWidth)];
+    for (NSNumber *value in values) if (!isfinite(value.doubleValue)) {
+        if (error) *error = NCError(@"Markup geometry must be finite"); return nil;
+    }
+    if (strokeWidth <= 0 || width < 0 || height < 0) {
+        if (error) *error = NCError(@"Markup dimensions must be nonnegative and stroke width must be positive"); return nil;
+    }
+    NSColor *stroke = NCMarkupColor(color, error);
+    if (!stroke) return nil;
+    id controller = NCNewAttachmentMarkupController(data, error);
+    if (!controller) return nil;
+    __block id annotation = nil;
+    if (!NCCatch(@"creating attachment markup annotation", error, ^{
+        CGRect rectangle = CGRectMake(x, y, width, height);
+        if ([type isEqualToString:@"rectangle"] || [type isEqualToString:@"oval"] || [type isEqualToString:@"text"]) {
+            NSString *className = [type isEqualToString:@"rectangle"] ? @"AKRectAnnotation" :
+                ([type isEqualToString:@"oval"] ? @"AKOvalAnnotation" : @"AKTextBoxAnnotation");
+            Class cls = NSClassFromString(className);
+            if (!NCRequireInstanceClass(cls, @[@"setRectangle:", @"setStrokeWidth:", @"setStrokeColor:", @"setFillColor:"], @"creating attachment markup shape", error)) return;
+            annotation = [cls new];
+            ((void (*)(id, SEL, CGRect))objc_msgSend)(annotation, NSSelectorFromString(@"setRectangle:"), rectangle);
+            ((void (*)(id, SEL, double))objc_msgSend)(annotation, NSSelectorFromString(@"setStrokeWidth:"), strokeWidth);
+            ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setStrokeColor:"), stroke);
+            ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setFillColor:"), [NSColor colorWithWhite:1 alpha:0]);
+            if ([type isEqualToString:@"text"]) {
+                if (!text.length || ![annotation respondsToSelector:NSSelectorFromString(@"setAnnotationText:")]) {
+                    if (error && !*error) *error = NCError(@"Text annotations require nonempty text"); annotation = nil; return;
+                }
+                NSDictionary *attributes = @{ NSFontAttributeName: [NSFont systemFontOfSize:12],
+                                              NSForegroundColorAttributeName: stroke };
+                NSTextStorage *storage = [[NSTextStorage alloc] initWithString:text attributes:attributes];
+                ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setAnnotationText:"), storage);
+                if ([annotation respondsToSelector:NSSelectorFromString(@"setTypingAttributes:")]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setTypingAttributes:"), attributes);
+                }
+                ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setForegroundColor:"), stroke);
+            }
+        } else if ([type isEqualToString:@"arrow"] || [type isEqualToString:@"line"]) {
+            Class cls = NSClassFromString(@"AKArrowAnnotation");
+            if (!NCRequireInstanceClass(cls, @[@"setStartPoint:", @"setEndPoint:", @"setStrokeWidth:", @"setStrokeColor:", @"setArrowHeadStyle:"], @"creating attachment markup line", error)) return;
+            annotation = [cls new];
+            ((void (*)(id, SEL, CGPoint))objc_msgSend)(annotation, NSSelectorFromString(@"setStartPoint:"), CGPointMake(x, y));
+            ((void (*)(id, SEL, CGPoint))objc_msgSend)(annotation, NSSelectorFromString(@"setEndPoint:"), CGPointMake(x + width, y + height));
+            ((void (*)(id, SEL, double))objc_msgSend)(annotation, NSSelectorFromString(@"setStrokeWidth:"), strokeWidth);
+            ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setStrokeColor:"), stroke);
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(annotation, NSSelectorFromString(@"setArrowHeadStyle:"), [type isEqualToString:@"arrow"] ? 1 : 0);
+        } else if ([type isEqualToString:@"ink"]) {
+            if (points.count < 4 || points.count % 2 != 0) {
+                if (error) *error = NCError(@"Ink annotations require at least two x,y points"); return;
+            }
+            Class annotationClass = NSClassFromString(@"AKDoodleAnnotation");
+            if (!NCRequireInstanceClass(annotationClass, @[@"setPath:", @"setStrokeWidth:", @"setStrokeColor:", @"setRectangle:"], @"creating attachment markup ink", error)) return;
+            NSBezierPath *path = [NSBezierPath bezierPath];
+            CGPoint first = CGPointMake(points[0].doubleValue, points[1].doubleValue);
+            ((void (*)(id, SEL, CGPoint))objc_msgSend)(path, NSSelectorFromString(@"moveToPoint:"), first);
+            for (NSUInteger index = 2; index < points.count; index += 2) {
+                CGPoint point = CGPointMake(points[index].doubleValue, points[index + 1].doubleValue);
+                ((void (*)(id, SEL, CGPoint))objc_msgSend)(path, NSSelectorFromString(@"lineToPoint:"), point);
+            }
+            CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(path, NSSelectorFromString(@"bounds"));
+            annotation = [annotationClass new];
+            ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setPath:"), path);
+            ((void (*)(id, SEL, CGRect))objc_msgSend)(annotation, NSSelectorFromString(@"setRectangle:"), bounds);
+            ((void (*)(id, SEL, double))objc_msgSend)(annotation, NSSelectorFromString(@"setStrokeWidth:"), strokeWidth);
+            ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setStrokeColor:"), stroke);
+        } else if ([type isEqualToString:@"highlight"]) {
+            Class cls = NSClassFromString(@"AKHighlightAnnotation");
+            if (!NCRequireInstanceClass(cls, @[@"setQuadPoints:", @"setColor:", @"setStyle:"], @"creating attachment markup highlight", error)) return;
+            annotation = [cls new];
+            NSArray *quad = @[[NSValue valueWithPoint:NSMakePoint(x, y)],
+                              [NSValue valueWithPoint:NSMakePoint(x + width, y)],
+                              [NSValue valueWithPoint:NSMakePoint(x, y + height)],
+                              [NSValue valueWithPoint:NSMakePoint(x + width, y + height)]];
+            ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setQuadPoints:"), quad);
+            ((void (*)(id, SEL, id))objc_msgSend)(annotation, NSSelectorFromString(@"setColor:"), stroke);
+            ((void (*)(id, SEL, NSUInteger))objc_msgSend)(annotation, NSSelectorFromString(@"setStyle:"), 0);
+        } else {
+            if (error) *error = NCError(@"Unknown attachment markup annotation type"); return;
+        }
+        if (!annotation) return;
+        id page = [NCMarkupPages(controller) firstObject];
+        NSArray *annotations = ((id (*)(id, SEL))objc_msgSend)(page, NSSelectorFromString(@"annotations"));
+        ((void (*)(id, SEL, id, NSUInteger))objc_msgSend)(page,
+            NSSelectorFromString(@"insertObject:inAnnotationsAtIndex:"), annotation, annotations.count);
+    })) return nil;
+    if (!annotation) return nil;
+    return NCEncodeAttachmentMarkup(controller, error);
+}
+
++ (NSArray<NSDictionary<NSString *,id> *> *)attachmentMarkupAnnotationsInData:(NSData *)data error:(NSError **)error {
+    id controller = NCNewAttachmentMarkupController(data, error);
+    if (!controller) return nil;
+    NSMutableArray *result = [NSMutableArray array];
+    if (!NCCatch(@"listing attachment markup annotations", error, ^{
+        [NCMarkupPages(controller) enumerateObjectsUsingBlock:^(id page, NSUInteger pageIndex, BOOL *stop) {
+            NSArray *annotations = ((id (*)(id, SEL))objc_msgSend)(page, NSSelectorFromString(@"annotations"));
+            [annotations enumerateObjectsUsingBlock:^(id annotation, NSUInteger index, BOOL *innerStop) {
+                id uuid = ((id (*)(id, SEL))objc_msgSend)(annotation, NSSelectorFromString(@"UUID"));
+                NSString *identifier = [uuid respondsToSelector:@selector(UUIDString)] ? [uuid UUIDString] : [uuid description];
+                CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(annotation, NSSelectorFromString(@"drawingBounds"));
+                id textValue = [annotation respondsToSelector:NSSelectorFromString(@"annotationText")] ?
+                    ((id (*)(id, SEL))objc_msgSend)(annotation, NSSelectorFromString(@"annotationText")) : nil;
+                NSString *text = [textValue respondsToSelector:@selector(string)] ? [textValue string] :
+                    ([textValue isKindOfClass:NSString.class] ? textValue : nil);
+                NSMutableDictionary *item = [@{@"id": identifier ?: @"", @"type": NSStringFromClass([annotation class]),
+                                               @"page": @(pageIndex), @"index": @(index),
+                                               @"x": @(bounds.origin.x), @"y": @(bounds.origin.y),
+                                               @"width": @(bounds.size.width), @"height": @(bounds.size.height)} mutableCopy];
+                if (text.length) item[@"text"] = text;
+                [result addObject:item];
+            }];
+        }];
+    })) return nil;
+    return result;
+}
+
++ (NSData *)attachmentMarkupDataByRemovingIdentifier:(NSString *)identifier data:(NSData *)data error:(NSError **)error {
+    id controller = NCNewAttachmentMarkupController(data, error);
+    if (!controller) return nil;
+    __block BOOL removed = NO;
+    __block NSUInteger remaining = 0;
+    if (!NCCatch(@"removing attachment markup annotation", error, ^{
+        for (id page in NCMarkupPages(controller)) {
+            NSArray *annotations = [((id (*)(id, SEL))objc_msgSend)(page, NSSelectorFromString(@"annotations")) copy];
+            for (NSInteger index = (NSInteger)annotations.count - 1; index >= 0; index--) {
+                id annotation = annotations[(NSUInteger)index];
+                id uuid = ((id (*)(id, SEL))objc_msgSend)(annotation, NSSelectorFromString(@"UUID"));
+                NSString *value = [uuid respondsToSelector:@selector(UUIDString)] ? [uuid UUIDString] : [uuid description];
+                if (!removed && [value caseInsensitiveCompare:identifier] == NSOrderedSame) {
+                    ((void (*)(id, SEL, NSUInteger))objc_msgSend)(page,
+                        NSSelectorFromString(@"removeObjectFromAnnotationsAtIndex:"), (NSUInteger)index);
+                    removed = YES;
+                } else { remaining++; }
+            }
+        }
+    })) return nil;
+    if (!removed) { if (error) *error = NCError(@"No markup annotation matches that identifier"); return nil; }
+    if (remaining == 0) return [NSData data];
+    return NCEncodeAttachmentMarkup(controller, error);
+}
+
++ (NSData *)renderAttachmentMarkupData:(NSData *)data baseImageURL:(NSURL *)baseImageURL error:(NSError **)error {
+    id controller = NCNewAttachmentMarkupController(data, error);
+    if (!controller) return nil;
+    id baseImage = NCMarkupBaseImage(baseImageURL, error);
+    NSImage *image = [baseImage isKindOfClass:NSData.class]
+        ? [[NSImage alloc] initWithData:baseImage]
+        : ([baseImage isKindOfClass:NSImage.class] ? baseImage : nil);
+    if (!image) { if (error) *error = NCError(@"The attachment image or PDF could not be rendered"); return nil; }
+    CGRect proposed = CGRectMake(0, 0, image.size.width, image.size.height);
+    CGImageRef base = [image CGImageForProposedRect:&proposed context:nil hints:nil];
+    if (!base) { if (error) *error = NCError(@"The attachment produced no renderable image"); return nil; }
+    id page = [NCMarkupPages(controller) firstObject];
+    if (!NCRequireObject(page, @[@"renderAnnotationsOnImage:wantsHDR:opaque:withTransform:shouldApplyCropRect:forPreview:"],
+                         @"rendering attachment markup", error)) return nil;
+    __block CGImageRef rendered = nil;
+    if (!NCCatch(@"rendering attachment markup", error, ^{
+        rendered = ((CGImageRef (*)(id, SEL, CGImageRef, BOOL, BOOL, CGAffineTransform, BOOL, BOOL))objc_msgSend)(page,
+            NSSelectorFromString(@"renderAnnotationsOnImage:wantsHDR:opaque:withTransform:shouldApplyCropRect:forPreview:"),
+            base, NO, NO, CGAffineTransformIdentity, NO, NO);
+    })) return nil;
+    if (!rendered) { if (error) *error = NCError(@"MarkupUI produced no rendered image"); return nil; }
+    NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithCGImage:rendered];
+    NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    if (!png.length && error) *error = NCError(@"The rendered markup could not be encoded as PNG");
+    return png.length ? png : nil;
+}
+
++ (NSData *)attachmentImageDataByEmbeddingMarkupData:(NSData *)data baseImageURL:(NSURL *)baseImageURL
+                                                error:(NSError **)error {
+    if (!baseImageURL.isFileURL) { if (error) *error = NCError(@"The markup base image must be a file URL"); return nil; }
+    if (!NCLoadAttachmentMarkup(error)) return nil;
+    id controller = NCNewAttachmentMarkupController(data, error);
+    if (!controller) return nil;
+    id baseImage = NCMarkupBaseImage(baseImageURL, error);
+    if (!baseImage) return nil;
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)baseImageURL, nil);
+    CFStringRef sourceType = source ? CGImageSourceGetType(source) : nil;
+    NSString *imageType = sourceType ? (__bridge NSString *)sourceType : @"public.png";
+    NSMutableData *result = [NSMutableData data];
+    CGDataConsumerRef consumer = CGDataConsumerCreateWithCFData((__bridge CFMutableDataRef)result);
+    if (!consumer) {
+        if (source) CFRelease(source);
+        if (error) *error = NCError(@"Could not create a markup image data consumer");
+        return nil;
+    }
+    Class writerClass = NSClassFromString(@"MUImageWriter");
+    NSString *selectorName = @"writeUsingBaseImage:withAnnotationsFromController:asImageOfType:toConsumer:embedSourceImageAndAnnotationsAsMetadata:encryptPrivateMetadata:error:";
+    if (!NCRequireInstanceClass(writerClass, @[selectorName], @"writing embedded attachment markup", error)) {
+        CGDataConsumerRelease(consumer);
+        if (source) CFRelease(source);
+        return nil;
+    }
+    __block BOOL written = NO;
+    __block NSError *writeError = nil;
+    BOOL caught = NCCatch(@"writing embedded attachment markup", error, ^{
+        written = ((BOOL (*)(id, SEL, id, id, id, CGDataConsumerRef, BOOL, BOOL, NSError **))objc_msgSend)(
+            [writerClass new], NSSelectorFromString(selectorName), baseImage, controller, imageType, consumer,
+            data.length > 0, NO, &writeError
+        );
+    });
+    CGDataConsumerRelease(consumer);
+    if (source) CFRelease(source);
+    if (!caught) return nil;
+    if ((!written || !result.length) && error) {
+        *error = writeError ?: NCError(@"MarkupUI could not encode the attachment image");
+    }
+    return written && result.length ? result : nil;
+}
+
++ (BOOL)replaceAttachmentMediaWithURL:(NSURL *)url filename:(NSString *)filename
+                            attachment:(NSManagedObject *)attachment error:(NSError **)error {
+    if (!url.isFileURL || !filename.length) {
+        if (error) *error = NCError(@"Replacement attachment media is incomplete");
+        return NO;
+    }
+    if (!NCRequireObject(attachment,
+        @[@"addMediaWithURL:filename:updateFileBasedAttributes:", @"invalidateAttachmentPreviewImages"],
+        @"replacing attachment media", error)) return NO;
+    return NCCatch(@"replacing attachment media", error, ^{
+        ((id (*)(id, SEL, id, id, BOOL))objc_msgSend)(attachment,
+            NSSelectorFromString(@"addMediaWithURL:filename:updateFileBasedAttributes:"), url, filename, NO);
+        ((void (*)(id, SEL))objc_msgSend)(attachment, NSSelectorFromString(@"invalidateAttachmentPreviewImages"));
+    });
+}
+
++ (NSData *)embeddedAttachmentMarkupDataAtURL:(NSURL *)url error:(NSError **)error {
+    if (!url.isFileURL) { if (error) *error = NCError(@"The attachment markup source must be a file URL"); return nil; }
+    if (!NCLoadAttachmentMarkup(error)) return nil;
+    Class readerClass = NSClassFromString(@"MUImageReader");
+    if (!NCRequireInstanceClass(readerClass, @[@"readArchivedModelDataFromImageURL:"],
+                                @"reading embedded attachment markup", error)) return nil;
+    __block NSData *result = nil;
+    if (!NCCatch(@"reading embedded attachment markup", error, ^{
+        result = ((id (*)(id, SEL, id))objc_msgSend)([readerClass new],
+            NSSelectorFromString(@"readArchivedModelDataFromImageURL:"), url);
+    })) return nil;
+    if (!result.length && error) *error = NCError(@"The attachment file has no embedded editable markup archive");
+    return result.length ? result : nil;
+}
+
 + (BOOL)setScanOrientation:(NSInteger)orientation pageIdentifier:(NSString *)pageIdentifier
                     gallery:(NSManagedObject *)gallery error:(NSError **)error {
     if (orientation < 0 || orientation > 3) { if (error) *error = NCError(@"Scan orientation must be between 0 and 3"); return NO; }

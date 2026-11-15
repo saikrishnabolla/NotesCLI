@@ -6,9 +6,10 @@ import NotesNative
 struct AttachmentMarkupCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "markup",
-        abstract: "Inspect, export, set, copy, or clear editable image and PDF markup.",
+        abstract: "Inspect or edit image and PDF markup.",
         subcommands: [AttachmentMarkupInspect.self, AttachmentMarkupExport.self, AttachmentMarkupSet.self,
-                      AttachmentMarkupCopy.self, AttachmentMarkupClear.self]
+                      AttachmentMarkupCopy.self, AttachmentMarkupClear.self, AttachmentMarkupList.self,
+                      AttachmentMarkupAdd.self, AttachmentMarkupRemove.self, AttachmentMarkupRender.self]
     )
 }
 
@@ -134,5 +135,110 @@ struct AttachmentMarkupClear: ParsableCommand {
                 stableRef, attachmentID: attachmentID, allowShared: write.allowShared
             ))
         }
+    }
+}
+
+struct AttachmentMarkupList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List individual editable markup annotations.")
+    @OptionGroup var options: GlobalOptions
+    @Argument var ref: String
+    @Argument var attachmentID: String
+
+    func run() throws {
+        let backend = try options.backends()
+        _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        guard !backend.isFake else { throw NotesError("native_unavailable", "Editable markup is unavailable with the fake backend.") }
+        let stableRef = try backend.reader.summary(ref).id.uuid
+        let values = try NativeNotesWriter().attachmentMarkupAnnotations(stableRef, attachmentID: attachmentID)
+        if options.json { try Output.json(EngineMarkupReadResponse(engine: "native", result: values)) }
+        else { Output.table(["ID", "TYPE", "PAGE", "X", "Y", "WIDTH", "HEIGHT", "TEXT"], values.map {
+            [$0.id, $0.type, String($0.page), String($0.x), String($0.y), String($0.width), String($0.height), $0.text ?? ""]
+        }) }
+    }
+}
+
+struct AttachmentMarkupAdd: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "add", abstract: "Add a basic editable markup annotation.")
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Argument var ref: String
+    @Argument var attachmentID: String
+    @Argument(help: "text, rectangle, oval, arrow, line, ink, or highlight.") var kind: String
+    @Option var x: Double = 0
+    @Option var y: Double = 0
+    @Option var width: Double = 0
+    @Option var height: Double = 0
+    @Option var text: String?
+    @Option(help: "Ink point as X,Y. Repeat at least twice.") var point: [String] = []
+    @Option(name: .customLong("stroke-width")) var strokeWidth: Double = 2
+    @Option(help: "RRGGBB or RRGGBBAA.") var color = "007aff"
+
+    func run() throws {
+        let points = try point.map { value -> ScanPoint in
+            let parts = value.split(separator: ",", omittingEmptySubsequences: false)
+            guard parts.count == 2, let x = Double(parts[0]), let y = Double(parts[1]) else {
+                throw ValidationError("Each --point must be X,Y.")
+            }
+            return ScanPoint(x: x, y: y)
+        }
+        guard let annotationKind = AttachmentMarkupAnnotationKind(rawValue: kind) else {
+            throw ValidationError("Use text, rectangle, oval, arrow, line, ink, or highlight.")
+        }
+        let input = AttachmentMarkupAnnotationInput(kind: annotationKind, x: x, y: y, width: width, height: height,
+                                                     text: text, points: points, strokeWidth: strokeWidth, color: color)
+        try input.validate()
+        try UnifiedNative.noteWrite(
+            options: options, write: write, ref: ref, operation: "attachmentMarkupAdd",
+            arguments: ["attachment_id": attachmentID, "kind": annotationKind.rawValue, "color": color]
+        ) { stableRef in
+            NativeActionResult(try NativeNotesWriter().addAttachmentMarkupAnnotation(
+                stableRef, attachmentID: attachmentID, input: input, allowShared: write.allowShared
+            ))
+        }
+    }
+}
+
+struct AttachmentMarkupRemove: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "remove", abstract: "Remove one editable markup annotation.")
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Argument var ref: String
+    @Argument var attachmentID: String
+    @Argument var annotationID: String
+
+    func run() throws {
+        try UnifiedNative.noteWrite(
+            options: options, write: write, ref: ref, operation: "attachmentMarkupRemove",
+            arguments: ["attachment_id": attachmentID, "annotation_id": annotationID]
+        ) { stableRef in
+            NativeActionResult(try NativeNotesWriter().removeAttachmentMarkupAnnotation(
+                stableRef, attachmentID: attachmentID, identifier: annotationID, allowShared: write.allowShared
+            ))
+        }
+    }
+}
+
+private struct AttachmentMarkupRenderResponse: Encodable { var path: String; var byteCount: Int }
+
+struct AttachmentMarkupRender: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "render", abstract: "Render editable markup to a PNG preview.")
+    @OptionGroup var options: GlobalOptions
+    @Argument var ref: String
+    @Argument var attachmentID: String
+    @Argument var output: String
+
+    func run() throws {
+        let backend = try options.backends()
+        _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        guard !backend.isFake else { throw NotesError("native_unavailable", "Editable markup is unavailable with the fake backend.") }
+        let stableRef = try backend.reader.summary(ref).id.uuid
+        let data = try NativeNotesWriter().renderAttachmentMarkup(stableRef, attachmentID: attachmentID)
+        let target = URL(fileURLWithPath: NSString(string: output).expandingTildeInPath).standardizedFileURL
+        try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do { try data.write(to: target, options: .withoutOverwriting) }
+        catch CocoaError.fileWriteFileExists { throw NotesError("file_exists", "Refusing to replace an existing render file.") }
+        let response = AttachmentMarkupRenderResponse(path: target.path, byteCount: data.count)
+        if options.json { try Output.json(response) }
+        else { Output.table(["BYTES", "PATH"], [[String(data.count), target.path]]) }
     }
 }

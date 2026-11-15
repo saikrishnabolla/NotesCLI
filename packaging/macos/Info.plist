@@ -12,6 +12,10 @@
     <string>1</string>
     <key>NSAppleEventsUsageDescription</key>
     <string>NotesCLI uses Apple Events to create and update notes through the Notes app.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>NotesCLI captures photos you ask it to add to Apple Notes.</string>
+	<key>NSCameraUseContinuityCameraDeviceType</key>
+	<true/>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>NotesCLI uses on-device speech recognition to transcribe audio recordings you add to Apple Notes.</string>
 </dict>

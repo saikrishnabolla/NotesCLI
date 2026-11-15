@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.9
+
+### Added
+
+- Password-backed V1 Neo reads can decrypt cipher-3 sidecar attachments with Apple's stored sidecar key or verified main-key fallback.
+- `collaboration activity` and MCP `collaboration_activity` export stored collaboration events as bounded raw data and hashes without changing Notes.
+- Handwriting recognition results can be saved, replaced, and cleared with native and database readback.
+
+### Fixed
+
+- Native MCP note and paragraph links no longer deadlock during post-write verification.
+- Release archives can be built from a clean checkout. Manual GitHub releases now require Developer ID signing and notarization credentials.
+
 ## 1.1.8
 
 ### Fixed

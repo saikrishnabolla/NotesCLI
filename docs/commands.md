@@ -1,6 +1,6 @@
 # Command reference
 
-This reference follows `notescli --help` from version 1.1.8.
+This reference follows `notescli --help` from version 1.1.9.
 
 ## Global options
 
@@ -45,6 +45,7 @@ notescli count [--folder <folder>] [--account <account>] [--include-deleted]
 notescli selection
 notescli deeplink <ref>
 notescli backlinks <ref>
+notescli collaboration activity <ref> [--limit <1-500>]
 notescli attachments <ref> [--save <directory> | --preview <directory>]
 notescli table show <ref> [--attachment <id>] [--format markdown|json|csv]
 notescli anchor add <ref> (--heading <text> | --offset <utf16-offset>)
@@ -66,6 +67,8 @@ notescli open <note> --attachment <id> [--reveal]
 `recent` defaults to 10 notes. `list` excludes Recently Deleted unless you pass `--include-deleted`. `list` and `search` return an opaque `nextCursor` in JSON when more results exist. Pass it back with `--cursor`; it stores the sort key and note ID instead of an offset.
 
 `show --format outline` returns a heading tree with UTF-16 offsets. Anchors are stored in `~/Library/Application Support/NotesCLI/anchors.sqlite` and relocate from a saved text fingerprint after edits. `wait-sync` succeeds only after the store reports that the latest local version reached iCloud and no save flags remain.
+
+`collaboration activity` is read-only. It returns the stored activity blob and each reachable event with byte counts, SHA-256 hashes, bounded base64, and JSON only when the raw payload parses as JSON. Unknown and future event formats stay raw.
 
 Attachment previews are PNG files: resized images, the first video frame, or the first PDF page. Classic `com.apple.drawing` strokes render as SVG when stroke data is present. If decoding fails, the attachment keeps its raster fallback path. Mention output includes the stored participant name, email, and user ID when available.
 

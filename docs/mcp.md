@@ -44,6 +44,7 @@ Tools added by `--allow-native`:
 checklist_list  checklist_add  checklist_toggle  checklist_check_all
 checklist_uncheck_all  checklist_clear_done  pin_note  unpin_note
 tag_add  tag_remove  tag_rename  tag_delete  link_add  link_list
+collaboration_activity
 attach_pasteboard  add_url  link_capture  undo  revert
 smart_folder_create  smart_folder_rename  smart_folder_delete
 text_find  text_insert  text_delete  text_replace
@@ -135,6 +136,8 @@ Every Notes write uses the folder allowlist, concurrency checks, journal, snapsh
 `history` and `diff` read the exact pre-write snapshots created by NotesCLI. Native `undo` and `revert` can recreate missing scans, recordings, drawings, rich links, maps, tables, table-cell inline objects, Paper documents, and generic files, then verify the restored topology and bytes.
 
 Native tools stay hidden unless the server starts with `--allow-native`. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
+
+`collaboration_activity` is read-only. It returns bounded raw activity data and hashes. It decodes a JSON tree only when Foundation accepts the stored bytes and does not assign meanings to unknown event formats.
 
 `drawing_add` and `drawing_create` convert an SVG file to editable `com.apple.paper` strokes. They accept `ink`, `width`, `color`, `bw`, `size`, `fit`, and `fill`. `drawing_export` returns SVG text or a base64-encoded PNG and can select one attachment with `attachment_id`.
 

@@ -16,7 +16,7 @@ notescli setup
 From a release archive:
 
 ```bash
-tar -xzf notescli-1.1.8-macos-universal.tar.gz
+tar -xzf notescli-1.1.9-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
 mkdir -p "$HOME/Applications"
 ditto "NotesCLI Capability Host.app" "$HOME/Applications/NotesCLI Capability Host.app"
@@ -73,7 +73,7 @@ Writes return `verified`, `unverified`, `unknown`, or `rolled_back`, plus the `e
 
 Rich edits such as native checklists, pins, tags, links, highlights, positioned images, maps, scanned documents, tables, table-cell formatting, paragraph styles, range edits, duplication, restore, folder grouping, default style, and folder moves require `--engine native` or `NOTESCLI_ENGINE=native`. Native undo and revert verify the title, pin state, decoded text and runs, paragraph and checklist identities, tables and rich cells, attachment topology, private link payloads, and archived media through fresh native and database reads. They recreate missing scans and markup, recordings and fragments, Paper documents, multi-canvas System Paper, modern and classic drawings, rich links, maps, tables, table-cell inline objects, paragraph links, PDFs, images, and files. Explicit native UTI creation also preserves file types that have no canonical extension. Unknown future attachment graphs are refused. The scripting engine refuses native-only snapshots unless you pass `--allow-downgrade`. See the [Apple Notes feature inventory](docs/APPLE-NOTES-FEATURES.md) for all 95 rows.
 
-`show --password-stdin --no-attachments` reads V1 and V1 Neo Notes-password-locked bodies. `attachments --password-stdin --save <directory>` exports their decrypted attachments. Device-key/passcode V2 and sidecar-v3 protection remain unsupported. NotesCLI never stores the password.
+`show --password-stdin --no-attachments` reads V1 and V1 Neo Notes-password-locked bodies. `attachments --password-stdin --save <directory>` exports their decrypted attachments, including V1 Neo cipher-3 sidecars. Device-key/passcode V2 protection remains unsupported. NotesCLI never stores the password.
 
 `diagram add` renders self-contained SVG or HTML through WebKit, crops it, and inserts a 2x or 3x PNG. The PNG stores the original source for `diagram export`. See the bundled `notescli-diagrams` skill for the agent workflow.
 

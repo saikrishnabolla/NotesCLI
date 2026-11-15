@@ -1,6 +1,8 @@
 import Foundation
+import CoreData
 import NotesAutomation
 import NotesCore
+import NotesNativeObjC
 import NotesSafety
 import NotesStore
 import XCTest
@@ -108,6 +110,37 @@ final class RecognitionTests: XCTestCase {
         let page = Attachment(id: "page-1", typeUTI: "public.jpeg", filePath: "/tmp/page.jpeg")
         let scan = Attachment(id: "scan-1", typeUTI: "com.apple.notes.gallery", childAttachments: [page])
         XCTAssertEqual(try OCRAttachmentResolver.resolve([scan], attachmentID: "page-1").id, "page-1")
+    }
+
+    func testImageMetadataSettersUpdateNativeValuesAndVersions() throws {
+        let modelURL = URL(fileURLWithPath: "/System/Library/PrivateFrameworks/NotesShared.framework/Versions/A/Resources/NoteData.mom")
+        let model = try XCTUnwrap(NSManagedObjectModel(contentsOf: modelURL))
+        let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
+        _ = try coordinator.addPersistentStore(type: .inMemory, at: URL(fileURLWithPath: "/dev/null"))
+        let context = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+        context.persistentStoreCoordinator = coordinator
+        let attachment = NSEntityDescription.insertNewObject(forEntityName: "ICAttachment", into: context)
+
+        _ = try NCNotesRuntime.setOCRSummary("Exact OCR", attachment: attachment)
+        XCTAssertEqual(attachment.value(forKey: "ocrSummary") as? String, "Exact OCR")
+        XCTAssertEqual((attachment.value(forKey: "ocrSummaryVersion") as? NSNumber)?.intValue, 1)
+        _ = try NCNotesRuntime.setOCRSummary(nil, attachment: attachment)
+        XCTAssertNil(attachment.value(forKey: "ocrSummary"))
+        XCTAssertEqual((attachment.value(forKey: "ocrSummaryVersion") as? NSNumber)?.intValue, 0)
+
+        _ = try NCNotesRuntime.setImageClassificationSummary("receipt, document", attachment: attachment)
+        XCTAssertEqual(attachment.value(forKey: "imageClassificationSummary") as? String, "receipt, document")
+        XCTAssertEqual((attachment.value(forKey: "imageClassificationSummaryVersion") as? NSNumber)?.intValue, 4)
+        _ = try NCNotesRuntime.setImageClassificationSummary(nil, attachment: attachment)
+        XCTAssertNil(attachment.value(forKey: "imageClassificationSummary"))
+        XCTAssertEqual((attachment.value(forKey: "imageClassificationSummaryVersion") as? NSNumber)?.intValue, 0)
+    }
+
+    func testImageMetadataRejectsNonImageAttachmentType() throws {
+        XCTAssertNoThrow(try NativeImageMetadata.requireImage(typeUTI: "public.jpeg", attachmentID: "image"))
+        XCTAssertThrowsError(try NativeImageMetadata.requireImage(typeUTI: "public.plain-text", attachmentID: "text")) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "image_metadata_attachment_not_image")
+        }
     }
 
     func testLiveHandwritingSurvivesHardDeleteAndDrawingRecreation() throws {

@@ -291,6 +291,24 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         return try MCPNativeResult(value: OCRRecognition.recognize(fileURL: URL(fileURLWithPath: path),
                                                                     languages: arguments["languages"] as? [String],
                                                                     title: string("title") ?? attachment.title))
+    case "ocr_set":
+        let clear = boolean("clear") ?? false
+        guard clear != (string("text") != nil) else {
+            throw NotesError("invalid_ocr_text", "Provide exactly one of text or clear=true.")
+        }
+        return try result(writer.setOCRSummary(
+            try ref(), attachmentID: string("attachment_id")!, summary: clear ? nil : string("text"),
+            allowShared: allowShared
+        ))
+    case "image_labels_set":
+        let clear = boolean("clear") ?? false
+        guard clear != (string("text") != nil) else {
+            throw NotesError("invalid_image_labels", "Provide exactly one of text or clear=true.")
+        }
+        return try result(writer.setImageClassificationSummary(
+            try ref(), attachmentID: string("attachment_id")!, summary: clear ? nil : string("text"),
+            allowShared: allowShared
+        ))
     case "handwriting_recognize":
         return try MCPNativeResult(value: writer.recognizeHandwriting(
             try ref(), attachmentID: string("attachment_id")!, locale: string("locale") ?? "en-US"

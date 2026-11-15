@@ -6,6 +6,15 @@ import NotesNative
 struct OCRCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "ocr",
+        abstract: "Recognize and manage stored image text.",
+        subcommands: [OCRRecognize.self, OCRSet.self],
+        defaultSubcommand: OCRRecognize.self
+    )
+}
+
+struct OCRRecognize: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "recognize",
         abstract: "Recognize text in a downloaded image attachment without changing Apple Notes."
     )
 
@@ -33,6 +42,90 @@ struct OCRCommand: ParsableCommand {
         } else if !options.quiet {
             print(result.text)
         }
+    }
+}
+
+struct OCRSet: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "set",
+        abstract: "Replace or clear the stored OCR text for an image attachment."
+    )
+
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Argument(help: "Note reference.") var note: String
+    @Option(help: "Image attachment ID.") var attachment: String
+    @Option(help: "OCR text to store. Omit with --clear.") var text: String?
+    @Flag(help: "Clear the stored OCR text.") var clear = false
+
+    func validate() throws {
+        guard clear != (text != nil) else {
+            throw ValidationError("Provide exactly one of --text or --clear.")
+        }
+    }
+
+    func run() throws {
+        try UnifiedNative.noteWrite(
+            options: options,
+            write: write,
+            ref: note,
+            operation: "setOCRSummary",
+            arguments: ["attachment_id": attachment, "summary": clear ? "" : text!],
+            native: { stable in
+                NativeActionResult(try NativeNotesWriter().setOCRSummary(
+                    stable,
+                    attachmentID: attachment,
+                    summary: clear ? nil : text,
+                    allowShared: write.allowShared
+                ))
+            }
+        )
+    }
+}
+
+struct ImageLabelsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "image-labels",
+        abstract: "Manage stored image-classification labels.",
+        subcommands: [ImageLabelsSet.self]
+    )
+}
+
+struct ImageLabelsSet: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "set",
+        abstract: "Replace or clear the stored classification labels for an image attachment."
+    )
+
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Argument(help: "Note reference.") var note: String
+    @Option(help: "Image attachment ID.") var attachment: String
+    @Option(help: "Labels to store. Omit with --clear.") var text: String?
+    @Flag(help: "Clear the stored labels.") var clear = false
+
+    func validate() throws {
+        guard clear != (text != nil) else {
+            throw ValidationError("Provide exactly one of --text or --clear.")
+        }
+    }
+
+    func run() throws {
+        try UnifiedNative.noteWrite(
+            options: options,
+            write: write,
+            ref: note,
+            operation: "setImageClassificationSummary",
+            arguments: ["attachment_id": attachment, "summary": clear ? "" : text!],
+            native: { stable in
+                NativeActionResult(try NativeNotesWriter().setImageClassificationSummary(
+                    stable,
+                    attachmentID: attachment,
+                    summary: clear ? nil : text,
+                    allowShared: write.allowShared
+                ))
+            }
+        )
     }
 }
 

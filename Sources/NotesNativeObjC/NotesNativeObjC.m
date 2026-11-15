@@ -2013,6 +2013,26 @@ static id<NCScanEditor> NCNewScanEditor(NSManagedObject *gallery, NSError **erro
     return changed;
 }
 
++ (BOOL)setOCRSummary:(NSString *)summary attachment:(NSManagedObject *)attachment error:(NSError **)error {
+    if (!NCRequireObject(attachment, @[@"setOcrSummary:", @"ocrSummary", @"ocrSummaryVersion"],
+                         @"updating OCR summary", error)) return NO;
+    return NCCatch(@"updating OCR summary", error, ^{
+        ((void (*)(id, SEL, id))objc_msgSend)(attachment, NSSelectorFromString(@"setOcrSummary:"), summary);
+        [attachment setValue:@(summary != nil ? 1 : 0) forKey:@"ocrSummaryVersion"];
+    });
+}
+
++ (BOOL)setImageClassificationSummary:(NSString *)summary attachment:(NSManagedObject *)attachment error:(NSError **)error {
+    if (!NCRequireObject(attachment, @[@"setImageClassificationSummary:", @"imageClassificationSummary",
+                                      @"imageClassificationSummaryVersion"],
+                         @"updating image classification summary", error)) return NO;
+    return NCCatch(@"updating image classification summary", error, ^{
+        ((void (*)(id, SEL, id))objc_msgSend)(attachment,
+            NSSelectorFromString(@"setImageClassificationSummary:"), summary);
+        [attachment setValue:@(summary != nil ? 4 : 0) forKey:@"imageClassificationSummaryVersion"];
+    });
+}
+
 + (NSDictionary<NSString *,id> *)regenerateFallbackPDFForAttachment:(NSManagedObject *)attachment
                                                                error:(NSError **)error {
     NSError *loadError = nil;

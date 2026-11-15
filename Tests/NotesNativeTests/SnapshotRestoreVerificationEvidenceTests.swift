@@ -48,6 +48,21 @@ final class SnapshotRestoreVerificationEvidenceTests: XCTestCase {
                                                            actual: try note([recording(["f1"], duration: 10, words: changed)])))
     }
 
+    func testRejectsChangedOCRAndImageClassificationMetadata() throws {
+        let image = Attachment(id: "image", typeUTI: "public.jpeg",
+                               ocrText: "Invoice total 42", imageClassification: "receipt, document")
+        let expected = try note([image])
+        XCTAssertTrue(SnapshotRestoreVerification.matches(expected: expected, actual: expected))
+
+        var changedOCR = image
+        changedOCR.ocrText = "Invoice total 41"
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: try note([changedOCR])))
+
+        var changedLabels = image
+        changedLabels.imageClassification = "photo"
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: try note([changedLabels])))
+    }
+
     func testRejectsChangedScanStateURLMapAndMarkup() throws {
         var page = Attachment(id: "page", typeUTI: "public.jpeg", scanFilter: 2, scanOrientation: 1,
                               scanCrop: ScanCrop(bottomLeft: ScanPoint(x: 0, y: 0), bottomRight: ScanPoint(x: 1, y: 0),

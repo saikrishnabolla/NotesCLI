@@ -266,6 +266,10 @@ public final class MCPServer: @unchecked Sendable {
                   ["ref": string, "enabled": bool], write: true, native: true, destructive: true),
                 t("ocr_attachment", "Recognize text in a downloaded image attachment without changing Notes.", ["ref"],
                   ["ref": string, "attachment_id": string, "languages": strings, "title": string], native: true),
+                t("ocr_set", "Replace or clear an image attachment's stored OCR text.", ["ref", "attachment_id"],
+                  ["ref": string, "attachment_id": string, "text": string, "clear": bool], write: true, native: true),
+                t("image_labels_set", "Replace or clear an image attachment's stored classification labels.", ["ref", "attachment_id"],
+                  ["ref": string, "attachment_id": string, "text": string, "clear": bool], write: true, native: true),
                 t("handwriting_recognize", "Recognize text in editable Paper strokes without changing Notes.", ["ref", "attachment_id"],
                   ["ref": string, "attachment_id": string, "locale": string], native: true),
                 t("handwriting_persist", "Recognize editable Paper strokes and store the result in Notes.", ["ref", "attachment_id"],
@@ -1431,6 +1435,13 @@ public final class MCPServer: @unchecked Sendable {
     private func callNative(_ tool: Tool, _ arguments: [String: Any]) throws -> [String: Any] {
         guard allowNative else { throw NotesError("native_required", "This tool requires the private native engine.", hint: "Start notescli mcp with --allow-native.") }
         guard let nativeHandler else { throw NotesError("native_unavailable", "The native engine is not available.") }
+        if ["ocr_set", "image_labels_set"].contains(tool.name) {
+            let clear = arguments["clear"] as? Bool ?? false
+            guard clear != (arguments["text"] is String) else {
+                let code = tool.name == "ocr_set" ? "invalid_ocr_text" : "invalid_image_labels"
+                throw NotesError(code, "Provide exactly one of text or clear=true.")
+            }
+        }
         if tool.name == "undo" { return try callNativeUndo(tool, arguments, nativeHandler: nativeHandler) }
         if tool.name == "revert" { return try callNativeRevert(tool, arguments, nativeHandler: nativeHandler) }
         if !tool.write {

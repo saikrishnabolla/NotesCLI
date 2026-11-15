@@ -333,9 +333,11 @@ public struct Attachment: Codable, Sendable, Hashable {
     public var mapAddress: String?
     public var mapPlaceUpdated: Date?
     public var ocrText: String?      // text Notes already recognized (scans, images)
+    public var ocrSummaryVersion: Int?
     public var handwritingText: String?
     public var additionalIndexableText: String?
     public var imageClassification: String?
+    public var imageClassificationSummaryVersion: Int?
     public var imageSummary: String?
     public var pdfText: String?
     public var transcriptText: String?
@@ -372,9 +374,10 @@ public struct Attachment: Codable, Sendable, Hashable {
                 title: String? = nil, url: String? = nil, synapseDataBytes: Int? = nil,
                 linkPreviewMetadataBytes: Int? = nil, hasMapLocation: Bool? = nil,
                 mapLatitude: Double? = nil, mapLongitude: Double? = nil, mapAddress: String? = nil,
-                mapPlaceUpdated: Date? = nil, ocrText: String? = nil,
+                mapPlaceUpdated: Date? = nil, ocrText: String? = nil, ocrSummaryVersion: Int? = nil,
                 handwritingText: String? = nil, additionalIndexableText: String? = nil,
-                imageClassification: String? = nil, imageSummary: String? = nil, pdfText: String? = nil,
+                imageClassification: String? = nil, imageClassificationSummaryVersion: Int? = nil,
+                imageSummary: String? = nil, pdfText: String? = nil,
                 transcriptText: String? = nil, transcriptWords: [TranscriptWord]? = nil,
                 recording: RecordingMetadata? = nil, recordingFragments: [RecordingFragmentMetadata]? = nil,
                 duration: Double? = nil,
@@ -396,9 +399,11 @@ public struct Attachment: Codable, Sendable, Hashable {
         self.hasMapLocation = hasMapLocation
         self.mapLatitude = mapLatitude; self.mapLongitude = mapLongitude
         self.mapAddress = mapAddress; self.mapPlaceUpdated = mapPlaceUpdated
-        self.ocrText = ocrText
+        self.ocrText = ocrText; self.ocrSummaryVersion = ocrSummaryVersion
         self.handwritingText = handwritingText; self.additionalIndexableText = additionalIndexableText
-        self.imageClassification = imageClassification; self.imageSummary = imageSummary; self.pdfText = pdfText
+        self.imageClassification = imageClassification
+        self.imageClassificationSummaryVersion = imageClassificationSummaryVersion
+        self.imageSummary = imageSummary; self.pdfText = pdfText
         self.transcriptText = transcriptText; self.transcriptWords = transcriptWords; self.recording = recording
         self.recordingFragments = recordingFragments
         self.duration = duration; self.childAttachmentIDs = childAttachmentIDs; self.childAttachments = childAttachments

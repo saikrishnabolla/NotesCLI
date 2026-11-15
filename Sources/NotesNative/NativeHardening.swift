@@ -270,18 +270,26 @@ enum SnapshotRestoreVerification {
         var typeUTI: String
         var parentID: String?
         var handwritingText: String?
+        var ocrText: String?
+        var imageClassification: String?
     }
 
     private static func attachmentSignatures(_ attachments: [Attachment]) -> Set<AttachmentSignature>? {
         var types: [String: String] = [:]
         var parents: [String: String] = [:]
         var handwriting: [String: String?] = [:]
+        var ocr: [String: String?] = [:]
+        var imageClassification: [String: String?] = [:]
         var valid = true
         func record(_ attachment: Attachment, parentID: String?) {
             if let existing = types[attachment.id], existing != attachment.typeUTI { valid = false }
             types[attachment.id] = attachment.typeUTI
             if let existing = handwriting[attachment.id], existing != attachment.handwritingText { valid = false }
             handwriting[attachment.id] = attachment.handwritingText
+            if let existing = ocr[attachment.id], existing != attachment.ocrText { valid = false }
+            ocr[attachment.id] = attachment.ocrText
+            if let existing = imageClassification[attachment.id], existing != attachment.imageClassification { valid = false }
+            imageClassification[attachment.id] = attachment.imageClassification
             if let parentID {
                 if let existing = parents[attachment.id], existing != parentID { valid = false }
                 parents[attachment.id] = parentID
@@ -296,7 +304,9 @@ enum SnapshotRestoreVerification {
         guard valid, parents.keys.allSatisfy({ types[$0] != nil }) else { return nil }
         return Set(types.map {
             AttachmentSignature(id: $0.key, typeUTI: $0.value, parentID: parents[$0.key],
-                                handwritingText: handwriting[$0.key] ?? nil)
+                                handwritingText: handwriting[$0.key] ?? nil,
+                                ocrText: ocr[$0.key] ?? nil,
+                                imageClassification: imageClassification[$0.key] ?? nil)
         })
     }
 

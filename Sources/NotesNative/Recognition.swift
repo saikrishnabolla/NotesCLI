@@ -104,3 +104,19 @@ public enum OCRAttachmentResolver {
         UTType(attachment.typeUTI)?.conforms(to: .image) == true
     }
 }
+
+enum NativeImageMetadata {
+    static func isImage(typeUTI: String) -> Bool {
+        UTType(typeUTI)?.conforms(to: .image) == true
+    }
+
+    static func requireImage(typeUTI: String, attachmentID: String) throws {
+        guard isImage(typeUTI: typeUTI) else {
+            throw NotesError("image_metadata_attachment_not_image", "Attachment \(attachmentID) is not an image.")
+        }
+    }
+
+    static func versionMatches(summary: String?, version: Int) -> Bool {
+        summary == nil ? version == 0 : version > 0
+    }
+}

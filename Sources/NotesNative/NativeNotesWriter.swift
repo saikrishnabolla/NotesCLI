@@ -2899,6 +2899,106 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    private enum ImageMetadataField {
+        case ocr, labels
+
+        var summaryKey: String {
+            switch self { case .ocr: "ocrSummary"; case .labels: "imageClassificationSummary" }
+        }
+        var versionKey: String {
+            switch self { case .ocr: "ocrSummaryVersion"; case .labels: "imageClassificationSummaryVersion" }
+        }
+        var evidenceKey: String {
+            switch self { case .ocr: "ocr"; case .labels: "imageLabels" }
+        }
+        var mismatch: String {
+            switch self {
+            case .ocr: "The OCR summary or its version was not updated exactly."
+            case .labels: "The image-classification summary or its version was not updated exactly."
+            }
+        }
+    }
+
+    public func setOCRSummary(_ ref: String, attachmentID: String, summary: String?,
+                              allowShared: Bool) throws -> NativeWriteResult {
+        try setImageMetadataSummary(ref, attachmentID: attachmentID, summary: summary,
+                                    field: .ocr, allowShared: allowShared)
+    }
+
+    public func setImageClassificationSummary(_ ref: String, attachmentID: String, summary: String?,
+                                               allowShared: Bool) throws -> NativeWriteResult {
+        try setImageMetadataSummary(ref, attachmentID: attachmentID, summary: summary,
+                                    field: .labels, allowShared: allowShared)
+    }
+
+    private func setImageMetadataSummary(_ ref: String, attachmentID: String, summary: String?,
+                                         field: ImageMetadataField, allowShared: Bool) throws -> NativeWriteResult {
+        try performWriteWithFreshReadback(transaction: { context in
+            let note = try note(ref, in: context)
+            try guardWritable(note, allowShared: allowShared)
+            try refreshIfStale(note)
+            guard let attachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note),
+                in: context,
+                limit: 1
+            ).first else {
+                throw NotesError("attachment_not_found", "No attachment matches \(attachmentID) in this note.")
+            }
+            let typeUTI = value(attachment, "typeUTI") as? String ?? ""
+            try NativeImageMetadata.requireImage(typeUTI: typeUTI, attachmentID: attachmentID)
+            do {
+                switch field {
+                case .ocr: _ = try NCNotesRuntime.setOCRSummary(summary, attachment: attachment)
+                case .labels: _ = try NCNotesRuntime.setImageClassificationSummary(summary, attachment: attachment)
+                }
+                try save(context, notes: [note])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+            return id(note)
+        }, readback: { context, noteID in
+            let fresh = try note(noteID, in: context)
+            guard let attachment = try fetch(
+                "ICAttachment",
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh),
+                in: context,
+                limit: 1
+            ).first else {
+                throw NotesError("image_metadata_readback_failed", "The image attachment disappeared after save.")
+            }
+            let nativeSummary = value(attachment, field.summaryKey) as? String
+            let nativeVersion = (value(attachment, field.versionKey) as? NSNumber)?.intValue ?? 0
+            let nativeMatches = nativeSummary == summary &&
+                NativeImageMetadata.versionMatches(summary: summary, version: nativeVersion)
+            return result(noteID,
+                          native: ["attachmentID": attachmentID,
+                                   field.evidenceKey: nativeSummary ?? "",
+                                   "version": String(nativeVersion)],
+                          nativeVerified: nativeMatches,
+                          sqlite: { decoded in
+                guard let stored = Self.flattenAttachments(decoded.attachments).first(where: { $0.id == attachmentID }) else {
+                    return nil
+                }
+                let sqliteSummary: String?
+                let sqliteVersion: Int
+                switch field {
+                case .ocr:
+                    sqliteSummary = stored.ocrText
+                    sqliteVersion = stored.ocrSummaryVersion ?? 0
+                case .labels:
+                    sqliteSummary = stored.imageClassification
+                    sqliteVersion = stored.imageClassificationSummaryVersion ?? 0
+                }
+                guard sqliteSummary == summary, sqliteVersion == nativeVersion,
+                      NativeImageMetadata.versionMatches(summary: summary, version: sqliteVersion) else { return nil }
+                return ["attachmentID": attachmentID, field.evidenceKey: sqliteSummary ?? "",
+                        "version": String(sqliteVersion)]
+            }, mismatch: field.mismatch)
+        })
+    }
+
     public func regenerateFallbackPDF(_ ref: String, attachmentID: String,
                                       allowShared: Bool) throws -> NativeFallbackPDFResult {
         var byteCount = 0
@@ -5163,6 +5263,25 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     let current = self.value(attachment, "handwritingSummary") as? String ?? ""
                     if current != expected {
                         _ = try NCNotesRuntime.setHandwritingSummary(expected.isEmpty ? nil : expected, attachment: attachment)
+                    }
+                }
+                for (savedID, saved) in handwritingByID where NativeImageMetadata.isImage(typeUTI: saved.typeUTI) {
+                    guard let attachment = attachmentObjects[savedID] else {
+                        throw NotesError("snapshot_attachment_unavailable", "Image \(savedID) is unavailable for metadata restore.")
+                    }
+                    let currentOCR = self.value(attachment, "ocrSummary") as? String
+                    let currentOCRVersion = (self.value(attachment, "ocrSummaryVersion") as? NSNumber)?.intValue ?? 0
+                    if currentOCR != saved.ocrText ||
+                        (saved.ocrSummaryVersion.map { $0 != currentOCRVersion } ??
+                         !NativeImageMetadata.versionMatches(summary: saved.ocrText, version: currentOCRVersion)) {
+                        _ = try NCNotesRuntime.setOCRSummary(saved.ocrText, attachment: attachment)
+                    }
+                    let currentLabels = self.value(attachment, "imageClassificationSummary") as? String
+                    let currentLabelVersion = (self.value(attachment, "imageClassificationSummaryVersion") as? NSNumber)?.intValue ?? 0
+                    if currentLabels != saved.imageClassification ||
+                        (saved.imageClassificationSummaryVersion.map { $0 != currentLabelVersion } ??
+                         !NativeImageMetadata.versionMatches(summary: saved.imageClassification, version: currentLabelVersion)) {
+                        _ = try NCNotesRuntime.setImageClassificationSummary(saved.imageClassification, attachment: attachment)
                     }
                 }
                 guard let snapshotDocument = snapshot.document else {

@@ -103,8 +103,8 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 141)
-        for name in ["handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
+        XCTAssertEqual(nativeTools.count, 143)
+        for name in ["ocr_set", "image_labels_set", "handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "undo" })
@@ -159,6 +159,45 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNotNil(createProperties?["wait_sync"])
         XCTAssertNotNil(createProperties?["allow_shared"])
         XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
+    }
+
+    func testImageMetadataNativeWritesAreValidatedJournaledAndDispatchedWithStableRefs() throws {
+        let fake = InMemoryNotes.sample()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-image-metadata-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var calls: [(String, [String: Any])] = []
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            calls.append((tool, arguments))
+            return try MCPNativeResult(
+                result: WriteResult(outcome: .verified, noteID: NoteID(uuid: "welcome")),
+                value: ["attachmentID": arguments["attachment_id"] as? String ?? ""]
+            )
+        }, stateRoot: root)
+
+        let ocr = try structured(call(server, "ocr_set", [
+            "ref": "n1", "attachment_id": "image-1", "text": "Exact OCR",
+        ]))
+        XCTAssertNil(ocr["error"])
+        XCTAssertEqual(calls.last?.0, "ocr_set")
+        XCTAssertEqual(calls.last?.1["ref"] as? String, "welcome")
+        XCTAssertEqual(calls.last?.1["text"] as? String, "Exact OCR")
+
+        let labels = try structured(call(server, "image_labels_set", [
+            "ref": "welcome", "attachment_id": "image-1", "clear": true,
+        ]))
+        XCTAssertNil(labels["error"])
+        XCTAssertEqual(calls.last?.0, "image_labels_set")
+        XCTAssertEqual(calls.last?.1["clear"] as? Bool, true)
+
+        let invalid = try structured(call(server, "ocr_set", [
+            "ref": "welcome", "attachment_id": "image-1", "text": "x", "clear": true,
+        ]))
+        XCTAssertEqual((invalid["error"] as? [String: Any])?["code"] as? String, "invalid_ocr_text")
+        XCTAssertEqual(calls.count, 2)
+
+        let journal = try WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 10)
+        XCTAssertEqual(Set(journal.map(\.operation)), Set(["ocr_set", "image_labels_set"]))
+        XCTAssertTrue(journal.allSatisfy { $0.snapshotID != nil })
     }
 
     func testPinnedNotesAndCapabilities() throws {

@@ -1043,13 +1043,13 @@ final class CLITests: XCTestCase {
     func testUnifiedCommandTreeRoutesAndHidesLegacyNames() throws {
         let help = try run(["--help"])
         XCTAssertEqual(help.0, 0, help.2)
-        for command in ["ocr", "map", "settings", "checklist", "pin", "unpin", "tag", "link", "deeplink", "text", "format", "attach", "attachment", "table", "duplicate", "restore", "write"] {
+        for command in ["ocr", "image-labels", "map", "settings", "checklist", "pin", "unpin", "tag", "link", "deeplink", "text", "format", "attach", "attachment", "table", "duplicate", "restore", "write"] {
             XCTAssertTrue(help.1.contains("  \(command)"), command)
         }
         for legacy in ["native-checklist", "native-tag", "native-link", "native-text", "native-format", "native-attachment", "native-table", "native-duplicate", "native-restore", "native-move-folder", "write-markdown"] {
             XCTAssertFalse(help.1.contains("  \(legacy)"), legacy)
         }
-        for route in [["ocr", "--help"], ["map", "--help"], ["settings", "--help"], ["checklist", "--help"], ["tag", "--help"], ["link", "--help"], ["text", "--help"], ["format", "--help"], ["attachment", "--help"], ["table", "--help"], ["folder", "--help"]] {
+        for route in [["ocr", "--help"], ["ocr", "set", "--help"], ["image-labels", "set", "--help"], ["map", "--help"], ["settings", "--help"], ["checklist", "--help"], ["tag", "--help"], ["link", "--help"], ["text", "--help"], ["format", "--help"], ["attachment", "--help"], ["table", "--help"], ["folder", "--help"]] {
             let value = try run(route)
             XCTAssertEqual(value.0, 0, "\(route): \(value.2)")
         }
@@ -1057,6 +1057,8 @@ final class CLITests: XCTestCase {
 
     func testNativeWritesAreOptInAndLegacySyntaxStillParses() throws {
         let commands = [
+            ["ocr", "set", "welcome", "--attachment", "image-1", "--text", "words"],
+            ["image-labels", "set", "welcome", "--attachment", "image-1", "--text", "receipt"],
             ["checklist", "add", "welcome", "item"], ["pin", "welcome"], ["unpin", "welcome"],
             ["tag", "add", "welcome", "demo"], ["link", "add", "welcome", "shopping"],
             ["link", "capture", "welcome", "https://example.com"],
@@ -1101,6 +1103,22 @@ final class CLITests: XCTestCase {
         let explicit = try run(["--backend", "fake", "--engine=native", "--json", "checklist", "add", "welcome", "item", "--dry-run"], environment: ["NOTESCLI_ENGINE": "scripting"])
         XCTAssertEqual(explicit.0, 0, explicit.2)
         XCTAssertTrue(explicit.1.contains(#""engine":"native""#), explicit.1)
+    }
+
+    func testImageMetadataWritesHonorReadOnlyAndSupportNativeDryRuns() throws {
+        let commands = [
+            ["ocr", "set", "welcome", "--attachment", "image-1", "--text", "words"],
+            ["image-labels", "set", "welcome", "--attachment", "image-1", "--clear"],
+        ]
+        for command in commands {
+            let readOnly = try run(["--backend", "fake", "--engine=native", "--read-only"] + command)
+            XCTAssertEqual(readOnly.0, 4, readOnly.2)
+            XCTAssertTrue(readOnly.2.contains("read_only"), readOnly.2)
+
+            let dryRun = try run(["--backend", "fake", "--engine=native", "--json"] + command + ["--dry-run"])
+            XCTAssertEqual(dryRun.0, 0, dryRun.2)
+            XCTAssertTrue(dryRun.1.contains(#""engine":"native""#), dryRun.1)
+        }
     }
 
     func testAddWithoutAttachmentsHonorsExplicitAndEnvironmentNativeEngine() throws {

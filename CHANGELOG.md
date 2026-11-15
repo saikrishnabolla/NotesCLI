@@ -1,14 +1,20 @@
 # Changelog
 
+## 1.1.11
+
+### Fixed
+
+- Settings writes now stop if the value changes after NotesCLI captures the undo preimage.
+
 ## 1.1.10
 
 ### Added
 
 - Native OCR and image-label writes support exact readback, history, and undo.
-- Attachment markup can be inspected, copied, set, cleared, exported, and restored.
+- Attachment markup can be inspected, copied, set, cleared, exported, and restored with structural and stored-payload readback. Editability after reopening Notes remains unverified.
 - Scanned documents support edge detection and perspective correction.
-- Notes settings support list and gallery views, sorting, note counts, dark backgrounds, zoom, and Quick Note behavior.
-- Recording summaries can be removed and restored through history.
+- NotesCLI can read Notes' last-saved list or gallery mode and change sorting, note counts, dark backgrounds, zoom, and Quick Note behavior.
+- Recording-summary metadata can be removed and restored through history. No Apple-generated summary fixture was available for live verification.
 
 ### Fixed
 

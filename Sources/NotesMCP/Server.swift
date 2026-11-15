@@ -176,6 +176,10 @@ public final class MCPServer: @unchecked Sendable {
             // MARK: w3-export end
             t("sync_notes", "Run one two-way Markdown folder sync pass.", ["directory", "folder"], ["directory": string, "folder": string, "propagate_deletes": bool], write: true, destructive: true),
             t("create_note", "Create a note from Markdown.", ["title", "body"], ["title": string, "body": string, "folder": string, "attachments": strings], write: true),
+            t("create_report", "Create one verified native report from Markdown, remote assets, diagrams, tags, and attachments.",
+              ["title"], ["title": string, "body": string, "file": string, "folder": string,
+                            "tags": strings, "attachments": strings, "replace": bool],
+              write: true, native: true, destructive: true),
             t("append_to_note", "Append Markdown to a note.", ["ref", "body"], ["ref": string, "body": string], write: true),
             t("prepend_to_note", "Prepend Markdown while preserving supported rich content.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true),
             t("update_note", "Replace a note body.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true),
@@ -410,9 +414,14 @@ public final class MCPServer: @unchecked Sendable {
         ]
         exposed.removeAll { pathTools.contains($0.name) }
         exposed = exposed.map { tool in
-            guard tool.name == "create_note" || tool.name == "recording_transcribe" else { return tool }
+            guard ["create_note", "create_report", "recording_transcribe"].contains(tool.name) else { return tool }
             var properties = tool.properties
-            properties.removeValue(forKey: tool.name == "create_note" ? "attachments" : "transcript_path")
+            if tool.name == "create_report" {
+                properties.removeValue(forKey: "file")
+                properties.removeValue(forKey: "attachments")
+            } else {
+                properties.removeValue(forKey: tool.name == "create_note" ? "attachments" : "transcript_path")
+            }
             return Tool(name: tool.name, description: tool.description, write: tool.write, native: tool.native,
                         destructive: tool.destructive, required: tool.required, properties: properties)
         }
@@ -1047,6 +1056,13 @@ public final class MCPServer: @unchecked Sendable {
         let markdownBodyTools = nativeRoutableTools.subtracting(["replace_text"])
         let nativeSelected = s("engine") == "native"
             || (s("engine") == nil && allowNative && preferNativeWrites && nativeRoutableTools.contains(tool.name))
+        if tool.name == "create_report", exposureProfile == .remote {
+            if a["file"] != nil || a["attachments"] != nil ||
+                s("body").map({ !NotesMarkdownDocument(parsing: $0).localResources.isEmpty }) == true {
+                throw NotesError("remote_local_resource_denied",
+                                 "Remote MCP reports cannot read files from this Mac.")
+            }
+        }
         if tool.native, s("engine") == "scripting" {
             throw NotesError("native_required", "\(tool.name) has no scripting implementation.")
         }
@@ -1823,7 +1839,9 @@ public final class MCPServer: @unchecked Sendable {
         else if let tag = arguments["tag"] as? String { targetNotes = try reader.notes(NoteQuery(tag: tag)).map { try reader.note($0.id.uuid) } }
         let note = targetNotes.first
         var paths = targetNotes.map(\.summary.folderPath)
-        if tool.name == "create_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
+        if ["create_note", "create_report"].contains(tool.name), let folder = arguments["folder"] as? String {
+            paths += try folderPaths(folder)
+        }
         if tool.name == "create_quick_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         if tool.name == "restore_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         // MARK: w9-paper begin

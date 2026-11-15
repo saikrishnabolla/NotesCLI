@@ -3484,6 +3484,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
             var expectedText = ""
             var expectedPlacements: [NativeVerificationRules.MarkerPlacement] = []
             var expectedTables: [String: [[NotesMarkdownCell]]] = [:]
+            var expectedTags: [String] = []
+            var expectedRichLinkIDs: [String] = []
             var createdNoteID: String?
             do {
                 let note = try NCNotesRuntime.newNote(in: destination)
@@ -3499,6 +3501,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 attachmentIDs = rendered.fileAttachmentIDs
                 expectedHashes = rendered.fileAttachmentSHA256
                 expectedTables = rendered.tableCells
+                expectedTags = rendered.tagAttachments.map(\.name)
+                expectedRichLinkIDs = rendered.richLinkIDs
                 expectedText = built.string
                 expectedPlacements = attachmentPlacements(built)
                 try editor.begin(["insert"])
@@ -3506,6 +3510,17 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 try editor.finish()
                 try TestFault.check("before_save")
                 try save(context, notes: [note])
+                for tag in rendered.tagAttachments {
+                    if let attachment = try fetch(
+                        "ICInlineAttachment",
+                        predicate: NSPredicate(format: "identifier == %@", tag.id),
+                        in: context, limit: 1
+                    ).first {
+                        try NCNotesRuntime.reviveTagAttachment(attachment)
+                    }
+                    _ = try hashtag(tag.name, context: context)
+                }
+                if !rendered.tagAttachments.isEmpty { try save(context, notes: [note]) }
                 noteID = id(note)
             } catch { return try rollBackCreatedNote(createdNoteID, after: error, in: context) }
             var hashes: [String: String] = [:]
@@ -3521,6 +3536,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 expectedPlacements, attachmentPlacements(nativeBody)
             )
             return result(noteID, native: ["title": title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)",
+                                                   "tags": "\(expectedTags.count)", "richLinks": "\(expectedRichLinkIDs.count)",
                                                    "isSystemPaper": String(nativeSystemPaper)],
                           nativeVerified: nativeBody.string == expectedText && nativePlacementMatch &&
                               hashes.count == attachmentIDs.count &&
@@ -3532,10 +3548,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
                           expectedPlacements, self.attachmentPlacements(note.document)
                       ),
                       MarkdownTableVerification.matches(expectedTables, in: note.document),
+                      expectedTags.allSatisfy({ tag in note.summary.tags.contains { $0.caseInsensitiveCompare(tag) == .orderedSame } }),
+                      Set(expectedRichLinkIDs).isSubset(of: Set(note.attachments.map(\.id))),
                       Set(attachmentIDs).isSubset(of: Set(note.attachments.map(\.id))),
                       hashes.count == attachmentIDs.count,
                       !systemPaper || note.summary.isSystemPaper == true else { return nil }
                 return ["title": note.summary.title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)",
+                        "tags": "\(expectedTags.count)", "richLinks": "\(expectedRichLinkIDs.count)",
                         "isSystemPaper": String(note.summary.isSystemPaper == true)]
             }, mismatch: "The created note or frozen attachment bytes did not match.")
         }
@@ -7519,6 +7538,12 @@ private enum MarkdownTableVerification {
 
     private static func matches(_ expected: NotesMarkdownCell, _ actual: TableCellDocument) -> Bool {
         guard expected.plainText == actual.text else { return false }
+        if let alignment = expected.alignment {
+            let value: Int
+            switch alignment { case .left: value = 0; case .right: value = 1; case .center: value = 2 }
+            guard !actual.runs.isEmpty,
+                  actual.runs.allSatisfy({ $0.paragraph?.alignment == value }) else { return false }
+        }
         let expectedSignatures = expected.runs.flatMap { run in
             Array(repeating: Signature(
                 bold: run.bold, italic: run.italic, strikethrough: run.strikethrough,
@@ -7568,6 +7593,8 @@ final class MarkdownNativeWriter {
         var fileAttachmentIDs: [String]
         var fileAttachmentSHA256: [String: String]
         var tableCells: [String: [[NotesMarkdownCell]]]
+        var tagAttachments: [(id: String, name: String)]
+        var richLinkIDs: [String]
     }
 
     func prepare(_ input: NativeMarkdownInput) throws -> PreparedInput {
@@ -7576,7 +7603,9 @@ final class MarkdownNativeWriter {
         for paragraph in document.paragraphs {
             if let table = paragraph.table {
                 let tableRuns = table.flatMap { $0 }.flatMap(\.runs)
-                if tableRuns.contains(where: { $0.resource != nil || $0.attachmentID != nil }) {
+                if tableRuns.contains(where: {
+                    $0.resource != nil || $0.attachmentID != nil || $0.nativeTag != nil || $0.richLinkURL != nil
+                }) {
                     throw NotesError("attachment_reference_in_table_cell_unsupported",
                                      "Attachments inside Markdown table cells are not supported.")
                 }
@@ -7635,6 +7664,8 @@ final class MarkdownNativeWriter {
         var fileAttachmentIDs: [String] = []
         var fileAttachmentSHA256: [String: String] = [:]
         var tableCells: [String: [[NotesMarkdownCell]]] = [:]
+        var tagAttachments: [(id: String, name: String)] = []
+        var richLinkIDs: [String] = []
         var customNumberedLists: [Int: Bool] = [:]
         for (index, paragraph) in prepared.document.paragraphs.enumerated() {
             let nativeStyle: NativeParagraphStyle
@@ -7677,12 +7708,18 @@ final class MarkdownNativeWriter {
                     throw NotesError("table_not_found", "Notes created no table attachment for the Markdown table.")
                 }
                 let tableEditor = try NCTableEditor(attachment: attachment)
-                let cellStyle = try NCNotesRuntime.paragraphStyle(
-                    NativeParagraphStyle.body.number, indent: 0, quote: 0, checked: -1,
-                    startNumber: -1, basedOn: nil
-                )
                 for row in table.indices {
                     for column in table[row].indices {
+                        let cellStyle = try NCNotesRuntime.paragraphStyle(
+                            NativeParagraphStyle.body.number, indent: 0, quote: 0, checked: -1,
+                            startNumber: -1, basedOn: nil
+                        )
+                        if let alignment = table[row][column].alignment {
+                            let value: Int
+                            switch alignment { case .left: value = 0; case .right: value = 1; case .center: value = 2 }
+                            try owner.require(["setAlignment:"], of: cellStyle as AnyObject)
+                            try NCNotesRuntime.setValue(value, forKey: "alignment", of: cellStyle as AnyObject)
+                        }
                         try tableEditor.setAttributedCell(
                             column: column, row: row,
                             text: try attributedCell(table[row][column], style: cellStyle)
@@ -7706,7 +7743,8 @@ final class MarkdownNativeWriter {
                 built.append(try inline(paragraph.runs, style: style, note: note, context: context,
                                         existing: existing, preparedResources: prepared.resources,
                                         resourceIndex: &resourceIndex, fileAttachmentIDs: &fileAttachmentIDs,
-                                        fileAttachmentSHA256: &fileAttachmentSHA256))
+                                        fileAttachmentSHA256: &fileAttachmentSHA256,
+                                        tagAttachments: &tagAttachments, richLinkIDs: &richLinkIDs))
             }
             if index < prepared.document.paragraphs.count - 1 {
                 built.append(NSAttributedString(string: "\n", attributes: [.init("TTStyle"): style]))
@@ -7731,7 +7769,8 @@ final class MarkdownNativeWriter {
         return RenderedInput(attributed: built, paragraphCount: prepared.document.paragraphs.count,
                              fileAttachmentIDs: fileAttachmentIDs,
                              fileAttachmentSHA256: fileAttachmentSHA256,
-                             tableCells: tableCells)
+                             tableCells: tableCells, tagAttachments: tagAttachments,
+                             richLinkIDs: richLinkIDs)
     }
 
     fileprivate func patch(ref: String, prepared: PreparedInput, mode: NativeNotesWriter.MarkdownPatchMode,
@@ -8073,7 +8112,9 @@ final class MarkdownNativeWriter {
                         context: NSManagedObjectContext, existing: [String: (AnyObject, String)],
                         preparedResources: [FrozenAttachmentInput?], resourceIndex: inout Int,
                         fileAttachmentIDs: inout [String],
-                        fileAttachmentSHA256: inout [String: String]) throws -> NSAttributedString {
+                        fileAttachmentSHA256: inout [String: String],
+                        tagAttachments: inout [(id: String, name: String)],
+                        richLinkIDs: inout [String]) throws -> NSAttributedString {
         let output = NSMutableAttributedString()
         var index = 0
         while index < runs.count {
@@ -8100,7 +8141,24 @@ final class MarkdownNativeWriter {
 
             var attributes = try attributes(for: run, style: style)
 
-            if let id = run.attachmentID {
+            if let tag = run.nativeTag {
+                let name = try owner.normalizedTag(tag)
+                let id = try NCNotesRuntime.makeTag(name, in: note)
+                attributes[.init("NSAttachment")] = try NCNotesRuntime.attachmentMarker(
+                    id: id, type: "com.apple.notes.inlinetextattachment.hashtag"
+                )
+                output.append(NSAttributedString(string: "\u{fffc}", attributes: attributes))
+                tagAttachments.append((id, name))
+            } else if let value = run.richLinkURL, let url = URL(string: value),
+                      ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                var kind: NSString?
+                let id = try NCNotesRuntime.addURL(url, to: note, type: &kind)
+                attributes[.init("NSAttachment")] = try NCNotesRuntime.attachmentMarker(
+                    id: id, type: kind as String? ?? "public.url"
+                )
+                output.append(NSAttributedString(string: "\u{fffc}", attributes: attributes))
+                richLinkIDs.append(id)
+            } else if let id = run.attachmentID {
                 guard let item = existing[id.lowercased()] else {
                     throw NotesError("attachment_not_found", "Attachment \(id) is not in this note.")
                 }

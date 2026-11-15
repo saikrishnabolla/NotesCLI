@@ -491,6 +491,28 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         let frozen = try paths.map { try FrozenAttachmentInput(file: URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)) }
         let value = try writer.createNote(title: string("title")!, markdown: string("body")!, folder: string("folder"), attachments: frozen, allowShared: allowShared)
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "create_report":
+        let body = string("body"), file = string("file")
+        guard (body == nil) != (file == nil) else {
+            throw NotesError("invalid_report_source", "Provide exactly one of body or file.")
+        }
+        let markdown: String
+        let base: URL
+        if let file {
+            let source = URL(fileURLWithPath: NSString(string: file).expandingTildeInPath).standardizedFileURL
+            markdown = try readReportMarkdown(source)
+            base = source.deletingLastPathComponent()
+        } else {
+            markdown = body!
+            base = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        }
+        let value = try NotesReportWriter().create(NativeReportRequest(
+            title: string("title")!, markdown: markdown, assetBaseDirectory: base,
+            folder: string("folder"), tags: arguments["tags"] as? [String] ?? [],
+            attachments: arguments["attachments"] as? [String] ?? [],
+            replace: boolean("replace") == true, allowShared: allowShared
+        ))
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
     case "scan_page_state":
         return try MCPNativeResult(value: writer.scanPageState(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!))
     case "scan_filter":

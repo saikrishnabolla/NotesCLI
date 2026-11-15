@@ -7,7 +7,7 @@ notescli mcp
 notescli mcp install --client tailscale
 ```
 
-The direct server exposes 154 tools in write-enabled mode and 31 in read-only mode. Through the capability host it exposes 140 or 30 tools. Host routing omits tools that accept arbitrary local file paths, using the same filesystem boundary as remote Tailscale access. Use direct routing when the client already has the required macOS permissions and needs those file-based tools.
+The direct server exposes 155 tools in write-enabled mode and 31 in read-only mode. Through the capability host it exposes 141 or 30 tools. Host routing omits tools that accept arbitrary local file paths, using the same filesystem boundary as remote Tailscale access. Use direct routing when the client already has the required macOS permissions and needs those file-based tools.
 
 ## Tools
 
@@ -41,7 +41,7 @@ create_folder  rename_folder  delete_folder  write_markdown
 Native tools available on write-enabled servers:
 
 ```text
-checklist_list  checklist_add  checklist_toggle  checklist_check_all
+create_report  checklist_list  checklist_add  checklist_toggle  checklist_check_all
 checklist_uncheck_all  checklist_clear_done  pin_note  unpin_note
 tag_add  tag_remove  tag_rename  tag_delete  link_add  link_list
 collaboration_activity

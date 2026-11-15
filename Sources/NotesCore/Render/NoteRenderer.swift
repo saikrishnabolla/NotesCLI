@@ -1,8 +1,10 @@
 import Foundation
 
 public enum NoteRenderer {
-    public static func markdown(_ document: NoteDocument, attachments: [Attachment] = []) -> String {
-        render(document, attachments: attachments, format: .markdown)
+    public static func markdown(_ document: NoteDocument, attachments: [Attachment] = [],
+                                preserveNativeAttachments: Bool = false) -> String {
+        render(document, attachments: attachments, format: .markdown,
+               preserveNativeAttachments: preserveNativeAttachments)
     }
     public static func plainText(_ document: NoteDocument, attachments: [Attachment] = []) -> String {
         render(document, attachments: attachments, format: .plain)
@@ -20,7 +22,13 @@ public enum NoteRenderer {
         var text: String
         var run: AttributeRun
     }
-    private static func render(_ document: NoteDocument, attachments: [Attachment], format: Format) -> String {
+    private struct MarkdownBlock {
+        var text: String
+        var isListItem: Bool
+    }
+    private static func render(_ document: NoteDocument, attachments: [Attachment], format: Format,
+                               markdownBlockSeparator: String = "\n\n",
+                               preserveNativeAttachments: Bool = false) -> String {
         let source = document.text as NSString
         var ranges: [(NSRange, AttributeRun)] = [], offset = 0
         for run in document.runs {
@@ -39,7 +47,9 @@ public enum NoteRenderer {
             var style: ParagraphStyle?, result = "", cursor = start, i = runIndex, pieces: [InlinePiece] = []
             func flushPieces() {
                 guard !pieces.isEmpty else { return }
-                result += mergedInline(pieces, document, attachmentMap, format, code: style?.kind == .monospaced)
+                result += mergedInline(pieces, document, attachmentMap, format,
+                                       code: style?.kind == .monospaced,
+                                       preserveNativeAttachments: preserveNativeAttachments)
                 pieces.removeAll(keepingCapacity: true)
             }
             while i < ranges.count && ranges[i].0.location <= end {
@@ -65,17 +75,23 @@ public enum NoteRenderer {
         }
         if format == .plain { return lines.map(\.text).joined(separator: "\n") + (document.text.hasSuffix("\n") ? "\n" : "") }
         if format == .html { return htmlBlocks(lines) }
-        var output: [String] = [], numbers: [Int: Int] = [:], i = 0
+        var output: [MarkdownBlock] = [], numbers: [Int: Int] = [:], i = 0
         while i < lines.count {
             let line = lines[i], p = line.style
             let indent = String(repeating: "    ", count: min(100, max(0, p.indent)))
             let quote = String(repeating: "> ", count: min(100, max(p.kind == .blockquote ? 1 : 0, p.blockQuoteLevel ?? 0)))
             if p.kind == .monospaced {
                 var content: [String] = []
-                while i < lines.count && lines[i].style.kind == .monospaced { content.append(lines[i].raw); i += 1 }
+                while i < lines.count,
+                      lines[i].style.kind == .monospaced,
+                      lines[i].style.indent == p.indent,
+                      lines[i].style.blockQuoteLevel == p.blockQuoteLevel {
+                    content.append(lines[i].raw); i += 1
+                }
                 let longest = content.joined(separator: "\n").components(separatedBy: CharacterSet(charactersIn: "`").inverted).map(\.count).max() ?? 0
                 let fence = String(repeating: "`", count: max(3, longest + 1))
-                output += [quote + fence] + content.map { quote + $0 } + [quote + fence]
+                let blockPrefix = quote + indent
+                output.append(MarkdownBlock(text: ([blockPrefix + fence] + content.map { blockPrefix + $0 } + [blockPrefix + fence]).joined(separator: "\n"), isListItem: false))
                 continue
             }
             var prefix = ""
@@ -83,6 +99,7 @@ public enum NoteRenderer {
             case .title: prefix = "# "
             case .heading: prefix = "## "
             case .subheading: prefix = "### "
+            case .body where p.indent > 0: prefix = indent
             case .bulleted, .dashed: prefix = indent + "- "
             case .checklist: prefix = indent + (p.checked == true ? "- [x] " : "- [ ] ")
             case .numbered:
@@ -93,9 +110,35 @@ public enum NoteRenderer {
             }
             if p.kind != .numbered { numbers = numbers.filter { $0.key < p.indent } }
             let text = p.kind == .body || p.kind == .blockquote ? escapeBlockStart(line.text) : line.text
-            output.append(quote + prefix + text); i += 1
+            let continuation: String
+            if [.bulleted, .dashed, .numbered, .checklist].contains(p.kind) {
+                continuation = quote + indent + "    "
+            } else {
+                continuation = quote + (p.indent > 0 ? indent : "")
+            }
+            let rendered: String
+            if text.isEmpty, p.kind == .body || p.kind == .blockquote {
+                rendered = NotesMarkdownDocument.emptyParagraphMarkdown(
+                    indent: p.indent,
+                    quoteDepth: max(p.kind == .blockquote ? 1 : 0, p.blockQuoteLevel ?? 0)
+                )
+            } else {
+                rendered = quote + prefix + text.replacingOccurrences(of: "\n", with: "\n" + continuation)
+            }
+            let isListItem = [.bulleted, .dashed, .numbered, .checklist].contains(p.kind)
+            output.append(MarkdownBlock(text: rendered, isListItem: isListItem))
+            i += 1
         }
-        return output.joined(separator: "\n") + (document.text.hasSuffix("\n") ? "\n" : "")
+        var markdown = ""
+        var previous: MarkdownBlock?
+        for block in output {
+            if let previous {
+                markdown += previous.isListItem && block.isListItem ? "\n" : markdownBlockSeparator
+            }
+            markdown += block.text
+            previous = block
+        }
+        return markdown + (document.text.hasSuffix("\n") && !markdown.isEmpty ? "\n" : "")
     }
     private static func escapeBlockStart(_ text: String) -> String {
         let whitespace = text.prefix(while: { $0 == " " })
@@ -136,9 +179,13 @@ public enum NoteRenderer {
         left.color == right.color && left.paragraph == right.paragraph
     }
     private static func mergedInline(_ pieces: [InlinePiece], _ document: NoteDocument, _ attachments: [String: Attachment],
-                                     _ format: Format, code: Bool) -> String {
+                                     _ format: Format, code: Bool,
+                                     preserveNativeAttachments: Bool) -> String {
         guard pieces.count > 1, format != .plain, !code, let run = pieces.first?.run else {
-            return pieces.map { inline($0.text, $0.run, document, attachments, format, code: code) }.joined()
+            return pieces.map {
+                inline($0.text, $0.run, document, attachments, format, code: code,
+                       preserveNativeAttachments: preserveNativeAttachments)
+            }.joined()
         }
         var leading = "", trailing = "", values = pieces
         if format == .markdown {
@@ -176,7 +223,9 @@ public enum NoteRenderer {
         }
         return leading + result + trailing
     }
-    private static func inline(_ text: String, _ run: AttributeRun, _ document: NoteDocument, _ attachments: [String: Attachment], _ format: Format, code: Bool) -> String {
+    private static func inline(_ text: String, _ run: AttributeRun, _ document: NoteDocument,
+                               _ attachments: [String: Attachment], _ format: Format, code: Bool,
+                               preserveNativeAttachments: Bool) -> String {
         var leading = "", trailing = "", content = text
         if format == .markdown && !code {
             leading = String(content.prefix(while: \.isWhitespace))
@@ -187,7 +236,8 @@ public enum NoteRenderer {
         }
         var result = escaped(content, format)
         if let ref = run.attachment {
-            let replacement = attachment(ref, document, attachments[ref.id], format)
+            let replacement = attachment(ref, document, attachments[ref.id], format,
+                                         preserveNativeAttachments: preserveNativeAttachments)
             result = result.replacingOccurrences(of: "\u{fffc}", with: replacement)
         }
         if format == .plain || code { return result }
@@ -211,7 +261,12 @@ public enum NoteRenderer {
         }
         return leading + result + trailing
     }
-    private static func attachment(_ ref: InlineRef, _ document: NoteDocument, _ a: Attachment?, _ format: Format) -> String {
+    private static func attachment(_ ref: InlineRef, _ document: NoteDocument, _ a: Attachment?,
+                                   _ format: Format, preserveNativeAttachments: Bool) -> String {
+        if format == .markdown, preserveNativeAttachments {
+            let title = ref.displayText ?? a?.title ?? a?.filename ?? "attachment: \(ref.typeUTI)"
+            return "[\(escaped(title, .markdown))](notescli-attachment:\(ref.id))"
+        }
         if let rows = document.tables?[ref.id], let first = rows.first {
             let richRows = document.tableCells?[ref.id]
             func richCell(_ row: Int, _ column: Int) -> TableCellDocument? {
@@ -240,7 +295,11 @@ public enum NoteRenderer {
                 }
                 func row(_ index: Int, _ cells: [String]) -> String {
                     "| " + cells.enumerated().map { column, value in
-                        escapePipes(richCell(index, column)?.document.markdown() ?? escaped(value, .markdown)).replacingOccurrences(of: "\n", with: "<br>")
+                        let rendered = richCell(index, column).map {
+                            render($0.document, attachments: [], format: .markdown,
+                                   markdownBlockSeparator: "\n")
+                        } ?? escaped(value, .markdown)
+                        return escapePipes(rendered).replacingOccurrences(of: "\n", with: "<br>")
                     }.joined(separator: " | ") + " |"
                 }
                 return ([row(0, first), "| " + first.map { _ in "---" }.joined(separator: " | ") + " |"] + rows.dropFirst().enumerated().map { row($0.offset + 1, $0.element) }).joined(separator: "\n")
@@ -342,7 +401,10 @@ public enum NoteRenderer {
 }
 
 public extension NoteDocument {
-    func markdown(attachments: [Attachment] = []) -> String { NoteRenderer.markdown(self, attachments: attachments) }
+    func markdown(attachments: [Attachment] = [], preserveNativeAttachments: Bool = false) -> String {
+        NoteRenderer.markdown(self, attachments: attachments,
+                              preserveNativeAttachments: preserveNativeAttachments)
+    }
     func plainText(attachments: [Attachment] = []) -> String { NoteRenderer.plainText(self, attachments: attachments) }
     func html(attachments: [Attachment] = []) -> String { NoteRenderer.html(self, attachments: attachments) }
 }

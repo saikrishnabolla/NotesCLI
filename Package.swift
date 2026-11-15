@@ -19,10 +19,13 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
+        .package(url: "https://github.com/swiftlang/swift-markdown.git", from: "0.9.0"),
     ],
     targets: [
         // Pure Swift: model, protobuf decoding, renderers. No Apple frameworks, so it builds on Linux.
-        .target(name: "NotesCore"),
+        .target(name: "NotesCore", dependencies: [
+            .product(name: "Markdown", package: "swift-markdown"),
+        ]),
         // macOS: read-only NoteStore.sqlite snapshot reader.
         .target(name: "NotesStore", dependencies: ["NotesCore"], linkerSettings: [
             .linkedLibrary("sqlite3"), .linkedFramework("PDFKit"), .linkedFramework("ImageIO"),

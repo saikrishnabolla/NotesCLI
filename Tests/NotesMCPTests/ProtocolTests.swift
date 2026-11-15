@@ -591,10 +591,14 @@ final class ProtocolTests: XCTestCase {
                                        operationID: "native-operation", value: ["ok": true])
         })
         _ = try call(server, "create_note", ["title": "With file", "body": "Body", "folder": "Notes", "attachments": ["/tmp/file"]])
+        let refused = try call(server, "create_note", ["title": "Checklist", "body": "- [ ] task"])
+        XCTAssertEqual(refused["isError"] as? Bool, true)
+        XCTAssertEqual(((try structured(refused)["error"] as? [String: Any])?["code"] as? String), "native_required")
+        _ = try call(server, "create_note", ["title": "Checklist", "body": "- [ ] task", "engine": "native"])
         _ = try call(server, "create_note", ["title": "Native", "body": "Body", "folder": "Notes", "engine": "native"])
         _ = try call(server, "update_note", ["ref": "Welcome", "body": "Changed", "engine": "native"])
-        XCTAssertEqual(calls.map(\.0), ["create_note", "create_note", "update_note"])
-        XCTAssertEqual(calls[2].1["ref"] as? String, "welcome")
+        XCTAssertEqual(calls.map(\.0), ["create_note", "create_note", "create_note", "update_note"])
+        XCTAssertEqual(calls[3].1["ref"] as? String, "welcome")
     }
     func testNativeEngineRequestsNeverSilentlyDowngrade() throws {
         let fake = InMemoryNotes.sample()

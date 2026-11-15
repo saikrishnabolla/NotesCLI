@@ -1164,6 +1164,15 @@ final class CLITests: XCTestCase {
             XCTAssertNotEqual(value.0, 0, "\(command) unexpectedly succeeded")
             XCTAssertTrue(value.2.contains("native_required"), "\(command): \(value.2)")
         }
+        let richBody = "<mark data-apple-notes-highlight=\"mint\">marked</mark>"
+        let rich = try run(["--backend", "fake", "--json", "add", "Rich", "--body", richBody])
+        XCTAssertNotEqual(rich.0, 0)
+        XCTAssertTrue(rich.2.contains("native_required"), rich.2)
+        let richNative = try run([
+            "--backend", "fake", "--engine=native", "--json", "add", "Rich",
+            "--body", richBody, "--dry-run",
+        ])
+        XCTAssertEqual(richNative.0, 0, richNative.2)
         let nativeReads = [
             ["checklist", "list", "welcome"], ["link", "list", "welcome"],
             ["text", "find", "welcome", "Welcome"],

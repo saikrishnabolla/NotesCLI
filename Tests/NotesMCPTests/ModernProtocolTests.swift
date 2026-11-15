@@ -230,6 +230,22 @@ final class ModernProtocolTests: XCTestCase {
             "name": "create_note", "arguments": ["title": "No", "body": "No", "attachments": ["/etc/passwd"]]
         ])
         XCTAssertEqual((confinedCall["error"] as? [String: Any])?["message"] as? String, "Unknown argument: attachments")
+        let markdownCall = try request(remote, method: "tools/call", params: [
+            "name": "create_note",
+            "arguments": ["title": "No", "body": "[secret](/etc/passwd)", "engine": "native"],
+        ])
+        let markdownResult = try XCTUnwrap(markdownCall["result"] as? [String: Any])
+        XCTAssertEqual(markdownResult["isError"] as? Bool, true)
+        XCTAssertTrue(String(data: try JSONSerialization.data(withJSONObject: markdownResult), encoding: .utf8)?
+            .contains("remote_local_resource_denied") == true)
+        let titleCall = try request(remote, method: "tools/call", params: [
+            "name": "create_note",
+            "arguments": ["title": "![secret](~/Documents/secret.txt)", "body": "No", "engine": "native"],
+        ])
+        let titleResult = try XCTUnwrap(titleCall["result"] as? [String: Any])
+        XCTAssertEqual(titleResult["isError"] as? Bool, true)
+        XCTAssertTrue(String(data: try JSONSerialization.data(withJSONObject: titleResult), encoding: .utf8)?
+            .contains("remote_local_resource_denied") == true)
     }
 
     func testConcurrentStdioKeepsPingResponsiveAndCancelsAQueuedWrite() throws {

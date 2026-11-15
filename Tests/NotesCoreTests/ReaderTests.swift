@@ -178,6 +178,182 @@ final class ReaderDecodeTests: XCTestCase {
 }
 
 final class ReaderRendererTests: XCTestCase {
+    func testMarkdownUsesCanonicalBlockSpacingAndReparsesInOrder() {
+        let lines: [(String, ParagraphStyle)] = [
+            ("Title", .init(kind: .title)),
+            ("First paragraph", .init(kind: .body)),
+            ("Second paragraph", .init(kind: .body)),
+            ("one", .init(kind: .bulleted)),
+            ("two", .init(kind: .bulleted)),
+            ("\u{fffc}", .init(kind: .body)),
+            ("three", .init(kind: .bulleted)),
+            ("\u{fffc}", .init(kind: .body)),
+            ("\u{fffc}", .init(kind: .body)),
+            ("let value = 1", .init(kind: .monospaced)),
+        ]
+        let image = InlineRef(id: "image", typeUTI: "public.png")
+        let table = InlineRef(id: "table", typeUTI: "com.apple.notes.table")
+        let divider = InlineRef(id: "divider", typeUTI: "com.apple.notes.divider")
+        var runs = lines.enumerated().map { index, line in
+            let attachment: InlineRef? = index == 5 ? image : index == 7 ? table : index == 8 ? divider : nil
+            return AttributeRun(length: line.0.utf16.count + 1, paragraph: line.1, attachment: attachment)
+        }
+        runs[runs.count - 1].length -= 1
+        var document = NoteDocument(text: lines.map(\.0).joined(separator: "\n"), runs: runs)
+        document.tables = ["table": [["Name", "Value"], ["A", "B"]]]
+        let attachments = [
+            Attachment(id: "image", typeUTI: "public.png", filename: "diagram.png", filePath: "/tmp/diagram.png"),
+            Attachment(id: "divider", typeUTI: "com.apple.notes.divider", isDivider: true),
+        ]
+
+        let markdown = document.markdown(attachments: attachments)
+
+        XCTAssertEqual(markdown, """
+        # Title
+
+        First paragraph
+
+        Second paragraph
+
+        - one
+        - two
+
+        ![diagram.png](/tmp/diagram.png)
+
+        - three
+
+        | Name | Value |
+        | --- | --- |
+        | A | B |
+
+        ---
+
+        ```
+        let value = 1
+        ```
+        """)
+        let reparsed = NotesMarkdownDocument(parsing: markdown)
+        XCTAssertEqual(reparsed.paragraphs.map(\.kind), [
+            .title, .body, .body, .bulleted, .bulleted, .body, .bulleted, .table, .divider, .monospaced,
+        ])
+        XCTAssertEqual(reparsed.paragraphs[5].runs.compactMap(\.resource?.source), ["/tmp/diagram.png"])
+
+        let lossless = document.markdown(attachments: attachments, preserveNativeAttachments: true)
+        let losslessDocument = NotesMarkdownDocument(parsing: lossless)
+        XCTAssertEqual(losslessDocument.paragraphs.flatMap(\.runs).compactMap(\.attachmentID),
+                       ["image", "table", "divider"])
+        XCTAssertFalse(lossless.contains("| Name | Value |"))
+    }
+
+    func testMarkdownKeepsNativeAttachmentBetweenListItems() {
+        let attachment = InlineRef(id: "native", typeUTI: "public.data")
+        let document = NoteDocument(
+            text: "before\n\u{fffc}\nafter",
+            runs: [
+                .init(length: 7, paragraph: .init(kind: .bulleted)),
+                .init(length: 2, paragraph: .init(kind: .body), attachment: attachment),
+                .init(length: 5, paragraph: .init(kind: .bulleted)),
+            ]
+        )
+
+        let markdown = document.markdown()
+
+        XCTAssertEqual(markdown, """
+        - before
+
+        [attachment: public.data](notescli-attachment:native)
+
+        - after
+        """)
+        let reparsed = NotesMarkdownDocument(parsing: markdown)
+        XCTAssertEqual(reparsed.paragraphs.map(\.kind), [.bulleted, .body, .bulleted])
+        XCTAssertEqual(reparsed.paragraphs[1].runs.compactMap(\.attachmentID), ["native"])
+    }
+
+    func testMarkdownKeepsNestedImageInsideListItem() {
+        let image = InlineRef(id: "image", typeUTI: "public.png")
+        let document = NoteDocument(
+            text: "before\n\u{fffc}\nafter",
+            runs: [
+                .init(length: 7, paragraph: .init(kind: .bulleted)),
+                .init(length: 2, paragraph: .init(kind: .body, indent: 1), attachment: image),
+                .init(length: 5, paragraph: .init(kind: .bulleted)),
+            ]
+        )
+        let attachments = [Attachment(id: "image", typeUTI: "public.png",
+                                      filename: "chart.png", filePath: "/tmp/chart.png")]
+
+        let markdown = document.markdown(attachments: attachments)
+
+        XCTAssertEqual(markdown, "- before\n\n    ![chart.png](/tmp/chart.png)\n\n- after")
+        let reparsed = NotesMarkdownDocument(parsing: markdown)
+        XCTAssertEqual(reparsed.paragraphs.map(\.kind), [.bulleted, .body, .bulleted])
+        XCTAssertEqual(reparsed.paragraphs[1].indent, 1)
+    }
+
+    func testMarkdownIndentsEveryLineOfNestedTableAndCode() {
+        let table = InlineRef(id: "table", typeUTI: "com.apple.notes.table")
+        var document = NoteDocument(
+            text: "before\n\u{fffc}\nlet value = 1\nafter",
+            runs: [
+                .init(length: 7, paragraph: .init(kind: .bulleted)),
+                .init(length: 2, paragraph: .init(kind: .body, indent: 1), attachment: table),
+                .init(length: 14, paragraph: .init(kind: .monospaced, indent: 1)),
+                .init(length: 5, paragraph: .init(kind: .bulleted)),
+            ]
+        )
+        document.tables = ["table": [["Name", "Value"], ["A", "B"]]]
+
+        XCTAssertEqual(document.markdown(), """
+        - before
+
+            | Name | Value |
+            | --- | --- |
+            | A | B |
+
+            ```
+            let value = 1
+            ```
+
+        - after
+        """)
+    }
+
+    func testMarkdownPreservesEmptyNativeParagraphs() {
+        var emptyStyle = ParagraphStyle(kind: .body, indent: 1)
+        emptyStyle.blockQuoteLevel = 2
+        let document = NoteDocument(
+            text: "before\n\nafter",
+            runs: [
+                .init(length: 7, paragraph: .init(kind: .body)),
+                .init(length: 1, paragraph: emptyStyle),
+                .init(length: 5, paragraph: .init(kind: .body)),
+            ]
+        )
+
+        let markdown = document.markdown()
+
+        XCTAssertEqual(markdown, "before\n\n<!-- notescli-empty-paragraph:1:2 -->\n\nafter")
+        let reparsed = NotesMarkdownDocument(parsing: markdown)
+        XCTAssertEqual(reparsed.paragraphs.map { $0.plainText }, ["before", "", "after"])
+        XCTAssertEqual(reparsed.paragraphs[1].indent, 1)
+        XCTAssertEqual(reparsed.paragraphs[1].quoteDepth, 2)
+    }
+
+    func testMarkdownSplitsCodeBlocksWhenNestingChanges() {
+        var quotedCode = ParagraphStyle(kind: .monospaced)
+        quotedCode.blockQuoteLevel = 1
+        let document = NoteDocument(
+            text: "outer\nquoted",
+            runs: [
+                .init(length: 6, paragraph: .init(kind: .monospaced)),
+                .init(length: 6, paragraph: quotedCode),
+            ]
+        )
+
+        XCTAssertEqual(document.markdown(), "```\nouter\n```\n\n> ```\n> quoted\n> ```")
+    }
+
     func testOneParagraphRunCanCoverMultipleListItems() {
         let document = NoteDocument(
             text: "notescli-test-smoke\nPlan\none\ntwo\nthree\n",
@@ -191,7 +367,7 @@ final class ReaderRendererTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(document.markdown(), "**notescli-test-smoke**\n**Plan**\n- one\n- two\nthree\n")
+        XCTAssertEqual(document.markdown(), "**notescli-test-smoke**\n\n**Plan**\n\n- one\n- two\n\nthree\n")
     }
 
     func testParagraphGolden() {
@@ -202,7 +378,7 @@ final class ReaderRendererTests: XCTestCase {
             ("Todo",.init(kind:.checklist,checked:false)),("Done",.init(kind:.checklist,checked:true)),
             ("Quote",.init(kind:.blockquote)),("let x = 1",.init(kind:.monospaced)),("print(x)",.init(kind:.monospaced))]
         let document = NoteDocument(text: paragraphs.map(\.0).joined(separator:"\n") + "\n", runs: paragraphs.map { AttributeRun(length:$0.0.utf16.count+1,paragraph:$0.1) })
-        XCTAssertEqual(document.markdown(), "# Title\n## Heading\n### Subheading\nBody\n- Bullet\n    - Nested\n7. Seven\n8. Eight\n- [ ] Todo\n- [x] Done\n> Quote\n```\nlet x = 1\nprint(x)\n```\n")
+        XCTAssertEqual(document.markdown(), "# Title\n\n## Heading\n\n### Subheading\n\nBody\n\n- Bullet\n    - Nested\n7. Seven\n8. Eight\n- [ ] Todo\n- [x] Done\n\n> Quote\n\n```\nlet x = 1\nprint(x)\n```\n")
         XCTAssertEqual(document.plainText(), document.text)
         XCTAssertEqual(document.html(), "<h1>Title</h1>\n<h2>Heading</h2>\n<h3>Subheading</h3>\n<p>Body</p>\n<ul><li>Bullet<ul><li>Nested</li></ul></li></ul>\n<ol start=\"7\"><li value=\"7\">Seven</li><li>Eight</li></ol>\n<ul><li><input type=\"checkbox\" disabled> Todo</li><li><input type=\"checkbox\" disabled checked> Done</li></ul>\n<blockquote><p>Quote</p></blockquote>\n<pre><code>let x = 1\nprint(x)</code></pre>")
     }
@@ -229,7 +405,7 @@ final class ReaderRendererTests: XCTestCase {
     }
     func testLiteralMarkdownAndUnsafeLinkNormalization() {
         let body = NoteDocument(text:"# Literal heading\n- Literal list\n1. Literal number\n#tag",runs:[])
-        XCTAssertEqual(body.markdown(),"\\# Literal heading\n\\- Literal list\n1\\. Literal number\n#tag")
+        XCTAssertEqual(body.markdown(),"\\# Literal heading\n\n\\- Literal list\n\n1\\. Literal number\n\n#tag")
         let link = NoteDocument(text:"unsafe",runs:[.init(length:6,link:"java\nscript:alert(1)")])
         XCTAssertEqual(link.html(),"<p><a href=\"\">unsafe</a></p>")
     }
@@ -251,10 +427,34 @@ final class ReaderRendererTests: XCTestCase {
             [.init(text:"A|B",runs:[.init(length:3)]), .init(text:"C\nD",runs:[.init(length:3)])]
         ]]
         let attachments = [Attachment(id:"photo",typeUTI:"public.jpeg",filename:"image.png",filePath:"/private/image.png")]
-        XCTAssertEqual(doc.markdown(attachments:attachments),"![image.png](/private/image.png)\n[attachment: public.data](notescli-attachment:file)\n[#work](notescli-attachment:tag)\n[@Pat](notescli-attachment:person)\n[Other note](applenotes://showNote?identifier=ABC)\n| [<mark data-apple-notes-highlight=\"blue\">**Name**</mark>](https://example.com) | Value |\n| --- | --- |\n| A\\|B | C<br>D |\n")
+        XCTAssertEqual(doc.markdown(attachments:attachments),"![image.png](/private/image.png)\n\n[attachment: public.data](notescli-attachment:file)\n\n[#work](notescli-attachment:tag)\n\n[@Pat](notescli-attachment:person)\n\n[Other note](applenotes://showNote?identifier=ABC)\n\n| [<mark data-apple-notes-highlight=\"blue\">**Name**</mark>](https://example.com) | Value |\n| --- | --- |\n| A\\|B | C<br>D |\n")
         XCTAssertEqual(doc.plainText(attachments:attachments),"image.png\nattachment: public.data\n#work\n@Pat\nOther note\nName\tValue\nA|B\tC\nD\n")
         let html = doc.html()
         XCTAssertTrue(html.contains("<table><tr><td><a href=\"https://example.com\"><mark data-apple-notes-highlight=\"blue\" style=\"background-color:#2196F3\"><strong>Name</strong></mark></a></td><td>Value</td></tr><tr><td>A|B</td><td>C<br>D</td></tr></table>"), html)
+    }
+
+    func testTableCellEmptyParagraphRoundTripsWithoutMarkerText() throws {
+        let table = InlineRef(id: "table", typeUTI: "com.apple.notes.table")
+        var document = NoteDocument(
+            text: "\u{fffc}",
+            runs: [.init(length: 1, paragraph: .init(kind: .body), attachment: table)]
+        )
+        document.tables = ["table": [["Value"], ["before\n\nafter"]]]
+        document.tableCells = ["table": [
+            [.init(text: "Value", runs: [.init(length: 5, paragraph: .init(kind: .body))])],
+            [.init(text: "before\n\nafter", runs: [
+                .init(length: 7, paragraph: .init(kind: .body)),
+                .init(length: 1, paragraph: .init(kind: .body)),
+                .init(length: 5, paragraph: .init(kind: .body)),
+            ])],
+        ]]
+
+        let markdown = document.markdown()
+        let reparsed = NotesMarkdownDocument(parsing: markdown)
+        let cells = try XCTUnwrap(reparsed.paragraphs.first?.table)
+
+        XCTAssertEqual(cells[1][0].plainText, "before\n\nafter")
+        XCTAssertFalse(cells[1][0].plainText.contains("notescli-empty-paragraph"))
     }
 }
 

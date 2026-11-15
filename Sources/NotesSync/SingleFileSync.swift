@@ -92,8 +92,11 @@ public final class SingleFileSync {
         let remote = markdown(note), remoteHash = StableHash.hex(remote)
 
         if let pending = state.pendingHash {
-            if pending == remoteHash {
-                let confirmedBody = state.pendingBody ?? remote
+            let confirmed = pending == remoteHash || state.pendingBody.map {
+                markdownEquivalent($0, remote)
+            } == true
+            if confirmed {
+                let confirmedBody = remote
                 if confirmedBody != localFile.body, !dryRun {
                     try write(MarkdownFile(noteID: noteID, title: localFile.title, modified: note.summary.modified, body: confirmedBody), to: path)
                     localFile.body = confirmedBody
@@ -191,6 +194,10 @@ public final class SingleFileSync {
     }
 
     private func markdown(_ note: Note) -> String { note.document.map { NoteRenderer.markdown($0, attachments: note.attachments) } ?? "" }
+    private func markdownEquivalent(_ lhs: String, _ rhs: String) -> Bool {
+        let left = NotesMarkdownDocument(parsing: lhs), right = NotesMarkdownDocument(parsing: rhs)
+        return left.paragraphs == right.paragraphs
+    }
     private func hasAttachments(_ note: Note) -> Bool { note.summary.attachmentCount > 0 || !note.attachments.isEmpty }
 
     private func localFile(at path: URL) throws -> MarkdownFile {

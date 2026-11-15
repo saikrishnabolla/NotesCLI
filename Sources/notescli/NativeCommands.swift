@@ -155,12 +155,20 @@ enum UnifiedNative {
         try outputEngineWrite(EngineWriteResponse(engine: "native", result: result, operationID: captured?.operationID, verification: captured?.verification), options: o)
     }
 
-    static func engine(_ options: GlobalOptions, scriptingAvailable: Bool, fake: Bool) throws -> WriteEngine {
+    static func engine(_ options: GlobalOptions, scriptingAvailable: Bool, fake: Bool,
+                       requiresNativeMarkdown: Bool = false) throws -> WriteEngine {
         switch options.resolvedEngine {
         case .native:
             guard fake || nativeAvailable() else { throw NotesError("native_unavailable", "The native Notes framework check failed. Run notescli engine doctor --json.") }
             return .native
         case .scripting:
+            if requiresNativeMarkdown {
+                throw NotesError(
+                    "native_required",
+                    "This Markdown contains native Notes elements that scripting cannot place without loss.",
+                    hint: "Pass --engine native explicitly to allow the private native writer."
+                )
+            }
             guard scriptingAvailable else {
                 throw NotesError("native_required", "This operation requires the private native engine.", hint: "Pass --engine native or set NOTESCLI_ENGINE=native.")
             }
@@ -187,9 +195,11 @@ enum UnifiedNative {
 
     static func noteWrite(options: GlobalOptions, write: WriteOptions, ref: String, operation: String,
                           arguments: [String: String], native: @escaping (String) throws -> NativeActionResult,
-                          scripting: ((String) throws -> WriteResult)? = nil) throws {
+                          scripting: ((String) throws -> WriteResult)? = nil,
+                          requiresNativeMarkdown: Bool = false) throws {
         let backend = try options.writable(), note = try backend.reader.note(ref)
-        let selected = try engine(options, scriptingAvailable: scripting != nil, fake: backend.isFake)
+        let selected = try engine(options, scriptingAvailable: scripting != nil, fake: backend.isFake,
+                                  requiresNativeMarkdown: requiresNativeMarkdown)
         if selected == .scripting, scripting != nil {
             try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: write.allowDowngrade)
         }
@@ -529,11 +539,26 @@ enum UnifiedNative {
         })
     }
     static func writeMarkdown(_ o: GlobalOptions, _ w: WriteOptions, ref: String, body: String, backup: Bool) throws {
-        let backend = try o.backends()
-        try noteWrite(options: o, write: w, ref: ref, operation: "writeMarkdown", arguments: ["body": body, "backup": String(backup)], native: { stableRef in
-            NativeActionResult(try NativeNotesWriter().writeMarkdown(stableRef, markdown: body, dryRun: false, backup: backup, allowShared: w.allowShared))
-        }, scripting: { stableRef in try backend.writer().replaceBody(stableRef, markdown: body, allowAttachmentLoss: w.allowAttachmentLoss) })
+        try writeMarkdown(o, w, ref: ref, input: NativeMarkdownInput(source: body), backup: backup)
     }
+
+    static func writeMarkdown(_ o: GlobalOptions, _ w: WriteOptions, ref: String,
+                              input: NativeMarkdownInput, backup: Bool) throws {
+        let backend = try o.backends()
+        try noteWrite(options: o, write: w, ref: ref, operation: "writeMarkdown",
+                      arguments: ["body": input.source, "backup": String(backup)], native: { stableRef in
+            NativeActionResult(try NativeNotesWriter().writeMarkdown(
+                stableRef, input: input, dryRun: false, backup: backup, allowShared: w.allowShared
+            ))
+        }, scripting: { stableRef in
+            try backend.writer().replaceBody(stableRef, markdown: input.source,
+                                             allowAttachmentLoss: w.allowAttachmentLoss)
+        }, requiresNativeMarkdown: markdownRequiresNative(input.source))
+    }
+}
+
+func markdownRequiresNative(_ source: String) -> Bool {
+    NotesMarkdownDocument(parsing: source).requiresNativeWriter
 }
 
 func unifiedNativeFolderMove(options: GlobalOptions, write: WriteOptions, ref: String, parent: String?) throws {
@@ -846,7 +871,15 @@ struct WriteMarkdownCommand: ParsableCommand {
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String
     @Option var body: String?; @Flag var stdin = false; @Option var file: String?; @Flag var backup = false
     func validate() throws { try validateBodySources(body: body, stdin: stdin, file: file) }
-    func run() throws { try UnifiedNative.writeMarkdown(options, write, ref: ref, body: try inputBody(body: body, stdin: stdin, file: file), backup: backup) }
+    func run() throws {
+        let source = try inputMarkdown(body: body, stdin: stdin, file: file)
+        try UnifiedNative.writeMarkdown(
+            options, write, ref: ref,
+            input: NativeMarkdownInput(source: source.source,
+                                       assetBaseDirectory: source.assetBaseDirectory),
+            backup: backup
+        )
+    }
 }
 
 // Hidden one-release aliases. The legacy native prefix remains callable but never enables native by itself.
@@ -981,7 +1014,22 @@ struct NativeMoveFolder: ParsableCommand {
         try unifiedNativeFolderMove(options: options, write: write, ref: ref, parent: parent)
     }
 }
-struct NativeWriteMarkdown: ParsableCommand { static let configuration = CommandConfiguration(commandName: "write-markdown", shouldDisplay: false); @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Option var body: String?; @Flag var stdin = false; @Option var file: String?; @Flag var backup = false; func validate() throws { try validateBodySources(body: body, stdin: stdin, file: file) }; func run() throws { try UnifiedNative.writeMarkdown(options, write, ref: ref, body: try inputBody(body: body, stdin: stdin, file: file), backup: backup) } }
+struct NativeWriteMarkdown: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "write-markdown", shouldDisplay: false)
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Option var body: String?; @Flag var stdin = false
+    @Option var file: String?; @Flag var backup = false
+    func validate() throws { try validateBodySources(body: body, stdin: stdin, file: file) }
+    func run() throws {
+        let source = try inputMarkdown(body: body, stdin: stdin, file: file)
+        try UnifiedNative.writeMarkdown(
+            options, write, ref: ref,
+            input: NativeMarkdownInput(source: source.source,
+                                       assetBaseDirectory: source.assetBaseDirectory),
+            backup: backup
+        )
+    }
+}
 
 private func required<T>(_ value: T?, _ option: String) throws -> T {
     guard let value else { throw ValidationError("Provide \(option).") }

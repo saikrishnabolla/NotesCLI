@@ -22,6 +22,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable id)paragraphStyle:(NSInteger)style indent:(NSInteger)indent quote:(NSInteger)quote checked:(NSInteger)checked
                        basedOn:(nullable id)existing error:(NSError **)error
     NS_SWIFT_NAME(paragraphStyle(_:indent:quote:checked:basedOn:));
++ (nullable id)paragraphStyle:(NSInteger)style indent:(NSInteger)indent quote:(NSInteger)quote checked:(NSInteger)checked
+                 startNumber:(NSInteger)startNumber basedOn:(nullable id)existing error:(NSError **)error
+    NS_SWIFT_NAME(paragraphStyle(_:indent:quote:checked:startNumber:basedOn:));
 + (nullable id)fontWithName:(nullable NSString *)name size:(nullable NSNumber *)size hints:(NSInteger)hints
                     basedOn:(nullable id)existing error:(NSError **)error
     NS_SWIFT_NAME(font(name:size:hints:basedOn:));

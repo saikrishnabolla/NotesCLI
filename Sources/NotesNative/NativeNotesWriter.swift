@@ -17,6 +17,23 @@ fileprivate struct UnsafeSendableBox<Value>: @unchecked Sendable {
     let value: Value
 }
 
+func markdownSourceWithLiteralTitle(_ title: String, body: String) -> String {
+    var escaped = ""
+    for scalar in title.unicodeScalars {
+        if CharacterSet.newlines.contains(scalar) {
+            if escaped.last != " " { escaped.append(" ") }
+            continue
+        }
+        let value = scalar.value
+        let asciiLetterOrNumber = (48...57).contains(value)
+            || (65...90).contains(value)
+            || (97...122).contains(value)
+        if (33...126).contains(value), !asciiLetterOrNumber { escaped.append("\\") }
+        escaped.unicodeScalars.append(scalar)
+    }
+    return "# " + escaped + (body.isEmpty ? "" : "\n\n" + body)
+}
+
 enum BoundedProcessWaiter {
     enum Result {
         case exited
@@ -927,6 +944,26 @@ public final class NativeNotesWriter: NotesNativeWriting {
             rows.append((range, marker, markerID, type))
         }
         return rows
+    }
+
+    fileprivate func attachmentPlacements(_ body: NSAttributedString) -> [NativeVerificationRules.MarkerPlacement] {
+        attachmentMarkers(body).map {
+            NativeVerificationRules.MarkerPlacement(id: $0.2, typeUTI: $0.3,
+                                                     location: $0.0.location, length: $0.0.length)
+        }
+    }
+
+    fileprivate func attachmentPlacements(_ document: NoteDocument?) -> [NativeVerificationRules.MarkerPlacement] {
+        guard let document else { return [] }
+        var location = 0
+        return document.runs.compactMap { run in
+            defer { location += run.length }
+            guard let attachment = run.attachment else { return nil }
+            return NativeVerificationRules.MarkerPlacement(
+                id: attachment.id, typeUTI: attachment.typeUTI,
+                location: location, length: run.length
+            )
+        }
     }
 
     fileprivate func insertMarker(_ editor: NCBodyEditor, original: NSAttributedString, id: String, type: String, position: Int?) throws {
@@ -3407,17 +3444,29 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func createNote(title: String, markdown: String, folder folderRef: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult {
-        try createNote(title: title, markdown: markdown, folder: folderRef, attachments: attachments,
+        try createNote(title: title,
+                       input: NativeMarkdownInput(source: markdown, trailingAttachments: attachments),
+                       folder: folderRef, allowShared: allowShared)
+    }
+
+    public func createNote(title: String, input: NativeMarkdownInput, folder folderRef: String?,
+                           allowShared: Bool) throws -> NativeCreateResult {
+        try createNote(title: title, input: input, folder: folderRef,
                        systemPaper: false, allowShared: allowShared)
     }
 
     public func createQuickNote(title: String, markdown: String, folder folderRef: String?, allowShared: Bool) throws -> NativeCreateResult {
-        try createNote(title: title, markdown: markdown, folder: folderRef, attachments: [],
+        try createNote(title: title, input: NativeMarkdownInput(source: markdown), folder: folderRef,
                        systemPaper: true, allowShared: allowShared)
     }
 
-    private func createNote(title: String, markdown: String, folder folderRef: String?, attachments: [FrozenAttachmentInput],
+    private func createNote(title: String, input: NativeMarkdownInput, folder folderRef: String?,
                             systemPaper: Bool, allowShared: Bool) throws -> NativeCreateResult {
+        let source = markdownSourceWithLiteralTitle(title, body: input.source)
+        let prepared = try MarkdownNativeWriter(owner: self).prepare(
+            NativeMarkdownInput(source: source, assetBaseDirectory: input.assetBaseDirectory,
+                                trailingAttachments: input.trailingAttachments)
+        )
         let write = try performWrite { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
@@ -3431,7 +3480,11 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 }
                 try requireQuickNoteAccount(accountID)
             }
-            var noteID = "", attachmentIDs: [String] = [], createdNoteID: String?
+            var noteID = "", attachmentIDs: [String] = [], expectedHashes: [String: String] = [:]
+            var expectedText = ""
+            var expectedPlacements: [NativeVerificationRules.MarkerPlacement] = []
+            var expectedTables: [String: [[NotesMarkdownCell]]] = [:]
+            var createdNoteID: String?
             do {
                 let note = try NCNotesRuntime.newNote(in: destination)
                 createdNoteID = id(note)
@@ -3439,18 +3492,15 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 if systemPaper { try NCNotesRuntime.setSystemPaper(true, note: note) }
                 let editor = try NCBodyEditor(note: note)
                 try editor.prepare(["insert"])
-                let source = "# " + title + (markdown.isEmpty ? "" : "\n" + markdown)
-                let built = try MarkdownNativeWriter(owner: self).attributed(markdown: source, note: note, context: context,
-                                                                                 editor: editor, existing: [:]).0
-                for frozen in attachments {
-                    var kind: NSString?
-                    let attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
-                    try TestFault.check("after_attachment")
-                    let marker = try NCNotesRuntime.attachmentMarker(id: attachmentID, type: kind as String? ?? "public.data")
-                    if built.length > 0 { built.append(NSAttributedString(string: "\n")) }
-                    built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("NSAttachment"): marker]))
-                    attachmentIDs.append(attachmentID)
-                }
+                let rendered = try MarkdownNativeWriter(owner: self).attributed(
+                    prepared: prepared, note: note, context: context, editor: editor, existing: [:]
+                )
+                let built = rendered.attributed
+                attachmentIDs = rendered.fileAttachmentIDs
+                expectedHashes = rendered.fileAttachmentSHA256
+                expectedTables = rendered.tableCells
+                expectedText = built.string
+                expectedPlacements = attachmentPlacements(built)
                 try editor.begin(["insert"])
                 try editor.insert(built, at: 0)
                 try editor.finish()
@@ -3459,20 +3509,31 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 noteID = id(note)
             } catch { return try rollBackCreatedNote(createdNoteID, after: error, in: context) }
             var hashes: [String: String] = [:]
-            for (index, attachmentID) in attachmentIDs.enumerated() {
-                if let hash = storedAttachmentHash(noteID: noteID, attachmentID: attachmentID, expected: attachments[index].sha256) {
+            for attachmentID in attachmentIDs {
+                if let expected = expectedHashes[attachmentID],
+                   let hash = storedAttachmentHash(noteID: noteID, attachmentID: attachmentID, expected: expected) {
                     hashes[attachmentID] = hash
                 }
             }
             let nativeSystemPaper = value(try self.note(noteID, in: context), "isSystemPaper") as? Bool == true
+            let nativeBody = try body(try self.note(noteID, in: context))
+            let nativePlacementMatch = NativeVerificationRules.exactMarkerPlacements(
+                expectedPlacements, attachmentPlacements(nativeBody)
+            )
             return result(noteID, native: ["title": title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)",
                                                    "isSystemPaper": String(nativeSystemPaper)],
-                          nativeVerified: attachmentIDs.count == attachments.count && hashes.count == attachments.count &&
+                          nativeVerified: nativeBody.string == expectedText && nativePlacementMatch &&
+                              hashes.count == attachmentIDs.count &&
                               (!systemPaper || nativeSystemPaper),
                           sqlite: { note in
                 guard note.summary.title == title,
+                      note.document?.text == expectedText,
+                      NativeVerificationRules.exactMarkerPlacements(
+                          expectedPlacements, self.attachmentPlacements(note.document)
+                      ),
+                      MarkdownTableVerification.matches(expectedTables, in: note.document),
                       Set(attachmentIDs).isSubset(of: Set(note.attachments.map(\.id))),
-                      hashes.count == attachments.count,
+                      hashes.count == attachmentIDs.count,
                       !systemPaper || note.summary.isSystemPaper == true else { return nil }
                 return ["title": note.summary.title, "attachments": "\(attachmentIDs.count)", "hashes": "\(hashes.count)",
                         "isSystemPaper": String(note.summary.isSystemPaper == true)]
@@ -4419,34 +4480,65 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult {
-        let before = try SQLiteNotesStore(refresh: true).note(ref)
+        try writeMarkdown(ref, input: NativeMarkdownInput(source: markdown),
+                          dryRun: dryRun, backup: backup, allowShared: allowShared)
+    }
+
+    public func writeMarkdown(_ ref: String, input: NativeMarkdownInput, dryRun: Bool,
+                              backup: Bool, allowShared: Bool) throws -> NativeWriteResult {
+        let prepared = try MarkdownNativeWriter(owner: self).prepare(input)
         return try performWrite { context in
-            try MarkdownNativeWriter(owner: self).write(ref: ref, markdown: markdown, dryRun: dryRun, backup: backup,
-                                                        allowShared: allowShared, before: before, context: context)
+            try MarkdownNativeWriter(owner: self).write(ref: ref, prepared: prepared,
+                                                        dryRun: dryRun, backup: backup,
+                                                        allowShared: allowShared,
+                                                        context: context)
         }
     }
 
     public func appendMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
-        try patchMarkdown(ref, markdown: markdown, mode: .append, allowShared: allowShared)
+        try appendMarkdown(ref, input: NativeMarkdownInput(source: markdown), allowShared: allowShared)
+    }
+
+    public func appendMarkdown(_ ref: String, input: NativeMarkdownInput,
+                               allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, input: input, mode: .append, allowShared: allowShared)
     }
 
     public func prependMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
-        try patchMarkdown(ref, markdown: markdown, mode: .prepend, allowShared: allowShared)
+        try prependMarkdown(ref, input: NativeMarkdownInput(source: markdown), allowShared: allowShared)
+    }
+
+    public func prependMarkdown(_ ref: String, input: NativeMarkdownInput,
+                                allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, input: input, mode: .prepend, allowShared: allowShared)
     }
 
     public func insertMarkdown(_ ref: String, underHeading heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
-        try patchMarkdown(ref, markdown: markdown, mode: .insert(heading), allowShared: allowShared)
+        try insertMarkdown(ref, underHeading: heading, input: NativeMarkdownInput(source: markdown),
+                           allowShared: allowShared)
+    }
+
+    public func insertMarkdown(_ ref: String, underHeading heading: String, input: NativeMarkdownInput,
+                               allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, input: input, mode: .insert(heading), allowShared: allowShared)
     }
 
     public func replaceSection(_ ref: String, heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult {
-        try patchMarkdown(ref, markdown: markdown, mode: .section(heading), allowShared: allowShared)
+        try replaceSection(ref, heading: heading, input: NativeMarkdownInput(source: markdown),
+                           allowShared: allowShared)
+    }
+
+    public func replaceSection(_ ref: String, heading: String, input: NativeMarkdownInput,
+                               allowShared: Bool) throws -> NativeWriteResult {
+        try patchMarkdown(ref, input: input, mode: .section(heading), allowShared: allowShared)
     }
 
     public func replaceText(_ ref: String, find: String, replacement: String, allowShared: Bool) throws -> NativeWriteResult {
         guard !find.isEmpty else { throw NotesError("invalid_find", "Find text cannot be empty.") }
-        let before = try SQLiteNotesStore(refresh: true).note(ref)
         return try performWrite { context in
-            let (note, readback) = try mutateBody(ref, context: context, allowShared: allowShared) { _, editor, original in
+            var before: Note?
+            let (note, readback) = try mutateBody(ref, context: context, allowShared: allowShared) { nativeNote, editor, original in
+                before = try SQLiteNotesStore(refresh: true).note(self.id(nativeNote))
                 let source = original.string as NSString
                 var ranges: [NSRange] = [], start = 0
                 while start <= source.length {
@@ -4462,6 +4554,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     try editor.replace(range, with: NSAttributedString(string: replacement, attributes: attributes))
                 }
             }
+            guard let before else { throw NotesError("native_read_failed", "Could not capture the note before replacing text.") }
             let noteID = id(note), expected = (before.document?.text as NSString?)?.replacingOccurrences(of: find, with: replacement)
             return result(noteID, native: ["utf16Length": "\(readback.length)", "replacements": "all"], nativeVerified: readback.string == expected,
                           sqlite: { after in
@@ -4473,11 +4566,12 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     fileprivate enum MarkdownPatchMode { case append, prepend, insert(String), section(String) }
 
-    private func patchMarkdown(_ ref: String, markdown: String, mode: MarkdownPatchMode, allowShared: Bool) throws -> NativeWriteResult {
-        let before = try SQLiteNotesStore(refresh: true).note(ref)
+    private func patchMarkdown(_ ref: String, input: NativeMarkdownInput, mode: MarkdownPatchMode,
+                               allowShared: Bool) throws -> NativeWriteResult {
+        let prepared = try MarkdownNativeWriter(owner: self).prepare(input)
         return try performWrite { context in
-            try MarkdownNativeWriter(owner: self).patch(ref: ref, markdown: markdown, mode: mode, allowShared: allowShared,
-                                                        expectedFeatures: NativeOnlyFeatures.detect(in: before), context: context)
+            try MarkdownNativeWriter(owner: self).patch(ref: ref, prepared: prepared, mode: mode,
+                                                        allowShared: allowShared, context: context)
         }
     }
 
@@ -7397,54 +7491,261 @@ private extension Array {
     subscript(safe index: Int) -> Element? { indices.contains(index) ? self[index] : nil }
 }
 
-private final class MarkdownNativeWriter {
+private enum MarkdownTableVerification {
+    private struct Signature: Equatable {
+        var bold: Bool
+        var italic: Bool
+        var strikethrough: Bool
+        var underline: Bool
+        var code: Bool
+        var superscript: Int
+        var highlight: HighlightColor?
+        var link: String?
+    }
+
+    static func matches(_ expected: [String: [[NotesMarkdownCell]]], in document: NoteDocument?) -> Bool {
+        guard !expected.isEmpty else { return true }
+        guard let tables = document?.tableCells else { return false }
+        return expected.allSatisfy { id, rows in
+            guard let stored = tables[id], stored.count == rows.count else { return false }
+            return rows.indices.allSatisfy { row in
+                guard stored[row].count == rows[row].count else { return false }
+                return rows[row].indices.allSatisfy { column in
+                    matches(rows[row][column], stored[row][column])
+                }
+            }
+        }
+    }
+
+    private static func matches(_ expected: NotesMarkdownCell, _ actual: TableCellDocument) -> Bool {
+        guard expected.plainText == actual.text else { return false }
+        let expectedSignatures = expected.runs.flatMap { run in
+            Array(repeating: Signature(
+                bold: run.bold, italic: run.italic, strikethrough: run.strikethrough,
+                underline: run.underline, code: run.code, superscript: run.superscript,
+                highlight: run.highlight.flatMap(HighlightColor.init(rawValue:)),
+                link: normalizedLink(run.link)
+            ), count: run.text.utf16.count)
+        }
+        let actualSignatures: [Signature]
+        if actual.runs.isEmpty {
+            actualSignatures = Array(repeating: Signature(
+                bold: false, italic: false, strikethrough: false, underline: false,
+                code: false, superscript: 0, highlight: nil, link: nil
+            ), count: actual.text.utf16.count)
+        } else {
+            actualSignatures = actual.runs.flatMap { run in
+                Array(repeating: Signature(
+                    bold: run.font.bold, italic: run.font.italic,
+                    strikethrough: run.font.strikethrough, underline: run.font.underline,
+                    code: run.font.name?.localizedCaseInsensitiveContains("menlo") == true,
+                    superscript: run.font.superscript, highlight: run.highlight,
+                    link: normalizedLink(run.link)
+                ), count: run.length)
+            }
+        }
+        return expectedSignatures == actualSignatures
+    }
+
+    private static func normalizedLink(_ value: String?) -> String? {
+        value?.removingPercentEncoding ?? value
+    }
+}
+
+final class MarkdownNativeWriter {
     fileprivate unowned let owner: NativeNotesWriter
     init(owner: NativeNotesWriter) { self.owner = owner }
 
-    fileprivate struct Line {
-        var text: String
-        var style: NativeParagraphStyle
-        var indent: Int
-        var done: Bool?
-        var table: [[String]]?
+    struct PreparedInput {
+        var document: NotesMarkdownDocument
+        var resources: [FrozenAttachmentInput?]
+        var trailingAttachments: [FrozenAttachmentInput]
+    }
+
+    fileprivate struct RenderedInput {
+        var attributed: NSMutableAttributedString
+        var paragraphCount: Int
+        var fileAttachmentIDs: [String]
+        var fileAttachmentSHA256: [String: String]
+        var tableCells: [String: [[NotesMarkdownCell]]]
+    }
+
+    func prepare(_ input: NativeMarkdownInput) throws -> PreparedInput {
+        let document = NotesMarkdownDocument(parsing: input.source)
+        var resources: [FrozenAttachmentInput?] = []
+        for paragraph in document.paragraphs {
+            if let table = paragraph.table {
+                let tableRuns = table.flatMap { $0 }.flatMap(\.runs)
+                if tableRuns.contains(where: { $0.resource != nil || $0.attachmentID != nil }) {
+                    throw NotesError("attachment_reference_in_table_cell_unsupported",
+                                     "Attachments inside Markdown table cells are not supported.")
+                }
+            }
+            for run in paragraph.runs where run.resource != nil {
+                guard let resource = run.resource else { continue }
+                guard resource.isLocal else {
+                    throw NotesError(
+                        "remote_image_unsupported",
+                        "Remote Markdown images are not downloaded automatically.",
+                        hint: "Download the image, reference the local file from Markdown, and pass --engine native."
+                    )
+                }
+                let file = try localResourceURL(resource.source, baseDirectory: input.assetBaseDirectory)
+                resources.append(try FrozenAttachmentInput(file: file))
+            }
+        }
+        return PreparedInput(document: document, resources: resources,
+                             trailingAttachments: input.trailingAttachments)
+    }
+
+    private func localResourceURL(_ source: String, baseDirectory: URL?) throws -> URL {
+        let value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let components = URLComponents(string: value), let scheme = components.scheme {
+            guard scheme.caseInsensitiveCompare("file") == .orderedSame,
+                  let url = URL(string: value), url.isFileURL,
+                  url.host == nil || url.host == "" || url.host == "localhost" else {
+                throw NotesError("invalid_file", "The Markdown attachment path is invalid.")
+            }
+            return url
+        }
+        let decoded = value.removingPercentEncoding ?? value
+        let expanded = NSString(string: decoded).expandingTildeInPath
+        if NSString(string: expanded).isAbsolutePath {
+            return URL(fileURLWithPath: expanded).standardizedFileURL
+        }
+        guard let baseDirectory else {
+            throw NotesError("local_attachment_base_missing",
+                             "Relative Markdown attachments need the Markdown file or working directory as their base.")
+        }
+        return URL(fileURLWithPath: expanded, relativeTo: baseDirectory).standardizedFileURL
     }
 
     fileprivate func attributed(markdown: String, note: NSManagedObject, context: NSManagedObjectContext,
                                 editor: NCBodyEditor, existing: [String: (AnyObject, String)]) throws -> (NSMutableAttributedString, Int) {
-        let lines = try parse(markdown)
-        var tableIDs: [String] = []
-        for line in lines {
-            if let rows = line.table { tableIDs.append(try editor.addTable(rows.map { $0.joined(separator: "\t") }.joined(separator: "\n"))) }
-        }
-        var tableIndex = 0
-        let built = NSMutableAttributedString()
-        for (index, line) in lines.enumerated() {
-            let style = try NCNotesRuntime.paragraphStyle(line.style.number, indent: line.indent,
-                                                          quote: line.style == .blockquote ? 1 : 0,
-                                                          checked: line.done.map { $0 ? 1 : 0 } ?? -1, basedOn: nil)
-            if line.table != nil {
-                let id = tableIDs[tableIndex]; tableIndex += 1
-                let marker = try NCNotesRuntime.attachmentMarker(id: id, type: "com.apple.notes.table")
-                built.append(NSAttributedString(string: "\u{fffc}", attributes: [.init("TTStyle"): style, .init("NSAttachment"): marker]))
-            } else {
-                built.append(try inline(line.text, style: style, note: note, context: context, existing: existing))
-            }
-            if index < lines.count - 1 { built.append(NSAttributedString(string: "\n", attributes: [.init("TTStyle"): style])) }
-        }
-        return (built, lines.count)
+        let prepared = try prepare(NativeMarkdownInput(source: markdown))
+        let rendered = try attributed(prepared: prepared, note: note, context: context,
+                                      editor: editor, existing: existing)
+        return (rendered.attributed, rendered.paragraphCount)
     }
 
-    fileprivate func patch(ref: String, markdown: String, mode: NativeNotesWriter.MarkdownPatchMode, allowShared: Bool,
-                           expectedFeatures: [String], context: NSManagedObjectContext) throws -> NativeWriteResult {
+    fileprivate func attributed(prepared: PreparedInput, note: NSManagedObject, context: NSManagedObjectContext,
+                                editor: NCBodyEditor, existing: [String: (AnyObject, String)]) throws -> RenderedInput {
+        let built = NSMutableAttributedString()
+        var resourceIndex = 0
+        var fileAttachmentIDs: [String] = []
+        var fileAttachmentSHA256: [String: String] = [:]
+        var tableCells: [String: [[NotesMarkdownCell]]] = [:]
+        var customNumberedLists: [Int: Bool] = [:]
+        for (index, paragraph) in prepared.document.paragraphs.enumerated() {
+            let nativeStyle: NativeParagraphStyle
+            switch paragraph.kind {
+            case .title: nativeStyle = .title
+            case .heading: nativeStyle = .heading
+            case .subheading: nativeStyle = .subheading
+            case .body, .table, .divider: nativeStyle = .body
+            case .monospaced: nativeStyle = .monospaced
+            case .bulleted: nativeStyle = .bulleted
+            case .numbered: nativeStyle = .numbered
+            case .checklist: nativeStyle = .checklist
+            }
+            if paragraph.kind != .numbered {
+                customNumberedLists = customNumberedLists.filter { $0.key < paragraph.indent }
+            }
+            var customStart = -1
+            if paragraph.kind == .numbered {
+                let custom = customNumberedLists[paragraph.indent]
+                    ?? ((paragraph.startNumber ?? 1) != 1)
+                customNumberedLists[paragraph.indent] = custom
+                customNumberedLists = customNumberedLists.filter { $0.key <= paragraph.indent }
+                if custom { customStart = paragraph.startNumber ?? -1 }
+            }
+            let style = try NCNotesRuntime.paragraphStyle(
+                nativeStyle.number, indent: paragraph.indent, quote: paragraph.quoteDepth,
+                checked: paragraph.checked.map { $0 ? 1 : 0 } ?? -1,
+                startNumber: customStart, basedOn: nil
+            )
+            if let table = paragraph.table {
+                let rows = table.map { $0.map(\.plainText).joined(separator: "\t") }.joined(separator: "\n")
+                let id = try editor.addTable(rows)
+                guard let attachment = try owner.fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@ AND typeUTI == %@",
+                                           id, note, "com.apple.notes.table"),
+                    in: context,
+                    limit: 1
+                ).first else {
+                    throw NotesError("table_not_found", "Notes created no table attachment for the Markdown table.")
+                }
+                let tableEditor = try NCTableEditor(attachment: attachment)
+                let cellStyle = try NCNotesRuntime.paragraphStyle(
+                    NativeParagraphStyle.body.number, indent: 0, quote: 0, checked: -1,
+                    startNumber: -1, basedOn: nil
+                )
+                for row in table.indices {
+                    for column in table[row].indices {
+                        try tableEditor.setAttributedCell(
+                            column: column, row: row,
+                            text: try attributedCell(table[row][column], style: cellStyle)
+                        )
+                    }
+                }
+                try tableEditor.save()
+                tableCells[id] = table
+                let marker = try NCNotesRuntime.attachmentMarker(id: id, type: "com.apple.notes.table")
+                built.append(NSAttributedString(string: "\u{fffc}", attributes: [
+                    .init("TTStyle"): style, .init("NSAttachment"): marker,
+                ]))
+            } else if paragraph.kind == .divider {
+                var kind: NSString?
+                let id = try NCNotesRuntime.makeDivider(in: note, type: &kind)
+                let marker = try NCNotesRuntime.attachmentMarker(id: id, type: kind as String? ?? "public.data")
+                built.append(NSAttributedString(string: "\u{fffc}", attributes: [
+                    .init("TTStyle"): style, .init("NSAttachment"): marker,
+                ]))
+            } else {
+                built.append(try inline(paragraph.runs, style: style, note: note, context: context,
+                                        existing: existing, preparedResources: prepared.resources,
+                                        resourceIndex: &resourceIndex, fileAttachmentIDs: &fileAttachmentIDs,
+                                        fileAttachmentSHA256: &fileAttachmentSHA256))
+            }
+            if index < prepared.document.paragraphs.count - 1 {
+                built.append(NSAttributedString(string: "\n", attributes: [.init("TTStyle"): style]))
+            }
+        }
+        for frozen in prepared.trailingAttachments {
+            var kind: NSString?
+            let id = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
+            let style = try NCNotesRuntime.paragraphStyle(NativeParagraphStyle.body.number, indent: 0,
+                                                          quote: 0, checked: -1, basedOn: nil)
+            let marker = try NCNotesRuntime.attachmentMarker(id: id, type: kind as String? ?? "public.data")
+            if built.length > 0 { built.append(NSAttributedString(string: "\n", attributes: [.init("TTStyle"): style])) }
+            built.append(NSAttributedString(string: "\u{fffc}", attributes: [
+                .init("TTStyle"): style, .init("NSAttachment"): marker,
+            ]))
+            fileAttachmentIDs.append(id)
+            fileAttachmentSHA256[id] = frozen.sha256
+        }
+        guard resourceIndex == prepared.resources.count else {
+            throw NotesError("markdown_resource_mismatch", "Markdown resources changed while the note was being built.")
+        }
+        return RenderedInput(attributed: built, paragraphCount: prepared.document.paragraphs.count,
+                             fileAttachmentIDs: fileAttachmentIDs,
+                             fileAttachmentSHA256: fileAttachmentSHA256,
+                             tableCells: tableCells)
+    }
+
+    fileprivate func patch(ref: String, prepared: PreparedInput, mode: NativeNotesWriter.MarkdownPatchMode,
+                           allowShared: Bool, context: NSManagedObjectContext) throws -> NativeWriteResult {
         let note = try owner.note(ref, in: context)
         try owner.guardWritable(note, allowShared: allowShared)
         try owner.refreshIfStale(note)
+        let before = try SQLiteNotesStore(refresh: true).note(owner.id(note))
+        let expectedFeatures = NativeOnlyFeatures.detect(in: before)
         let editor = try NCBodyEditor(note: note)
         try editor.prepare(["replace"])
         let original = editor.original
         let existing = owner.attachmentMarkers(original)
-        let existingByID = Dictionary(grouping: existing, by: { $0.2 }).mapValues { ($0[0].1, $0[0].3) }
-        let built = try attributed(markdown: markdown, note: note, context: context, editor: editor, existing: existingByID).0
+        let requestedIDs = prepared.document.paragraphs.flatMap(\.runs).compactMap(\.attachmentID)
         let source = original.string as NSString
         let paragraphs = owner.paragraphRanges(source)
         func style(_ range: NSRange) -> Int? {
@@ -7476,36 +7777,18 @@ private final class MarkdownNativeWriter {
         }
         func afterLine(_ range: NSRange) -> Int { NSMaxRange(range) < source.length ? NSMaxRange(range) + 1 : NSMaxRange(range) }
         var deletion = NSRange(location: 0, length: 0)
-        var insertion = built
         switch mode {
         case .append:
             deletion.location = source.length
-            if source.length > 0, !source.hasSuffix("\n"), built.length > 0 {
-                let value = NSMutableAttributedString(string: "\n")
-                value.append(built); insertion = value
-            }
         case .prepend:
             if let title = paragraphs.first {
                 deletion.location = afterLine(title)
-                if deletion.location == source.length, !source.hasSuffix("\n"), built.length > 0 {
-                    let value = NSMutableAttributedString(string: "\n")
-                    value.append(built); insertion = value
-                } else if deletion.location < source.length, built.length > 0 {
-                    insertion.append(NSAttributedString(string: "\n"))
-                }
             } else {
                 deletion.location = 0
-                if source.length > 0, built.length > 0 { insertion.append(NSAttributedString(string: "\n")) }
             }
         case .insert(let text):
             let (_, range) = try heading(text)
             deletion.location = afterLine(range)
-            if deletion.location == source.length, !source.hasSuffix("\n"), built.length > 0 {
-                let value = NSMutableAttributedString(string: "\n")
-                value.append(built); insertion = value
-            } else if deletion.location < source.length, built.length > 0 {
-                insertion.append(NSAttributedString(string: "\n"))
-            }
         case .section(let text):
             let (index, range) = try heading(text)
             let start = afterLine(range)
@@ -7515,48 +7798,102 @@ private final class MarkdownNativeWriter {
                 return candidateLevel <= level
             }?.location ?? source.length
             deletion = NSRange(location: start, length: next - start)
-            if next < source.length, built.length > 0 { insertion.append(NSAttributedString(string: "\n")) }
+        }
+
+        let replacedIDs = existing.compactMap {
+            NSIntersectionRange($0.0, deletion).length > 0 ? $0.2 : nil
+        }
+        try NativeMarkdownReferenceValidator.validatePatch(
+            requestedIDs: requestedIDs, existingIDs: existing.map(\.2), replacedIDs: replacedIDs
+        )
+        let existingByID = Dictionary(grouping: existing, by: { $0.2.lowercased() })
+            .mapValues { ($0[0].1, $0[0].3) }
+        let renderedInput = try attributed(prepared: prepared, note: note, context: context,
+                                           editor: editor, existing: existingByID)
+        let built = renderedInput.attributed
+        var insertion = built
+        switch mode {
+        case .append:
+            if source.length > 0, !source.hasSuffix("\n"), built.length > 0 {
+                let value = NSMutableAttributedString(string: "\n")
+                value.append(built); insertion = value
+            }
+        case .prepend:
+            if deletion.location == source.length, !source.hasSuffix("\n"), built.length > 0 {
+                let value = NSMutableAttributedString(string: "\n")
+                value.append(built); insertion = value
+            } else if deletion.location < source.length, built.length > 0 {
+                insertion.append(NSAttributedString(string: "\n"))
+            }
+        case .insert:
+            if deletion.location == source.length, !source.hasSuffix("\n"), built.length > 0 {
+                let value = NSMutableAttributedString(string: "\n")
+                value.append(built); insertion = value
+            } else if deletion.location < source.length, built.length > 0 {
+                insertion.append(NSAttributedString(string: "\n"))
+            }
+        case .section:
+            if NSMaxRange(deletion) < source.length, built.length > 0 {
+                insertion.append(NSAttributedString(string: "\n"))
+            }
         }
         let expectedText = source.replacingCharacters(in: deletion, with: insertion.string)
+        let expectedBody = NSMutableAttributedString(attributedString: original)
+        expectedBody.replaceCharacters(in: deletion, with: insertion)
+        let expectedPlacements = owner.attachmentPlacements(expectedBody)
         try editor.begin(["replace"])
         try editor.replace(deletion, with: insertion)
         try editor.finish()
         try owner.save(context, notes: [note])
         let noteID = owner.id(note), nativeBody = try owner.body(try owner.note(noteID, in: context))
-        let expectedMarkers = owner.attachmentMarkers(original).map { ($0.2, $0.3) } + owner.attachmentMarkers(built).map { ($0.2, $0.3) }
-        let actualMarkers = owner.attachmentMarkers(nativeBody).map { ($0.2, $0.3) }
         return owner.result(noteID, native: ["utf16Length": "\(nativeBody.length)", "preservedFeatures": expectedFeatures.joined(separator: ",")],
-                            nativeVerified: nativeBody.string == expectedText && NativeVerificationRules.sameMarkerMultiset(expectedMarkers, actualMarkers), sqlite: { after in
+                            nativeVerified: nativeBody.string == expectedText &&
+                                NativeVerificationRules.exactMarkerPlacements(
+                                    expectedPlacements, owner.attachmentPlacements(nativeBody)
+                                ), sqlite: { after in
             let features = NativeOnlyFeatures.detect(in: after)
-            guard after.document?.text == expectedText, Set(expectedFeatures).isSubset(of: Set(features)) else { return nil }
+            guard after.document?.text == expectedText,
+                  NativeVerificationRules.exactMarkerPlacements(
+                      expectedPlacements, self.owner.attachmentPlacements(after.document)
+                  ),
+                  MarkdownTableVerification.matches(renderedInput.tableCells, in: after.document),
+                  Set(expectedFeatures).isSubset(of: Set(features)) else { return nil }
             return ["features": features.joined(separator: ","), "utf16Length": "\(nativeBody.length)"]
         })
     }
 
-    func write(ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool, before: Note,
+    func write(ref: String, prepared: PreparedInput, dryRun: Bool, backup: Bool, allowShared: Bool,
                context: NSManagedObjectContext) throws -> NativeWriteResult {
-        let lines = try parse(markdown), note = try owner.note(ref, in: context)
-        let preservedIDs = attachmentReferences(markdown)
-        let expectedFeatures = NativeOnlyFeatures.detect(in: before)
+        let note = try owner.note(ref, in: context)
+        let preservedIDs = prepared.document.paragraphs.flatMap(\.runs).compactMap(\.attachmentID)
         try owner.guardWritable(note, allowShared: allowShared); try owner.refreshIfStale(note)
+        let before = try SQLiteNotesStore(refresh: true).note(owner.id(note))
+        let expectedFeatures = NativeOnlyFeatures.detect(in: before)
         if backup { try makeBackup(ref: owner.id(note)) }
         if dryRun {
-            return owner.result(owner.id(note), native: ["dryRun": "true", "paragraphs": "\(lines.count)"], message: "No write made.")
+            return owner.result(owner.id(note), native: [
+                "dryRun": "true", "paragraphs": "\(prepared.document.paragraphs.count)",
+                "localAttachments": "\(prepared.resources.compactMap { $0 }.count)",
+            ], message: "No write made.")
         }
-        var expectedMarkers: [(String, String)] = [], expectedText = ""
+        var expectedPlacements: [NativeVerificationRules.MarkerPlacement] = []
+        var expectedText = ""
+        var fileAttachmentIDs: [String] = []
+        var expectedHashes: [String: String] = [:]
+        var expectedTables: [String: [[NotesMarkdownCell]]] = [:]
         do {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["replace"])
             let existing = owner.attachmentMarkers(editor.original)
-            guard Set(preservedIDs).count == preservedIDs.count else { throw NotesError("duplicate_attachment_reference", "Each notescli-attachment ID may appear once.") }
-            let existingGroups = Dictionary(grouping: existing, by: { $0.2 })
-            guard existingGroups.values.allSatisfy({ $0.count == 1 }) else { throw NotesError("attachment_placement_mismatch", "An existing attachment has more than one placement; nothing was saved.") }
+            try NativeMarkdownReferenceValidator.validate(requestedIDs: preservedIDs,
+                                                          existingIDs: existing.map { $0.2 })
+            let existingGroups = Dictionary(grouping: existing, by: { $0.2.lowercased() })
             let existingByID = existingGroups.mapValues { ($0[0].1, $0[0].3) }
-            for id in preservedIDs where existingByID[id] == nil { throw NotesError("attachment_not_found", "Attachment \(id) does not belong to this note.") }
-            let kept = Set(preservedIDs)
-            for marker in existing where !kept.contains(marker.2) {
-                throw NotesError("attachment_would_be_lost", "Markdown omitted inline marker \(marker.2); nothing was saved.")
-            }
-            let built = try attributed(markdown: markdown, note: note, context: context, editor: editor, existing: existingByID).0
+            let rendered = try attributed(prepared: prepared, note: note, context: context,
+                                          editor: editor, existing: existingByID)
+            let built = rendered.attributed
+            fileAttachmentIDs = rendered.fileAttachmentIDs
+            expectedHashes = rendered.fileAttachmentSHA256
+            expectedTables = rendered.tableCells
             let mappings = unchangedMappings(from: editor.original.string, to: built.string)
             let unpreserved = unpreservedFeatures(in: before, coveredBy: mappings.map(\.old))
             guard unpreserved.isEmpty else {
@@ -7568,24 +7905,37 @@ private final class MarkdownNativeWriter {
             }
             try preserveNativeAttributes(from: editor.original, in: built, mappings: mappings)
             expectedText = built.string
-            expectedMarkers = owner.attachmentMarkers(built).map { ($0.2, $0.3) }
+            expectedPlacements = owner.attachmentPlacements(built)
             try editor.begin(["replace"])
             try editor.replace(NSRange(location: 0, length: editor.original.length), with: built)
             try editor.finish()
             try owner.save(context, notes: [note])
         } catch { context.rollback(); throw (error as? NotesError) ?? owner.nativeError(error) }
         let nativeBody = try owner.body(try owner.note(owner.id(note), in: context))
-        let nativeMarkers = owner.attachmentMarkers(nativeBody).map { ($0.2, $0.3) }
-        let nativeVerified = nativeBody.string == expectedText && NativeVerificationRules.sameMarkerMultiset(expectedMarkers, nativeMarkers)
-        return owner.result(owner.id(note), native: ["utf16Length": "\(nativeBody.length)", "paragraphs": "\(lines.count)", "preservedAttachments": "\(preservedIDs.count)"],
+        let nativePlacements = owner.attachmentPlacements(nativeBody)
+        let hashesMatch = fileAttachmentIDs.allSatisfy { id in
+            guard let expected = expectedHashes[id] else { return false }
+            return owner.storedAttachmentHash(noteID: owner.id(note), attachmentID: id,
+                                              expected: expected) != nil
+        }
+        let nativeVerified = nativeBody.string == expectedText && hashesMatch &&
+            NativeVerificationRules.exactMarkerPlacements(expectedPlacements, nativePlacements)
+        return owner.result(owner.id(note), native: ["utf16Length": "\(nativeBody.length)",
+                                                     "paragraphs": "\(prepared.document.paragraphs.count)",
+                                                     "preservedAttachments": "\(preservedIDs.count)",
+                                                     "createdAttachments": "\(fileAttachmentIDs.count)"],
                             nativeVerified: nativeVerified, sqlite: { n in
             guard n.document?.text == nativeBody.string else { return nil }
-            let readbackMarkers = n.document?.runs.compactMap { run in run.attachment.map { ($0.id, $0.typeUTI) } } ?? []
             let features = NativeOnlyFeatures.detect(in: n)
-            guard NativeVerificationRules.sameMarkerMultiset(expectedMarkers, readbackMarkers),
+            guard NativeVerificationRules.exactMarkerPlacements(
+                      expectedPlacements, self.owner.attachmentPlacements(n.document)
+                  ),
+                  MarkdownTableVerification.matches(expectedTables, in: n.document),
                   Set(expectedFeatures).isSubset(of: Set(features)) else { return nil }
             return ["features": features.joined(separator: ","), "utf16Length": "\(nativeBody.length)",
-                    "hasChecklist": "\(n.summary.hasChecklist)", "preservedAttachments": "\(preservedIDs.count)"]
+                    "hasChecklist": "\(n.summary.hasChecklist)",
+                    "preservedAttachments": "\(preservedIDs.count)",
+                    "createdAttachments": "\(fileAttachmentIDs.count)"]
         })
     }
 
@@ -7681,107 +8031,112 @@ private final class MarkdownNativeWriter {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let base = root.appendingPathComponent("\(ref)-\(stamp)")
-        let markdown = note.document.map { NoteRenderer.markdown($0, attachments: note.attachments) } ?? ""
+        let markdown = note.document.map {
+            NoteRenderer.markdown($0, attachments: note.attachments,
+                                  preserveNativeAttachments: true)
+        } ?? ""
         try markdown.write(to: base.appendingPathExtension("md"), atomically: true, encoding: .utf8)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; try encoder.encode(note).write(to: base.appendingPathExtension("json"), options: .atomic)
     }
 
-    fileprivate func attachmentReferences(_ markdown: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: #"!?\[[^\]]*\]\(<?notescli-attachment:([A-Za-z0-9_-]+)>?\)"#) else { return [] }
-        let source = markdown as NSString
-        return regex.matches(in: markdown, range: NSRange(location: 0, length: source.length)).map { source.substring(with: $0.range(at: 1)) }
+    private func attributes(for run: NotesMarkdownRun, style: Any) throws -> [NSAttributedString.Key: Any] {
+        var attributes: [NSAttributedString.Key: Any] = [.init("TTStyle"): style]
+        let hints = (run.bold ? 1 : 0) | (run.italic ? 2 : 0)
+        if hints != 0 { attributes[.init("TTHints")] = hints }
+        if run.strikethrough { attributes[.init("TTStrikethrough")] = 1 }
+        if run.underline { attributes[.init("TTUnderline")] = 1 }
+        if run.superscript != 0 { attributes[.init("NSSuperScript")] = run.superscript }
+        if let highlight = run.highlight.flatMap(HighlightColor.init(rawValue:)) {
+            attributes[.init("TTEmphasis")] = highlight.notesValue
+        }
+        if run.code {
+            attributes[.init("ICTTFont")] = try NCNotesRuntime.font(
+                name: "Menlo", size: nil, hints: hints, basedOn: nil
+            )
+        }
+        if let link = run.link.flatMap(NotesMarkdownDocument.safeLinkDestination) {
+            attributes[.init("NSLink")] = URL(string: link) ?? link
+        }
+        return attributes
     }
 
-    fileprivate func parse(_ markdown: String) throws -> [Line] {
-        let raw = markdown.components(separatedBy: "\n")
-        var result: [Line] = [], index = 0, inCode = false
-        while index < raw.count {
-            let source = raw[index]
-            if source.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inCode.toggle(); index += 1; continue }
-            if !inCode, source.contains("|"), index + 1 < raw.count,
-               raw[index + 1].range(of: #"^\s*\|?\s*:?-{3,}"#, options: .regularExpression) != nil {
-                var rows = [tableCells(source)]; index += 2
-                while index < raw.count, raw[index].contains("|") { rows.append(tableCells(raw[index])); index += 1 }
-                guard let width = rows.map(\.count).max(), width > 0 else { throw NotesError("invalid_markdown_table", "A table needs cells.") }
-                result.append(Line(text: "", style: .body, indent: 0, done: nil, table: rows.map { $0 + Array(repeating: "", count: width - $0.count) }))
-                continue
-            }
-            var text = source, style: NativeParagraphStyle = inCode ? .monospaced : .body, done: Bool?, indent = 0
-            if !inCode {
-                while text.hasPrefix("  ") { indent += 1; text.removeFirst(2) }
-                if text.hasPrefix("# ") { style = .title; text.removeFirst(2) }
-                else if text.hasPrefix("## ") { style = .heading; text.removeFirst(3) }
-                else if text.hasPrefix("### ") { style = .subheading; text.removeFirst(4) }
-                else if text.hasPrefix("- [ ] ") { style = .checklist; done = false; text.removeFirst(6) }
-                else if text.lowercased().hasPrefix("- [x] ") { style = .checklist; done = true; text.removeFirst(6) }
-                else if text.hasPrefix("* ") { style = .bulleted; text.removeFirst(2) }
-                else if text.hasPrefix("- ") { style = .dashed; text.removeFirst(2) }
-                else if text.range(of: #"^\d+\. "#, options: .regularExpression) != nil { style = .numbered; text = text.replacingOccurrences(of: #"^\d+\. "#, with: "", options: .regularExpression) }
-                else if text.hasPrefix("> ") { style = .blockquote; text.removeFirst(2) }
-            }
-            result.append(Line(text: text, style: style, indent: indent, done: done, table: nil)); index += 1
+    private func attributedCell(_ cell: NotesMarkdownCell, style: Any) throws -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        for run in cell.runs {
+            output.append(NSAttributedString(string: run.text,
+                                             attributes: try attributes(for: run, style: style)))
         }
-        return result
-    }
-
-    fileprivate func tableCells(_ line: String) -> [String] {
-        var text = line.trimmingCharacters(in: .whitespaces)
-        if text.hasPrefix("|") { text.removeFirst() }; if text.hasSuffix("|") { text.removeLast() }
-        return text.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "<br>", with: "\n") }
-    }
-
-    fileprivate func inline(_ text: String, style: Any, note: NSManagedObject, context: NSManagedObjectContext,
-                        existing: [String: (AnyObject, String)]) throws -> NSAttributedString {
-        try inline(text, style: style, note: note, context: context, existing: existing, attributes: [:])
-    }
-
-    private func inline(_ text: String, style: Any, note: NSManagedObject, context: NSManagedObjectContext,
-                        existing: [String: (AnyObject, String)],
-                        attributes: [NSAttributedString.Key: Any]) throws -> NSAttributedString {
-        let output = NSMutableAttributedString(), source = text as NSString
-        let pattern = #"!?\[[^\]]*\]\(<?notescli-attachment:([A-Za-z0-9_-]+)>?\)|\[([^\]]+)\]\(([^)]+)\)|\*\*(.+?)\*\*|~~(.+?)~~|<mark data-apple-notes-highlight=\"(purple|pink|orange|mint|blue)\">(.*?)</mark>|<u>(.*?)</u>|<sup>(.*?)</sup>|<sub>(.*?)</sub>|\*([^*]+)\*"#
-        let regex = try NSRegularExpression(pattern: pattern), matches = regex.matches(in: text, range: NSRange(location: 0, length: source.length))
-        var cursor = 0
-        func merged(_ extra: [NSAttributedString.Key: Any]) -> [NSAttributedString.Key: Any] {
-            var result = attributes, extra = extra
-            if let old = result[.init("TTHints")] as? Int, let new = extra.removeValue(forKey: .init("TTHints")) as? Int {
-                result[.init("TTHints")] = old | new
-            }
-            result.merge(extra) { _, new in new }
-            return result
-        }
-        func append(_ value: String, _ extra: [NSAttributedString.Key: Any] = [:]) {
-            var attrs: [NSAttributedString.Key: Any] = [.init("TTStyle"): style]
-            attrs.merge(merged(extra)) { _, new in new }
-            output.append(NSAttributedString(string: value, attributes: attrs))
-        }
-        func appendNested(_ range: NSRange, _ extra: [NSAttributedString.Key: Any]) throws {
-            output.append(try inline(source.substring(with: range), style: style, note: note, context: context,
-                                     existing: existing, attributes: merged(extra)))
-        }
-        for match in matches {
-            if match.range.location > cursor { append(source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))) }
-            if match.range(at: 1).location != NSNotFound {
-                let id = source.substring(with: match.range(at: 1)); guard let item = existing[id] else { throw NotesError("attachment_not_found", "Attachment \(id) is not in this note.") }; append("\u{fffc}", [.init("NSAttachment"): item.0])
-            } else if match.range(at: 2).location != NSNotFound {
-                let label = source.substring(with: match.range(at: 2)), url = source.substring(with: match.range(at: 3))
-                if url.hasPrefix("applenotes://showNote?identifier=") || url.hasPrefix("note:") {
-                    let targetRef = url.hasPrefix("note:") ? String(url.dropFirst(5)) : String(url.split(separator: "=").last ?? "")
-                    let target = try owner.note(targetRef, in: context), id = try NCNotesRuntime.makeNoteLink(to: target, from: note, text: label), marker = try NCNotesRuntime.attachmentMarker(id: id, type: "com.apple.notes.inlinetextattachment.link"); append("\u{fffc}", [.init("NSAttachment"): marker])
-                } else { try appendNested(match.range(at: 2), [.init("NSLink"): URL(string: url) ?? url]) }
-            } else if match.range(at: 4).location != NSNotFound { try appendNested(match.range(at: 4), [.init("TTHints"): 1]) }
-            else if match.range(at: 5).location != NSNotFound { try appendNested(match.range(at: 5), [.init("TTStrikethrough"): 1]) }
-            else if match.range(at: 6).location != NSNotFound {
-                let color = HighlightColor(rawValue: source.substring(with: match.range(at: 6)))!
-                try appendNested(match.range(at: 7), [.init("TTEmphasis"): color.notesValue])
-            }
-            else if match.range(at: 8).location != NSNotFound { try appendNested(match.range(at: 8), [.init("TTUnderline"): 1]) }
-            else if match.range(at: 9).location != NSNotFound { try appendNested(match.range(at: 9), [.init("NSSuperScript"): 1]) }
-            else if match.range(at: 10).location != NSNotFound { try appendNested(match.range(at: 10), [.init("NSSuperScript"): -1]) }
-            else if match.range(at: 11).location != NSNotFound { try appendNested(match.range(at: 11), [.init("TTHints"): 2]) }
-            cursor = NSMaxRange(match.range)
-        }
-        if cursor < source.length { append(source.substring(from: cursor)) }
         return output
     }
+
+    private func inline(_ runs: [NotesMarkdownRun], style: Any, note: NSManagedObject,
+                        context: NSManagedObjectContext, existing: [String: (AnyObject, String)],
+                        preparedResources: [FrozenAttachmentInput?], resourceIndex: inout Int,
+                        fileAttachmentIDs: inout [String],
+                        fileAttachmentSHA256: inout [String: String]) throws -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        var index = 0
+        while index < runs.count {
+            let run = runs[index]
+            if let link = run.link,
+               link.hasPrefix("applenotes://showNote?identifier=") || link.hasPrefix("note:") {
+                var end = index + 1
+                while end < runs.count, runs[end].link == link { end += 1 }
+                let label = runs[index..<end].map(\.text).joined()
+                let targetRef = link.hasPrefix("note:")
+                    ? String(link.dropFirst(5))
+                    : String(link.split(separator: "=").last ?? "")
+                let target = try owner.note(targetRef.removingPercentEncoding ?? targetRef, in: context)
+                let id = try NCNotesRuntime.makeNoteLink(to: target, from: note, text: label)
+                let marker = try NCNotesRuntime.attachmentMarker(
+                    id: id, type: "com.apple.notes.inlinetextattachment.link"
+                )
+                output.append(NSAttributedString(string: "\u{fffc}", attributes: [
+                    .init("TTStyle"): style, .init("NSAttachment"): marker,
+                ]))
+                index = end
+                continue
+            }
+
+            var attributes = try attributes(for: run, style: style)
+
+            if let id = run.attachmentID {
+                guard let item = existing[id.lowercased()] else {
+                    throw NotesError("attachment_not_found", "Attachment \(id) is not in this note.")
+                }
+                attributes[.init("NSAttachment")] = item.0
+                output.append(NSAttributedString(string: "\u{fffc}", attributes: attributes))
+            } else if let resource = run.resource {
+                guard resourceIndex < preparedResources.count else {
+                    throw NotesError("markdown_resource_mismatch", "A Markdown resource was not prepared.")
+                }
+                let frozen = preparedResources[resourceIndex]
+                resourceIndex += 1
+                if let frozen {
+                    var kind: NSString?
+                    let id = try NCNotesRuntime.addFile(frozen.url, to: note,
+                                                        title: frozen.sourceName, type: &kind)
+                    try TestFault.check("after_attachment")
+                    attributes[.init("NSAttachment")] = try NCNotesRuntime.attachmentMarker(
+                        id: id, type: kind as String? ?? "public.data"
+                    )
+                    output.append(NSAttributedString(string: "\u{fffc}", attributes: attributes))
+                    fileAttachmentIDs.append(id)
+                    fileAttachmentSHA256[id] = frozen.sha256
+                } else {
+                    let label = resource.alt.isEmpty ? resource.source : resource.alt
+                    if let safe = NotesMarkdownDocument.safeLinkDestination(resource.source),
+                       let url = URL(string: safe) {
+                        attributes[.init("NSLink")] = url
+                    }
+                    output.append(NSAttributedString(string: label, attributes: attributes))
+                }
+            } else {
+                output.append(NSAttributedString(string: run.text, attributes: attributes))
+            }
+            index += 1
+        }
+        return output
+    }
+
 }

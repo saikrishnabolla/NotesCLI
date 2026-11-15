@@ -10,6 +10,13 @@ enum NativePrivateMessageProbe {
 }
 
 enum NativeVerificationRules {
+    struct MarkerPlacement: Equatable, Sendable {
+        var id: String
+        var typeUTI: String
+        var location: Int
+        var length: Int
+    }
+
     static func exactText(_ source: String, text: String, location: Int) -> Bool {
         let source = source as NSString
         let textLength = (text as NSString).length
@@ -70,6 +77,10 @@ enum NativeVerificationRules {
         return counts(lhs) == counts(rhs)
     }
 
+    static func exactMarkerPlacements(_ lhs: [MarkerPlacement], _ rhs: [MarkerPlacement]) -> Bool {
+        lhs == rhs
+    }
+
     static func exactRuns(_ document: NoteDocument, range: UTF16Range, match: (AttributeRun) -> Bool) -> Bool {
         var offset = 0, selected: [AttributeRun] = []
         let end = range.location + range.length
@@ -79,6 +90,60 @@ enum NativeVerificationRules {
             offset = runEnd
         }
         return !selected.isEmpty && selected.allSatisfy(match)
+    }
+}
+
+enum NativeMarkdownReferenceValidator {
+    static func validate(requestedIDs: [String], existingIDs: [String]) throws {
+        let requestedIDs = requestedIDs.map { $0.lowercased() }
+        let existingIDs = existingIDs.map { $0.lowercased() }
+        guard Set(requestedIDs).count == requestedIDs.count else {
+            throw NotesError("duplicate_attachment_reference",
+                             "Each notescli-attachment ID may appear once.")
+        }
+        let existingGroups = Dictionary(grouping: existingIDs, by: { $0 })
+        guard existingGroups.values.allSatisfy({ $0.count == 1 }) else {
+            throw NotesError("attachment_placement_mismatch",
+                             "An existing attachment has more than one placement; nothing was saved.")
+        }
+        let existing = Set(existingIDs)
+        if let foreign = requestedIDs.first(where: { !existing.contains($0) }) {
+            throw NotesError("attachment_not_found",
+                             "Attachment \(foreign) does not belong to this note.")
+        }
+        let requested = Set(requestedIDs)
+        if let omitted = existingIDs.first(where: { !requested.contains($0) }) {
+            throw NotesError("attachment_would_be_lost",
+                             "Markdown omitted inline marker \(omitted); nothing was saved.")
+        }
+    }
+
+    static func validatePatch(requestedIDs: [String], existingIDs: [String], replacedIDs: [String]) throws {
+        let requestedIDs = requestedIDs.map { $0.lowercased() }
+        let existingIDs = existingIDs.map { $0.lowercased() }
+        let replacedIDs = replacedIDs.map { $0.lowercased() }
+        guard Set(requestedIDs).count == requestedIDs.count else {
+            throw NotesError("duplicate_attachment_reference",
+                             "A patch cannot reference the same attachment more than once.")
+        }
+        let existingGroups = Dictionary(grouping: existingIDs, by: { $0 })
+        guard existingGroups.values.allSatisfy({ $0.count == 1 }) else {
+            throw NotesError("attachment_placement_mismatch",
+                             "An existing attachment has more than one placement; nothing was saved.")
+        }
+        let existing = Set(existingIDs), replaced = Set(replacedIDs), requested = Set(requestedIDs)
+        if let foreign = requestedIDs.first(where: { !existing.contains($0) }) {
+            throw NotesError("attachment_not_found",
+                             "Attachment \(foreign) does not belong to this note.")
+        }
+        if let duplicate = requestedIDs.first(where: { existing.contains($0) && !replaced.contains($0) }) {
+            throw NotesError("duplicate_attachment_reference",
+                             "Attachment \(duplicate) is already outside the replaced range.")
+        }
+        if let omitted = replacedIDs.first(where: { !requested.contains($0) }) {
+            throw NotesError("attachment_would_be_lost",
+                             "The replaced range contains attachment \(omitted); include its exported marker to keep it.")
+        }
     }
 }
 

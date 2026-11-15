@@ -1038,6 +1038,7 @@ public final class MCPServer: @unchecked Sendable {
         // MARK: w3-write begin
         let nativeBodyTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text"])
         let nativeRoutableTools = nativeBodyTools.union(["create_note"])
+        let markdownBodyTools = nativeRoutableTools.subtracting(["replace_text"])
         let markupTools = Set(["attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear"])
         if markupTools.contains(tool.name), s("engine") == "scripting" {
             throw NotesError("native_required", "Editable attachment markup requires the private native engine.")
@@ -1047,6 +1048,26 @@ public final class MCPServer: @unchecked Sendable {
         }
         if ["file_push", "sync_notes"].contains(tool.name), s("engine") == "native" {
             throw NotesError("unsupported_engine", "The native engine is not available for MCP file or folder sync. Use write_markdown for an explicit native body replacement.")
+        }
+        if markdownBodyTools.contains(tool.name), let body = s("body") {
+            let markdown = NotesMarkdownDocument(parsing: body)
+            let titleHasLocalResources = tool.name == "create_note"
+                && s("title").map { !NotesMarkdownDocument(parsing: $0).localResources.isEmpty } == true
+            if exposureProfile == .remote,
+               !markdown.localResources.isEmpty || titleHasLocalResources {
+                throw NotesError(
+                    "remote_local_resource_denied",
+                    "Remote MCP Markdown cannot read files from this Mac.",
+                    hint: "Transfer the file through an approved channel, then use the local CLI or local MCP server."
+                )
+            }
+            if markdown.requiresNativeWriter, s("engine") != "native" {
+                throw NotesError(
+                    "native_required",
+                    "This Markdown contains native Notes elements that scripting cannot place without loss.",
+                    hint: "Set engine to native explicitly and start MCP with --allow-native."
+                )
+            }
         }
         if s("engine") == "native", !tool.native {
             guard nativeRoutableTools.contains(tool.name) else {

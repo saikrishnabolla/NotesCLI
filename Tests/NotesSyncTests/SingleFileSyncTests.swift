@@ -6,11 +6,15 @@ import XCTest
 final class SingleFileSyncTests: XCTestCase {
     private final class UnknownWriter: NotesWriting, @unchecked Sendable {
         let notes: InMemoryNotes
+        let transform: (String) -> String
         private(set) var replacements = 0
-        init(_ notes: InMemoryNotes) { self.notes = notes }
+        init(_ notes: InMemoryNotes, transform: @escaping (String) -> String = { $0 }) {
+            self.notes = notes
+            self.transform = transform
+        }
         func createNote(title: String, markdown: String, folder: String?) throws -> WriteResult { try notes.createNote(title: title, markdown: markdown, folder: folder) }
         func replaceBody(_ ref: String, markdown: String) throws -> WriteResult {
-            replacements += 1; _ = try notes.replaceBody(ref, markdown: markdown)
+            replacements += 1; _ = try notes.replaceBody(ref, markdown: transform(markdown))
             return WriteResult(outcome: .unknown, noteID: try notes.note(ref).summary.id)
         }
         func appendToNote(_ ref: String, markdown: String) throws -> WriteResult { try notes.appendToNote(ref, markdown: markdown) }
@@ -115,7 +119,7 @@ final class SingleFileSyncTests: XCTestCase {
         XCTAssertEqual(try notes.note("welcome").document?.text, "Welcome to notescli. Browse your shopping notes. #demo")
     }
 
-    func testConfirmedUnknownMergeUpdatesLocalFileWithoutRetrying() throws {
+    func testUnknownMergeDoesNotConfirmChangedParagraphStructure() throws {
         let notes = InMemoryNotes.sample(), root = try root(), path = root.appendingPathComponent("note.md")
         _ = try SingleFileSync(reader: notes, writer: notes).pull(note: "welcome", to: path)
         var local = MarkdownFile.parse(try String(contentsOf: path), fallbackTitle: "note")
@@ -124,9 +128,49 @@ final class SingleFileSyncTests: XCTestCase {
         let writer = UnknownWriter(notes), sync = SingleFileSync(reader: notes, writer: writer)
 
         XCTAssertThrowsError(try sync.push(from: path))
-        XCTAssertEqual(try sync.push(from: path).action, .unchanged)
+        XCTAssertThrowsError(try sync.push(from: path)) { error in
+            guard case NotesSyncError.writeUnknown = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
         XCTAssertEqual(MarkdownFile.parse(try String(contentsOf: path), fallbackTitle: "note").body,
-                       "LOCAL\nWelcome to notescli. Browse your shopping notes. #demo\nREMOTE")
+                       "LOCAL\nWelcome to notescli. Browse your shopping notes. #demo")
+        XCTAssertEqual(writer.replacements, 1)
+    }
+
+    func testUnknownWriteDoesNotConfirmCollapsedParagraphs() throws {
+        let notes = InMemoryNotes.sample(), root = try root(), path = root.appendingPathComponent("note.md")
+        _ = try SingleFileSync(reader: notes, writer: notes).pull(note: "welcome", to: path)
+        var local = MarkdownFile.parse(try String(contentsOf: path), fallbackTitle: "note")
+        local.body = "first\n\nsecond"
+        try local.rendered().write(to: path, atomically: true, encoding: .utf8)
+        let writer = UnknownWriter(notes) { $0.replacingOccurrences(of: "\n", with: " ") }
+        let sync = SingleFileSync(reader: notes, writer: writer)
+
+        XCTAssertThrowsError(try sync.push(from: path))
+        XCTAssertThrowsError(try sync.push(from: path)) { error in
+            guard case NotesSyncError.writeUnknown = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(writer.replacements, 1)
+    }
+
+    func testUnknownWriteDoesNotConfirmStructurallyDifferentMarkdown() throws {
+        let notes = InMemoryNotes.sample(), root = try root(), path = root.appendingPathComponent("note.md")
+        _ = try SingleFileSync(reader: notes, writer: notes).pull(note: "welcome", to: path)
+        var local = MarkdownFile.parse(try String(contentsOf: path), fallbackTitle: "note")
+        local.body = "- first\n- second"
+        try local.rendered().write(to: path, atomically: true, encoding: .utf8)
+        let writer = UnknownWriter(notes) { $0.replacingOccurrences(of: "\n", with: " ") }
+        let sync = SingleFileSync(reader: notes, writer: writer)
+
+        XCTAssertThrowsError(try sync.push(from: path))
+        XCTAssertThrowsError(try sync.push(from: path)) { error in
+            guard case NotesSyncError.writeUnknown = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
         XCTAssertEqual(writer.replacements, 1)
     }
 

@@ -136,19 +136,32 @@ func validateBodySources(body: String?, stdin: Bool, file: String? = nil, allowE
     guard count <= 1 else { throw ValidationError("Choose only one of --body, --stdin, or --file.") }
     if count == 0 && !allowEditor { throw ValidationError("Provide --body or --stdin.") }
 }
-func inputBody(body: String?, stdin: Bool, file: String? = nil, allowEditor: Bool = false) throws -> String {
+struct MarkdownSourceInput {
+    var source: String
+    var assetBaseDirectory: URL
+}
+
+func inputMarkdown(body: String?, stdin: Bool, file: String? = nil,
+                   allowEditor: Bool = false) throws -> MarkdownSourceInput {
     try validateBodySources(body: body, stdin: stdin, file: file, allowEditor: allowEditor)
-    if let body { return body }
+    let workingDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    if let body { return MarkdownSourceInput(source: body, assetBaseDirectory: workingDirectory) }
     if stdin {
         let data = FileHandle.standardInput.readDataToEndOfFile()
         guard let text = String(data: data, encoding: .utf8) else { throw NotesError("invalid_encoding", "stdin must contain UTF-8.") }
-        return text
+        return MarkdownSourceInput(source: text, assetBaseDirectory: workingDirectory)
     }
     if let file {
-        return try InputFile.readText(URL(fileURLWithPath: NSString(string: file).expandingTildeInPath), kind: "body file", maxBytes: InputFile.maxTextBytes)
+        let url = URL(fileURLWithPath: NSString(string: file).expandingTildeInPath).standardizedFileURL
+        let text = try InputFile.readText(url, kind: "body file", maxBytes: InputFile.maxTextBytes)
+        return MarkdownSourceInput(source: text, assetBaseDirectory: url.deletingLastPathComponent())
     }
-    if allowEditor { return try editor("") }
+    if allowEditor { return MarkdownSourceInput(source: try editor(""), assetBaseDirectory: workingDirectory) }
     throw ValidationError("Provide --body or --stdin.")
+}
+
+func inputBody(body: String?, stdin: Bool, file: String? = nil, allowEditor: Bool = false) throws -> String {
+    try inputMarkdown(body: body, stdin: stdin, file: file, allowEditor: allowEditor).source
 }
 
 func inputPassword() throws -> String {

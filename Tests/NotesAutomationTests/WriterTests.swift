@@ -33,7 +33,7 @@ final class WriterTests: XCTestCase {
         XCTAssertFalse(call.source.contains(title))
         let payload = try JSONDecoder().decode([String: String].self, from: Data(call.arguments[0].utf8))
         XCTAssertEqual(payload["title"], title)
-        XCTAssertEqual(payload["html"], "<div><b>&lt;&amp;&gt;</b></div>")
+        XCTAssertEqual(payload["html"], "<p><strong>&lt;&amp;&gt;</strong></p>")
         XCTAssertEqual(payload["folder"], "A > B")
     }
     func testTimeoutNeverRetriesOrVerifies() throws {
@@ -186,7 +186,7 @@ final class WriterTests: XCTestCase {
                 XCTAssertTrue(request.expectedBodyIncludesTitle)
             } else {
                 XCTAssertEqual(request.operation, .replaceBody)
-                XCTAssertEqual(request.expectedBody, "after  \n")
+                XCTAssertEqual(request.expectedBody, "after\n")
                 XCTAssertFalse(request.expectedBodyIncludesTitle)
             }
             return WriteVerificationResult(outcome: .verified)
@@ -240,7 +240,7 @@ final class WriterTests: XCTestCase {
         _ = try ScriptingNotesWriter(runner: runner).prependToNote(id, markdown: "new")
         let payload = try JSONDecoder().decode([String: String].self, from: Data(runner.calls[1].arguments[0].utf8))
         XCTAssertEqual(payload["operation"], "prependToNote")
-        XCTAssertEqual(payload["html"], "<h1>T</h1><div>new</div><div>old</div>")
+        XCTAssertEqual(payload["html"], "<h1>T</h1><p>new</p><div>old</div>")
 
         let guarded = StubRunner([ScriptOutput(stdout: #"{"id":"x","title":"T","body":"<h1>T</h1>","attachmentCount":1}"#)])
         XCTAssertThrowsError(try ScriptingNotesWriter(runner: guarded).replaceText(id, find: "T", replacement: "X")) { error in
@@ -255,7 +255,7 @@ final class WriterTests: XCTestCase {
         let runner = StubRunner([read, ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
         _ = try ScriptingNotesWriter(runner: runner).replaceSection(id, heading: "A", markdown: "new")
         let payload = try JSONDecoder().decode([String: String].self, from: Data(runner.calls[1].arguments[0].utf8))
-        XCTAssertEqual(payload["html"], "<h1>T</h1><h2>A</h2><div>new</div><h2>B</h2><div>keep</div>")
+        XCTAssertEqual(payload["html"], "<h1>T</h1><h2>A</h2><p>new</p><h2>B</h2><div>keep</div>")
     }
 
     func testStyledNotesHeadingsAreDetected() throws {
@@ -265,7 +265,7 @@ final class WriterTests: XCTestCase {
         let runner = StubRunner([ScriptOutput(stdout: encoded), ScriptOutput(stdout: #"{"id":"x-coredata://synthetic/ICNote/p123"}"#)])
         _ = try ScriptingNotesWriter(runner: runner).replaceSection(id, heading: "A", markdown: "new")
         let payload = try JSONDecoder().decode([String: String].self, from: Data(runner.calls[1].arguments[0].utf8))
-        XCTAssertTrue(payload["html"]?.contains(#"font-size: 18px">A</span></b></div><div>new</div><div><b><span style="font-size: 18px">B"#) == true)
+        XCTAssertTrue(payload["html"]?.contains(#"font-size: 18px">A</span></b></div><p>new</p><div><b><span style="font-size: 18px">B"#) == true)
     }
 
 }

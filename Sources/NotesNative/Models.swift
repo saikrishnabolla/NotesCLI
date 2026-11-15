@@ -38,6 +38,7 @@ public struct NativeDoctorReport: Codable, Sendable {
         "-[ICOutlineState collapsedUUIDStrings]",
         "+[ICTextStyle noteDefaultNamedStyle]",
         "+[ICTextStyle setNoteDefaultNamedStyle:]",
+        "-[ICTTParagraphStyle setStartingItemNumber:]",
         "+[ICDocCamImageQuad quadFromCGRect:]",
         "+[ICGalleryAttachmentUtilities createAndAddSubAttachmentsToGalleryAttachment:fromDocuments:imageCache:context:]",
         "-[ICDocCamScannedDocumentEditor initWithGalleryAttachment:]",
@@ -99,6 +100,19 @@ public struct NativeWriteResult: Codable, Sendable {
         self.writeResult = writeResult
         self.verification = verification
         self.operationID = operationID
+    }
+}
+
+public struct NativeMarkdownInput: Sendable {
+    public var source: String
+    public var assetBaseDirectory: URL?
+    public var trailingAttachments: [FrozenAttachmentInput]
+
+    public init(source: String, assetBaseDirectory: URL? = nil,
+                trailingAttachments: [FrozenAttachmentInput] = []) {
+        self.source = source
+        self.assetBaseDirectory = assetBaseDirectory
+        self.trailingAttachments = trailingAttachments
     }
 }
 
@@ -594,6 +608,7 @@ public protocol NotesNativeWriting {
     func deleteScanPages(_ ref: String, attachmentID: String, pageIDs: [String],
                          expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
     func createNote(title: String, markdown: String, folder: String?, attachments: [FrozenAttachmentInput], allowShared: Bool) throws -> NativeCreateResult
+    func createNote(title: String, input: NativeMarkdownInput, folder: String?, allowShared: Bool) throws -> NativeCreateResult
     func createQuickNote(title: String, markdown: String, folder: String?, allowShared: Bool) throws -> NativeCreateResult
     func insertRecording(_ ref: String, frozen: FrozenAttachmentInput, title: String?, duration: Double,
                          transcript: [TranscriptWord], allowShared: Bool) throws -> NativeRecordingResult
@@ -633,9 +648,33 @@ public protocol NotesNativeWriting {
     func editSmartFolderRules(_ ref: String, queryJSON: String, expectedCount: Int) throws -> NativeWriteResult
     func deleteSmartFolder(_ ref: String, expectedCount: Int) throws -> NativeWriteResult
     func writeMarkdown(_ ref: String, markdown: String, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult
+    func writeMarkdown(_ ref: String, input: NativeMarkdownInput, dryRun: Bool, backup: Bool, allowShared: Bool) throws -> NativeWriteResult
     func appendMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
     func prependMarkdown(_ ref: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
     func insertMarkdown(_ ref: String, underHeading heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
     func replaceSection(_ ref: String, heading: String, markdown: String, allowShared: Bool) throws -> NativeWriteResult
     func replaceText(_ ref: String, find: String, replacement: String, allowShared: Bool) throws -> NativeWriteResult
+}
+
+public extension NotesNativeWriting {
+    func createNote(title: String, input: NativeMarkdownInput, folder: String?,
+                    allowShared: Bool) throws -> NativeCreateResult {
+        guard NotesMarkdownDocument(parsing: input.source).localResources.isEmpty else {
+            throw NotesError("unsupported_operation",
+                             "This NotesNativeWriting implementation does not support ordered Markdown resources.")
+        }
+        return try createNote(title: title, markdown: input.source, folder: folder,
+                              attachments: input.trailingAttachments, allowShared: allowShared)
+    }
+
+    func writeMarkdown(_ ref: String, input: NativeMarkdownInput, dryRun: Bool,
+                       backup: Bool, allowShared: Bool) throws -> NativeWriteResult {
+        guard input.trailingAttachments.isEmpty,
+              NotesMarkdownDocument(parsing: input.source).localResources.isEmpty else {
+            throw NotesError("unsupported_operation",
+                             "This NotesNativeWriting implementation does not support ordered Markdown resources.")
+        }
+        return try writeMarkdown(ref, markdown: input.source, dryRun: dryRun,
+                                 backup: backup, allowShared: allowShared)
+    }
 }

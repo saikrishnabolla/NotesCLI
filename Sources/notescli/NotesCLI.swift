@@ -261,9 +261,17 @@ struct Add: ParsableCommand {
     func validate() throws { try validateBodySources(body: body, stdin: stdin, file: file, allowEditor: true) }
     func run() throws {
         let backend = try options.writable()
-        let markdown = try inputBody(body: body, stdin: stdin, file: file, allowEditor: true)
-        if !attach.isEmpty { try writeExtraCreate(options: options, write: write, title: title, folder: folder, markdown: markdown, paths: attach); return }
-        let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
+        let markdownInput = try inputMarkdown(body: body, stdin: stdin, file: file, allowEditor: true)
+        let markdown = markdownInput.source
+        if !attach.isEmpty {
+            try writeExtraCreate(options: options, write: write, title: title, folder: folder,
+                                 markdown: markdownInput, paths: attach)
+            return
+        }
+        let selected = try UnifiedNative.engine(
+            options, scriptingAvailable: true, fake: backend.isFake,
+            requiresNativeMarkdown: markdownRequiresNative(markdown)
+        )
         let targetPath = try SafetyExecutor.folderPath(folder, reader: backend.reader)
         let paths = targetPath.map { [$0] } ?? []
         let plan = DryRunPlan(operation: "createNote", target: title, arguments: ["folder": folder ?? ""],
@@ -278,8 +286,12 @@ struct Add: ParsableCommand {
                 case .native where backend.isFake:
                     return try backend.writer().createNote(title: title, markdown: markdown, folder: folder)
                 case .native:
-                    let value = try NativeNotesWriter().createNote(title: title, markdown: markdown, folder: folder,
-                                                                   attachments: [], allowShared: write.allowShared)
+                    let value = try NativeNotesWriter().createNote(
+                        title: title,
+                        input: NativeMarkdownInput(source: markdown,
+                                                   assetBaseDirectory: markdownInput.assetBaseDirectory),
+                        folder: folder, allowShared: write.allowShared
+                    )
                     native = value
                     return value.write.writeResult
                 }
@@ -299,14 +311,18 @@ struct Append: ParsableCommand {
     func validate() throws { try validateBodySources(body: body, stdin: stdin) }
     func run() throws {
         let backend = try options.writable(), note = try backend.reader.note(ref)
-        let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
+        let markdownInput = try inputMarkdown(body: body, stdin: stdin)
+        let markdown = markdownInput.source
+        let selected = try UnifiedNative.engine(
+            options, scriptingAvailable: true, fake: backend.isFake,
+            requiresNativeMarkdown: markdownRequiresNative(markdown)
+        )
         if selected == .scripting {
             try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: write.allowDowngrade)
         }
         if selected == .scripting, note.summary.attachmentCount > 0 {
             throw NotesError("attachments_would_be_lost", "Appending through HTML could remove existing attachments; the note was not changed.")
         }
-        let markdown = try inputBody(body: body, stdin: stdin)
         let currentHTML = try SafetyExecutor.plannedHTML(note, backend: backend, write: write)
         let plan = DryRunPlan(operation: "appendToNote", target: note.summary.id.uuid, arguments: ["body": markdown],
                               resultingHTML: currentHTML + MarkdownToNotesHTML.convert(markdown).html, engine: selected.rawValue)
@@ -317,7 +333,12 @@ struct Append: ParsableCommand {
                 switch selected {
                 case .scripting: return try backend.writer().appendToNote(note.summary.id.uuid, markdown: markdown)
                 case .native:
-                    let value = try NativeNotesWriter().appendMarkdown(note.summary.id.uuid, markdown: markdown, allowShared: write.allowShared)
+                    let value = try NativeNotesWriter().appendMarkdown(
+                        note.summary.id.uuid,
+                        input: NativeMarkdownInput(source: markdown,
+                                                   assetBaseDirectory: markdownInput.assetBaseDirectory),
+                        allowShared: write.allowShared
+                    )
                     native = value; return value.writeResult
                 }
             }) {

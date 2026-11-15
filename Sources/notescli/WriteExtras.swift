@@ -7,20 +7,26 @@ import NotesMCP
 import NotesNative
 import NotesSafety
 
-func writeExtraCreate(options: GlobalOptions, write: WriteOptions, title: String, folder: String?, markdown: String, paths: [String]) throws {
+func writeExtraCreate(options: GlobalOptions, write: WriteOptions, title: String, folder: String?,
+                      markdown: MarkdownSourceInput, paths: [String]) throws {
     let backend = try options.writable()
     _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
     let targetPath = try SafetyExecutor.folderPath(folder, reader: backend.reader)
     let plan = DryRunPlan(operation: "createNote", target: title,
                           arguments: ["folder": folder ?? "", "attachments": paths.joined(separator: ",")],
-                          resultingHTML: SafetyExecutor.bodyHTML(title: title, markdown: markdown), engine: "native")
+                          resultingHTML: SafetyExecutor.bodyHTML(title: title, markdown: markdown.source), engine: "native")
     var captured: NativeCreateResult?
     let result = try SafetyExecutor.run(options: write, operation: "createNote",
-        arguments: ["title": title, "body": markdown, "folder": folder ?? "", "attachments": paths.joined(separator: ","), "engine": "native"],
+        arguments: ["title": title, "body": markdown.source, "folder": folder ?? "", "attachments": paths.joined(separator: ","), "engine": "native"],
         allowedPaths: targetPath.map { [$0] } ?? [], plan: plan) {
             let frozen = try paths.map { try FrozenAttachmentInput(file: URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)) }
-            let value = try NativeNotesWriter().createNote(title: title, markdown: markdown, folder: folder,
-                                                           attachments: frozen, allowShared: write.allowShared)
+            let value = try NativeNotesWriter().createNote(
+                title: title,
+                input: NativeMarkdownInput(source: markdown.source,
+                                           assetBaseDirectory: markdown.assetBaseDirectory,
+                                           trailingAttachments: frozen),
+                folder: folder, allowShared: write.allowShared
+            )
             captured = value
             return value.write.writeResult
         }
@@ -88,7 +94,8 @@ func writeExtraEdit(options: GlobalOptions, write: WriteOptions, ref: String) th
     let portableAttachments = note.attachments.map { attachment -> Attachment in
         var copy = attachment; copy.filePath = nil; copy.url = nil; copy.pageImagePaths = nil; copy.fallbackRasterPath = nil; return copy
     }
-    let original = NoteRenderer.markdown(document, attachments: portableAttachments)
+    let original = NoteRenderer.markdown(document, attachments: portableAttachments,
+                                         preserveNativeAttachments: true)
     let edited = try editor(original)
     if edited == original {
         try outputEngineWrite(EngineWriteResponse(engine: selected.rawValue,
@@ -103,8 +110,15 @@ func writeExtraEdit(options: GlobalOptions, write: WriteOptions, ref: String) th
         allowedPaths: [note.summary.folderPath], destructive: true, plan: plan) {
             switch selected {
             case .native:
-                let value = try NativeNotesWriter().writeMarkdown(note.summary.id.uuid, markdown: edited, dryRun: false,
-                                                                  backup: false, allowShared: write.allowShared)
+                let value = try NativeNotesWriter().writeMarkdown(
+                    note.summary.id.uuid,
+                    input: NativeMarkdownInput(
+                        source: edited,
+                        assetBaseDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath,
+                                                isDirectory: true)
+                    ),
+                    dryRun: false, backup: false, allowShared: write.allowShared
+                )
                 native = value; return value.writeResult
             case .scripting:
                 return try backend.writer().replaceBody(note.summary.id.uuid, markdown: edited, allowAttachmentLoss: write.allowAttachmentLoss)

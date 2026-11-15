@@ -635,9 +635,13 @@ struct RevertCommand: ParsableCommand {
 
 private func bodyEdit(options: GlobalOptions, write: WriteOptions, ref: String, operation: String,
                       arguments: [String: String], resultingHTML: (Note, String) throws -> String,
+                      nativeInput: NativeMarkdownInput? = nil,
                       action: (any NotesWriting) throws -> WriteResult) throws {
     let backend = try options.writable(), note = try backend.reader.note(ref)
-    let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
+    let selected = try UnifiedNative.engine(
+        options, scriptingAvailable: true, fake: backend.isFake,
+        requiresNativeMarkdown: nativeInput.map { markdownRequiresNative($0.source) } ?? false
+    )
     if selected == .scripting {
         try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(note, allowDowngrade: write.allowDowngrade)
         try SafetyExecutor.requireAttachmentSafety(note, allowLoss: write.allowAttachmentLoss)
@@ -658,9 +662,17 @@ private func bodyEdit(options: GlobalOptions, write: WriteOptions, ref: String, 
             if selected == .scripting { return try action(writer) }
             let value: NativeWriteResult
             switch operation {
-            case "prependToNote": value = try NativeNotesWriter().prependMarkdown(note.summary.id.uuid, markdown: arguments["body"]!, allowShared: write.allowShared)
-            case "insertUnderHeading": value = try NativeNotesWriter().insertMarkdown(note.summary.id.uuid, underHeading: arguments["heading"]!, markdown: arguments["body"]!, allowShared: write.allowShared)
-            case "replaceSection": value = try NativeNotesWriter().replaceSection(note.summary.id.uuid, heading: arguments["heading"]!, markdown: arguments["body"]!, allowShared: write.allowShared)
+            case "prependToNote": value = try NativeNotesWriter().prependMarkdown(
+                note.summary.id.uuid, input: nativeInput!, allowShared: write.allowShared
+            )
+            case "insertUnderHeading": value = try NativeNotesWriter().insertMarkdown(
+                note.summary.id.uuid, underHeading: arguments["heading"]!, input: nativeInput!,
+                allowShared: write.allowShared
+            )
+            case "replaceSection": value = try NativeNotesWriter().replaceSection(
+                note.summary.id.uuid, heading: arguments["heading"]!, input: nativeInput!,
+                allowShared: write.allowShared
+            )
             case "replaceText": value = try NativeNotesWriter().replaceText(note.summary.id.uuid, find: arguments["find"]!, replacement: arguments["replacement"]!, allowShared: write.allowShared)
             default: throw NotesError("unsupported_operation", "The native engine does not support \(operation).")
             }
@@ -728,8 +740,10 @@ struct PrependCommand: ParsableCommand {
     @Argument var ref: String; @Option var body: String?; @Flag var stdin = false
     func validate() throws { try validateBodySources(body: body, stdin: stdin) }
     func run() throws {
-        let markdown = try inputBody(body: body, stdin: stdin)
-        try bodyEdit(options: options, write: write, ref: ref, operation: "prependToNote", arguments: ["body": markdown], resultingHTML: { _, html in try HTMLPlan.prepend(html, markdown: markdown) }) {
+        let source = try inputMarkdown(body: body, stdin: stdin)
+        let markdown = source.source
+        let input = NativeMarkdownInput(source: markdown, assetBaseDirectory: source.assetBaseDirectory)
+        try bodyEdit(options: options, write: write, ref: ref, operation: "prependToNote", arguments: ["body": markdown], resultingHTML: { _, html in try HTMLPlan.prepend(html, markdown: markdown) }, nativeInput: input) {
             try $0.prependToNote(ref, markdown: markdown, allowAttachmentLoss: write.allowAttachmentLoss)
         }
     }
@@ -740,8 +754,10 @@ struct InsertUnderHeadingCommand: ParsableCommand {
     @Argument var ref: String; @Argument var heading: String; @Option var body: String?; @Flag var stdin = false
     func validate() throws { try validateBodySources(body: body, stdin: stdin) }
     func run() throws {
-        let markdown = try inputBody(body: body, stdin: stdin)
-        try bodyEdit(options: options, write: write, ref: ref, operation: "insertUnderHeading", arguments: ["heading": heading, "body": markdown], resultingHTML: { _, html in try HTMLPlan.insert(html, heading: heading, markdown: markdown) }) {
+        let source = try inputMarkdown(body: body, stdin: stdin)
+        let markdown = source.source
+        let input = NativeMarkdownInput(source: markdown, assetBaseDirectory: source.assetBaseDirectory)
+        try bodyEdit(options: options, write: write, ref: ref, operation: "insertUnderHeading", arguments: ["heading": heading, "body": markdown], resultingHTML: { _, html in try HTMLPlan.insert(html, heading: heading, markdown: markdown) }, nativeInput: input) {
             try $0.insertUnderHeading(ref, heading: heading, markdown: markdown, allowAttachmentLoss: write.allowAttachmentLoss)
         }
     }
@@ -752,8 +768,10 @@ struct ReplaceSectionCommand: ParsableCommand {
     @Argument var ref: String; @Argument var heading: String; @Option var body: String?; @Flag var stdin = false
     func validate() throws { try validateBodySources(body: body, stdin: stdin) }
     func run() throws {
-        let markdown = try inputBody(body: body, stdin: stdin)
-        try bodyEdit(options: options, write: write, ref: ref, operation: "replaceSection", arguments: ["heading": heading, "body": markdown], resultingHTML: { _, html in try HTMLPlan.section(html, heading: heading, markdown: markdown) }) {
+        let source = try inputMarkdown(body: body, stdin: stdin)
+        let markdown = source.source
+        let input = NativeMarkdownInput(source: markdown, assetBaseDirectory: source.assetBaseDirectory)
+        try bodyEdit(options: options, write: write, ref: ref, operation: "replaceSection", arguments: ["heading": heading, "body": markdown], resultingHTML: { _, html in try HTMLPlan.section(html, heading: heading, markdown: markdown) }, nativeInput: input) {
             try $0.replaceSection(ref, heading: heading, markdown: markdown, allowAttachmentLoss: write.allowAttachmentLoss)
         }
     }

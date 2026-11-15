@@ -248,7 +248,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *NCInstanceSelectors(void
                      @"addSynapseLinkAttachmentWithContentItem:",
                      @"setShouldAddMediaAsynchronously:", @"updateChangeCountWithReason:", @"addGalleryAttachmentWithIdentifier:"],
         @"ICInlineAttachment": @[@"markForDeletion"],
-        @"ICTTParagraphStyle": @[@"setStyle:", @"setIndent:", @"setBlockQuoteLevel:", @"todo", @"setUuid:", @"setTodo:"],
+        @"ICTTParagraphStyle": @[@"setStyle:", @"setIndent:", @"setBlockQuoteLevel:", @"setStartingItemNumber:", @"todo", @"setUuid:", @"setTodo:"],
         @"ICTTFont": @[@"initWithName:size:hints:", @"fontName", @"pointSize", @"fontHints"],
         @"ICOutlineState": @[@"initWithCollapsedUUIDs:", @"data", @"collapsedUUIDStrings"],
         @"ICTTTodo": @[@"initWithIdentifier:done:", @"todoWithDone:"],
@@ -383,10 +383,15 @@ static void NCInstallTableStyleMethod(void) {
 }
 
 + (id)paragraphStyle:(NSInteger)style indent:(NSInteger)indent quote:(NSInteger)quote checked:(NSInteger)checked basedOn:(id)existing error:(NSError **)error {
+    return [self paragraphStyle:style indent:indent quote:quote checked:checked startNumber:-1 basedOn:existing error:error];
+}
+
++ (id)paragraphStyle:(NSInteger)style indent:(NSInteger)indent quote:(NSInteger)quote checked:(NSInteger)checked startNumber:(NSInteger)startNumber basedOn:(id)existing error:(NSError **)error {
     if (!NCLoad(error)) return nil;
     Class cls = NSClassFromString(@"ICTTParagraphStyle"), todoClass = NSClassFromString(@"ICTTTodo");
     if (!cls || !todoClass) { if (error) *error = NCError(@"required class missing: ICTTParagraphStyle or ICTTTodo"); return nil; }
     if (!NCRequireObject(existing ?: [cls alloc], @[@"setStyle:", @"setIndent:", @"setBlockQuoteLevel:", @"todo"], @"creating paragraph style", error)) return nil;
+    if (startNumber >= 0 && !NCRequireObject(existing ?: [cls alloc], @[@"setStartingItemNumber:"], @"setting numbered-list start", error)) return nil;
     if (checked >= 0 && !NCRequireObject([todoClass alloc], @[@"initWithIdentifier:done:"], @"creating checklist state", error)) return nil;
     if (checked >= 0 && existing) {
         __block id prior = nil;
@@ -397,6 +402,7 @@ static void NCInstallTableStyleMethod(void) {
     if (!NCCatch(@"creating paragraph style", error, ^{
         id<NCParagraph> made = existing ? [existing mutableCopy] : [[cls alloc] init];
         [made setStyle:(NSUInteger)style]; [made setIndent:(NSUInteger)MAX(0, indent)]; [made setBlockQuoteLevel:(NSUInteger)MAX(0, quote)];
+        if (startNumber >= 0) [(NSObject *)made setValue:@(startNumber) forKey:@"startingItemNumber"];
         id todo = nil;
         if (checked >= 0) { id prior = [made todo]; todo = prior ? [(id<NCTodo>)prior todoWithDone:checked == 1] : [(id<NCTodo>)[todoClass alloc] initWithIdentifier:NSUUID.UUID done:checked == 1]; }
         [(NSObject *)made setValue:todo forKey:@"todo"];

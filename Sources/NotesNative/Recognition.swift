@@ -116,6 +116,12 @@ enum NativeImageMetadata {
         }
     }
 
+    static func requireActive(markedForDeletion: Bool, attachmentID: String) throws {
+        guard !markedForDeletion else {
+            throw NotesError("attachment_not_found", "No active attachment matches \(attachmentID) in this note.")
+        }
+    }
+
     static func versionMatches(summary: String?, version: Int) -> Bool {
         summary == nil ? version == 0 : version > 0
     }

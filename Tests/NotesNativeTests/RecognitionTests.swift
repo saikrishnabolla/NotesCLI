@@ -121,17 +121,17 @@ final class RecognitionTests: XCTestCase {
         context.persistentStoreCoordinator = coordinator
         let attachment = NSEntityDescription.insertNewObject(forEntityName: "ICAttachment", into: context)
 
-        _ = try NCNotesRuntime.setOCRSummary("Exact OCR", attachment: attachment)
+        _ = try NCNotesRuntime.setOCRSummary("Exact OCR", version: 7, attachment: attachment)
         XCTAssertEqual(attachment.value(forKey: "ocrSummary") as? String, "Exact OCR")
-        XCTAssertEqual((attachment.value(forKey: "ocrSummaryVersion") as? NSNumber)?.intValue, 1)
-        _ = try NCNotesRuntime.setOCRSummary(nil, attachment: attachment)
+        XCTAssertEqual((attachment.value(forKey: "ocrSummaryVersion") as? NSNumber)?.intValue, 7)
+        _ = try NCNotesRuntime.setOCRSummary(nil, version: 0, attachment: attachment)
         XCTAssertNil(attachment.value(forKey: "ocrSummary"))
         XCTAssertEqual((attachment.value(forKey: "ocrSummaryVersion") as? NSNumber)?.intValue, 0)
 
-        _ = try NCNotesRuntime.setImageClassificationSummary("receipt, document", attachment: attachment)
+        _ = try NCNotesRuntime.setImageClassificationSummary("receipt, document", version: 9, attachment: attachment)
         XCTAssertEqual(attachment.value(forKey: "imageClassificationSummary") as? String, "receipt, document")
-        XCTAssertEqual((attachment.value(forKey: "imageClassificationSummaryVersion") as? NSNumber)?.intValue, 4)
-        _ = try NCNotesRuntime.setImageClassificationSummary(nil, attachment: attachment)
+        XCTAssertEqual((attachment.value(forKey: "imageClassificationSummaryVersion") as? NSNumber)?.intValue, 9)
+        _ = try NCNotesRuntime.setImageClassificationSummary(nil, version: 0, attachment: attachment)
         XCTAssertNil(attachment.value(forKey: "imageClassificationSummary"))
         XCTAssertEqual((attachment.value(forKey: "imageClassificationSummaryVersion") as? NSNumber)?.intValue, 0)
     }
@@ -140,6 +140,13 @@ final class RecognitionTests: XCTestCase {
         XCTAssertNoThrow(try NativeImageMetadata.requireImage(typeUTI: "public.jpeg", attachmentID: "image"))
         XCTAssertThrowsError(try NativeImageMetadata.requireImage(typeUTI: "public.plain-text", attachmentID: "text")) {
             XCTAssertEqual(($0 as? NotesError)?.code, "image_metadata_attachment_not_image")
+        }
+    }
+
+    func testImageMetadataRejectsDeletedAttachment() throws {
+        XCTAssertNoThrow(try NativeImageMetadata.requireActive(markedForDeletion: false, attachmentID: "image"))
+        XCTAssertThrowsError(try NativeImageMetadata.requireActive(markedForDeletion: true, attachmentID: "image")) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "attachment_not_found")
         }
     }
 

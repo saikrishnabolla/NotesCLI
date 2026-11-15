@@ -253,7 +253,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *NCInstanceSelectors(void
         @"ICOutlineState": @[@"initWithCollapsedUUIDs:", @"data", @"collapsedUUIDStrings"],
         @"ICTTTodo": @[@"initWithIdentifier:done:", @"todoWithDone:"],
         @"ICAttachment": @[@"markForDeletion", @"attachmentModel", @"updateChangeCountWithReason:", @"setPreferredViewSize:", @"addLocationIfNeeded",
-                            @"hasSynapseLink", @"synapseData"],
+                            @"hasSynapseLink", @"synapseData", @"setOcrSummary:", @"setImageClassificationSummary:"],
         @"ICAttachmentGalleryModel": @[@"subAttachmentCount", @"subAttachmentIdentifierAtIndex:",
                                         @"indexOfSubAttachmentWithIdentifier:", @"insertSubAttachment:atIndex:"],
         @"ICDocCamScannedDocumentEditor": @[@"initWithGalleryAttachment:", @"applyFilter:forAttachmentWithIdentifier:",
@@ -2013,23 +2013,23 @@ static id<NCScanEditor> NCNewScanEditor(NSManagedObject *gallery, NSError **erro
     return changed;
 }
 
-+ (BOOL)setOCRSummary:(NSString *)summary attachment:(NSManagedObject *)attachment error:(NSError **)error {
++ (BOOL)setOCRSummary:(NSString *)summary version:(NSInteger)version attachment:(NSManagedObject *)attachment error:(NSError **)error {
     if (!NCRequireObject(attachment, @[@"setOcrSummary:", @"ocrSummary", @"ocrSummaryVersion"],
                          @"updating OCR summary", error)) return NO;
     return NCCatch(@"updating OCR summary", error, ^{
         ((void (*)(id, SEL, id))objc_msgSend)(attachment, NSSelectorFromString(@"setOcrSummary:"), summary);
-        [attachment setValue:@(summary != nil ? 1 : 0) forKey:@"ocrSummaryVersion"];
+        [attachment setValue:@(summary != nil ? version : 0) forKey:@"ocrSummaryVersion"];
     });
 }
 
-+ (BOOL)setImageClassificationSummary:(NSString *)summary attachment:(NSManagedObject *)attachment error:(NSError **)error {
++ (BOOL)setImageClassificationSummary:(NSString *)summary version:(NSInteger)version attachment:(NSManagedObject *)attachment error:(NSError **)error {
     if (!NCRequireObject(attachment, @[@"setImageClassificationSummary:", @"imageClassificationSummary",
                                       @"imageClassificationSummaryVersion"],
                          @"updating image classification summary", error)) return NO;
     return NCCatch(@"updating image classification summary", error, ^{
         ((void (*)(id, SEL, id))objc_msgSend)(attachment,
             NSSelectorFromString(@"setImageClassificationSummary:"), summary);
-        [attachment setValue:@(summary != nil ? 4 : 0) forKey:@"imageClassificationSummaryVersion"];
+        [attachment setValue:@(summary != nil ? version : 0) forKey:@"imageClassificationSummaryVersion"];
     });
 }
 

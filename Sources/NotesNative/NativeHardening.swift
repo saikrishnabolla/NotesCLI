@@ -271,7 +271,9 @@ enum SnapshotRestoreVerification {
         var parentID: String?
         var handwritingText: String?
         var ocrText: String?
+        var ocrSummaryVersion: Int?
         var imageClassification: String?
+        var imageClassificationSummaryVersion: Int?
     }
 
     private static func attachmentSignatures(_ attachments: [Attachment]) -> Set<AttachmentSignature>? {
@@ -279,7 +281,9 @@ enum SnapshotRestoreVerification {
         var parents: [String: String] = [:]
         var handwriting: [String: String?] = [:]
         var ocr: [String: String?] = [:]
+        var ocrVersion: [String: Int?] = [:]
         var imageClassification: [String: String?] = [:]
+        var imageClassificationVersion: [String: Int?] = [:]
         var valid = true
         func record(_ attachment: Attachment, parentID: String?) {
             if let existing = types[attachment.id], existing != attachment.typeUTI { valid = false }
@@ -288,8 +292,10 @@ enum SnapshotRestoreVerification {
             handwriting[attachment.id] = attachment.handwritingText
             if let existing = ocr[attachment.id], existing != attachment.ocrText { valid = false }
             ocr[attachment.id] = attachment.ocrText
+            ocrVersion[attachment.id] = attachment.ocrSummaryVersion
             if let existing = imageClassification[attachment.id], existing != attachment.imageClassification { valid = false }
             imageClassification[attachment.id] = attachment.imageClassification
+            imageClassificationVersion[attachment.id] = attachment.imageClassificationSummaryVersion
             if let parentID {
                 if let existing = parents[attachment.id], existing != parentID { valid = false }
                 parents[attachment.id] = parentID
@@ -306,7 +312,9 @@ enum SnapshotRestoreVerification {
             AttachmentSignature(id: $0.key, typeUTI: $0.value, parentID: parents[$0.key],
                                 handwritingText: handwriting[$0.key] ?? nil,
                                 ocrText: ocr[$0.key] ?? nil,
-                                imageClassification: imageClassification[$0.key] ?? nil)
+                                ocrSummaryVersion: ocrVersion[$0.key] ?? nil,
+                                imageClassification: imageClassification[$0.key] ?? nil,
+                                imageClassificationSummaryVersion: imageClassificationVersion[$0.key] ?? nil)
         })
     }
 

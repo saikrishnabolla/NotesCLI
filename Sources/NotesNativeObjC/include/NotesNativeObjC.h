@@ -204,12 +204,12 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)setHandwritingSummary:(nullable NSString *)summary attachment:(NSManagedObject *)attachment
                          error:(NSError **)error
     NS_SWIFT_NAME(setHandwritingSummary(_:attachment:));
-+ (BOOL)setOCRSummary:(nullable NSString *)summary attachment:(NSManagedObject *)attachment
++ (BOOL)setOCRSummary:(nullable NSString *)summary version:(NSInteger)version attachment:(NSManagedObject *)attachment
                  error:(NSError **)error
-    NS_SWIFT_NAME(setOCRSummary(_:attachment:));
-+ (BOOL)setImageClassificationSummary:(nullable NSString *)summary attachment:(NSManagedObject *)attachment
-                                 error:(NSError **)error
-    NS_SWIFT_NAME(setImageClassificationSummary(_:attachment:));
+    NS_SWIFT_NAME(setOCRSummary(_:version:attachment:));
++ (BOOL)setImageClassificationSummary:(nullable NSString *)summary version:(NSInteger)version
+                             attachment:(NSManagedObject *)attachment error:(NSError **)error
+    NS_SWIFT_NAME(setImageClassificationSummary(_:version:attachment:));
 + (nullable NSDictionary<NSString *, id> *)regenerateFallbackPDFForAttachment:(NSManagedObject *)attachment
                                                                          error:(NSError **)error
     NS_SWIFT_NAME(regenerateFallbackPDF(for:));

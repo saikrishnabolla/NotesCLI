@@ -2939,18 +2939,22 @@ public final class NativeNotesWriter: NotesNativeWriting {
             try refreshIfStale(note)
             guard let attachment = try fetch(
                 "ICAttachment",
-                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, note),
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, note),
                 in: context,
                 limit: 1
             ).first else {
                 throw NotesError("attachment_not_found", "No attachment matches \(attachmentID) in this note.")
             }
+            try NativeImageMetadata.requireActive(
+                markedForDeletion: (value(attachment, "markedForDeletion") as? NSNumber)?.boolValue == true,
+                attachmentID: attachmentID
+            )
             let typeUTI = value(attachment, "typeUTI") as? String ?? ""
             try NativeImageMetadata.requireImage(typeUTI: typeUTI, attachmentID: attachmentID)
             do {
                 switch field {
-                case .ocr: _ = try NCNotesRuntime.setOCRSummary(summary, attachment: attachment)
-                case .labels: _ = try NCNotesRuntime.setImageClassificationSummary(summary, attachment: attachment)
+                case .ocr: _ = try NCNotesRuntime.setOCRSummary(summary, version: summary == nil ? 0 : 1, attachment: attachment)
+                case .labels: _ = try NCNotesRuntime.setImageClassificationSummary(summary, version: summary == nil ? 0 : 4, attachment: attachment)
                 }
                 try save(context, notes: [note])
             } catch {
@@ -2962,7 +2966,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let fresh = try note(noteID, in: context)
             guard let attachment = try fetch(
                 "ICAttachment",
-                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh),
+                predicate: NSPredicate(format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, fresh),
                 in: context,
                 limit: 1
             ).first else {
@@ -5274,14 +5278,17 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     if currentOCR != saved.ocrText ||
                         (saved.ocrSummaryVersion.map { $0 != currentOCRVersion } ??
                          !NativeImageMetadata.versionMatches(summary: saved.ocrText, version: currentOCRVersion)) {
-                        _ = try NCNotesRuntime.setOCRSummary(saved.ocrText, attachment: attachment)
+                        _ = try NCNotesRuntime.setOCRSummary(saved.ocrText,
+                            version: saved.ocrSummaryVersion ?? (saved.ocrText == nil ? 0 : 1), attachment: attachment)
                     }
                     let currentLabels = self.value(attachment, "imageClassificationSummary") as? String
                     let currentLabelVersion = (self.value(attachment, "imageClassificationSummaryVersion") as? NSNumber)?.intValue ?? 0
                     if currentLabels != saved.imageClassification ||
                         (saved.imageClassificationSummaryVersion.map { $0 != currentLabelVersion } ??
                          !NativeImageMetadata.versionMatches(summary: saved.imageClassification, version: currentLabelVersion)) {
-                        _ = try NCNotesRuntime.setImageClassificationSummary(saved.imageClassification, attachment: attachment)
+                        _ = try NCNotesRuntime.setImageClassificationSummary(saved.imageClassification,
+                            version: saved.imageClassificationSummaryVersion ?? (saved.imageClassification == nil ? 0 : 4),
+                            attachment: attachment)
                     }
                 }
                 guard let snapshotDocument = snapshot.document else {

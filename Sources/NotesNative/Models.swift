@@ -31,6 +31,8 @@ public struct NativeDoctorReport: Codable, Sendable {
         "-[ICNote addSynapseLinkAttachmentWithContentItem:]",
         "-[ICAttachment hasSynapseLink]",
         "-[ICAttachment synapseData]",
+        "-[ICAttachment setOcrSummary:]",
+        "-[ICAttachment setImageClassificationSummary:]",
         "-[ICOutlineState initWithCollapsedUUIDs:]",
         "-[ICOutlineState data]",
         "-[ICOutlineState collapsedUUIDStrings]",

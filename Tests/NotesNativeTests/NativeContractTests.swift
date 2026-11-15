@@ -16,6 +16,9 @@ private struct FakeNativeContractRuntime: NativeContractRuntime {
     func methodEncoding(class name: String, selector: String, isClassMethod: Bool) -> String? {
         encodings["\(isClassMethod ? "+" : "-")[\(name) \(selector)]"]
     }
+    func methodEncodings(selector: String) -> Set<String> {
+        Set(encodings.compactMap { key, value in key.hasSuffix(" \(selector)]") ? value : nil })
+    }
     func attributes(entity: String) -> Set<String>? { entities[entity] }
     func hasKVCKey(_ key: String) -> Bool { kvcKeys.contains(key) }
     func hasIvar(_ name: String) -> Bool { ivars.contains(name) }
@@ -34,7 +37,8 @@ final class NativeContractTests: XCTestCase {
             return NativeFeatureContractReport(feature: candidate, failures: failures, ok: failures.isEmpty)
         }
         return NativeContractReport(schemaVersion: 1, verifiedOSBuild: "26B131", osBuild: "26B131",
-                                    macOS: "27.2.1", dyldSharedCacheUUID: "test", manifestHash: "test",
+                                    macOS: "27.2.1", dyldSharedCacheUUID: "test", frameworkUUIDs: [:],
+                                    manifestHash: "test",
                                     cliVersion: "test", cacheKey: "test", checkedAt: Date(),
                                     classCount: 0, selectorCount: 0, kvcKeyCount: 0, ivarCount: 0,
                                     objcMessageCount: 0, abiEncodingCount: 0,
@@ -44,14 +48,14 @@ final class NativeContractTests: XCTestCase {
     func testChangedEncodingFailsOnlyOwningFeature() throws {
         let table = NativeContractRequirement.selector(
             feature: .tables,
-            className: "ICTable",
+            classNames: ["ICTable"],
             selector: "rowCount",
             isClassMethod: false,
             encoding: "Q16@0:8"
         )
         let core = NativeContractRequirement.selector(
             feature: .core,
-            className: "ICNote",
+            classNames: ["ICNote"],
             selector: "saveNoteData",
             isClassMethod: false,
             encoding: "B16@0:8"
@@ -76,7 +80,7 @@ final class NativeContractTests: XCTestCase {
 
     func testMissingSelectorAndColumnAreNamed() {
         let requirements: [NativeContractRequirement] = [
-            .selector(feature: .scans, className: "ICDocCamScannedDocumentEditor",
+            .selector(feature: .scans, classNames: ["ICDocCamScannedDocumentEditor"],
                       selector: "setQuad:forAttachmentWithIdentifier:", isClassMethod: false,
                       encoding: "v32@0:8@16@24"),
             .column(feature: .scans, table: "ZICCLOUDSYNCINGOBJECT", name: "ZMARKUPMODELDATA"),
@@ -112,7 +116,7 @@ final class NativeContractTests: XCTestCase {
 
     func testMissingGeneratedSelectorKVCKeyAndIvarFailClosed() {
         let requirements: [NativeContractRequirement] = [
-            .selector(feature: .paper, className: nil, selector: "paperSelector:",
+            .selector(feature: .paper, classNames: [], selector: "paperSelector:",
                       isClassMethod: nil, encoding: nil),
             .kvc(feature: .paper, name: "paperBundleURL"),
             .ivar(feature: .paper, name: "_paperArchive"),
@@ -127,16 +131,34 @@ final class NativeContractTests: XCTestCase {
         XCTAssertEqual(Set(failures.map(\.name)), ["paperSelector:", "paperBundleURL", "_paperArchive"])
     }
 
-    func testCacheKeyIncludesDyldManifestAndCLIVersion() {
+    func testUnownedSelectorCannotPassOnTheWrongClass() {
+        let requirement = NativeContractRequirement.selector(
+            feature: .core, classNames: [], selector: "saveNoteData",
+            isClassMethod: nil, encoding: "B@:")
+        let runtime = FakeNativeContractRuntime(
+            classes: ["UnrelatedClass"],
+            encodings: ["-[UnrelatedClass saveNoteData]": "B@:"])
+
+        let failures = NativeContractProbe.evaluate(requirements: [requirement], runtime: runtime)
+            .feature(.core).failures
+
+        XCTAssertEqual(failures.map(\.kind), [.selector])
+        XCTAssertEqual(failures.map(\.name), ["saveNoteData"])
+    }
+
+    func testCacheKeyIncludesSharedCacheFrameworksManifestAndCLIVersion() {
         let runtime = FakeNativeContractRuntime()
-        func key(_ dyld: String, _ manifest: String, _ version: String) -> String {
+        func key(_ dyld: String, _ frameworks: [String: String], _ manifest: String, _ version: String) -> String {
             NativeContractProbe.evaluate(requirements: [], runtime: runtime, dyldUUID: dyld,
+                                         frameworkUUIDs: frameworks,
                                          cliVersion: version, manifestHash: manifest).cacheKey
         }
-        let baseline = key("dyld-a", "manifest-a", "cli-a")
-        XCTAssertNotEqual(baseline, key("dyld-b", "manifest-a", "cli-a"))
-        XCTAssertNotEqual(baseline, key("dyld-a", "manifest-b", "cli-a"))
-        XCTAssertNotEqual(baseline, key("dyld-a", "manifest-a", "cli-b"))
+        let baseline = key("cache-a", ["NotesShared": "notes-a", "PaperKit": "paper-a"], "manifest-a", "cli-a")
+        XCTAssertNotEqual(baseline, key("cache-b", ["NotesShared": "notes-a", "PaperKit": "paper-a"], "manifest-a", "cli-a"))
+        XCTAssertNotEqual(baseline, key("cache-a", ["NotesShared": "notes-b", "PaperKit": "paper-a"], "manifest-a", "cli-a"))
+        XCTAssertNotEqual(baseline, key("cache-a", ["NotesShared": "notes-a", "PaperKit": "paper-b"], "manifest-a", "cli-a"))
+        XCTAssertNotEqual(baseline, key("cache-a", ["NotesShared": "notes-a", "PaperKit": "paper-a"], "manifest-b", "cli-a"))
+        XCTAssertNotEqual(baseline, key("cache-a", ["NotesShared": "notes-a", "PaperKit": "paper-a"], "manifest-a", "cli-b"))
     }
 
     func testPerFeatureFaultInjectionWritesZeroStoreBytes() throws {
@@ -161,6 +183,12 @@ final class NativeContractTests: XCTestCase {
             case .scans:
                 operation = { _ = try writer.setScanMarkupData("note", attachmentID: "scan", pageID: "page",
                                                                  data: Data([1]), allowShared: false) }
+            case .markup:
+                operation = { _ = try writer.setScanMarkupData("note", attachmentID: "scan", pageID: "page",
+                                                                 data: Data([1]), allowShared: false) }
+            case .links:
+                operation = { _ = try writer.insertNoteLink("note", target: "target", text: nil,
+                                                             position: nil, allowShared: false) }
             case .recordings:
                 operation = { _ = try writer.writeRecordingTranscripts("note", transcripts: ["audio": []], allowShared: false) }
             case .paper:
@@ -173,6 +201,72 @@ final class NativeContractTests: XCTestCase {
             }
             XCTAssertEqual(counter.bytesWritten, 0, feature.rawValue)
         }
+    }
+
+    func testCompositeCreateChecksTableAndTagContractsBeforeOpeningStore() throws {
+        for (feature, markdown) in [
+            (NativeContractFeature.tables, "| A |\n| - |\n| B |"),
+            (NativeContractFeature.tags, "[#hardening](notescli-tag:hardening)"),
+        ] {
+            let counter = StoreByteCounter()
+            let writer = NativeNotesWriter(
+                operationID: { "composite-fault" },
+                contextProvider: {
+                    counter.bytesWritten += 1
+                    throw NotesError("test", "The store must not open.")
+                },
+                contractProvider: { self.report(failing: feature) }
+            )
+
+            XCTAssertThrowsError(try writer.createNote(
+                title: "Gate", markdown: markdown, folder: nil, attachments: [], allowShared: false
+            )) {
+                XCTAssertEqual(($0 as? NotesError)?.code, "native_contract_changed")
+            }
+            XCTAssertEqual(counter.bytesWritten, 0, feature.rawValue)
+        }
+    }
+
+    func testEveryNativeWriteBoundaryDeclaresFeatures() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent(
+            "Sources/NotesNative/NativeNotesWriter.swift"), encoding: .utf8)
+        XCTAssertTrue(source.contains("func performWrite(features: Set<NativeContractFeature>"))
+        XCTAssertTrue(source.contains("func performWriteWithFreshReadback<Receipt>(\n        features: Set<NativeContractFeature>"))
+        XCTAssertTrue(source.contains("func performAttachmentWrite(features: Set<NativeContractFeature>"))
+
+        let expression = try NSRegularExpression(
+            pattern: #"\\bperform(?:Write|WriteWithFreshReadback|AttachmentWrite)\\b"#)
+        let full = NSRange(source.startIndex..., in: source)
+        let declarations = ["func performWrite", "func performWriteWithFreshReadback", "func performAttachmentWrite"]
+        var missing: [String] = []
+        for match in expression.matches(in: source, range: full) {
+            guard let range = Range(match.range, in: source) else { continue }
+            let prefix = String(source[source.index(range.lowerBound, offsetBy: -min(5, source.distance(from: source.startIndex, to: range.lowerBound)))..<range.lowerBound])
+            if prefix.hasSuffix("func ") { continue }
+            let tail = String(source[range.lowerBound..<source.index(range.lowerBound, offsetBy: min(180, source.distance(from: range.lowerBound, to: source.endIndex)))])
+            if declarations.contains(where: tail.hasPrefix) { continue }
+            if !tail.contains("features:") {
+                let line = source[..<range.lowerBound].reduce(into: 1) { if $1 == "\n" { $0 += 1 } }
+                missing.append("line \(line): \(tail.prefix(80))")
+            }
+        }
+        XCTAssertTrue(missing.isEmpty, missing.joined(separator: "\n"))
+    }
+
+    func testGeneratedManifestIncludesDirectMessagesAndOwners() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let generated = try String(contentsOf: root.appendingPathComponent(
+            "Sources/NotesNative/NativeContract.generated.swift"), encoding: .utf8)
+        for selector in ["beginEditing", "saveNoteData", "insertRowAtIndex:",
+                         "setOrientation:forAttachmentAtIndex:", "startSharedContextWithOptions:"] {
+            XCTAssertTrue(generated.contains("selector: \"\(selector)\""), selector)
+        }
+        XCTAssertTrue(generated.contains("classNames: [\"ICNote\"], selector: \"saveNoteData\", isClassMethod: false"))
+        XCTAssertTrue(generated.contains("classNames: [\"ICTable\"], selector: \"insertRowAtIndex:\", isClassMethod: false"))
+        XCTAssertTrue(generated.contains("classNames: [\"ICNoteContext\"], selector: \"startSharedContextWithOptions:\", isClassMethod: true"))
     }
 
     func testGeneratedManifestMatchesNativeSources() throws {

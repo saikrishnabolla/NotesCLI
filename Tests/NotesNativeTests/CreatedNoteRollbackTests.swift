@@ -52,7 +52,7 @@ final class CreatedNoteRollbackTests: XCTestCase {
     /// Mirrors a native create path: create the note, let a step fail, and pass the failure to the rollback.
     private func create(savedByNotes: Bool, committed: Bool = false) throws -> NativeWriteResult {
         let writer = writer!
-        return try writer.performWrite { context in
+        return try writer.performWrite(features: [.core]) { context in
             var createdNoteID: String?
             do {
                 let note = NSEntityDescription.insertNewObject(forEntityName: "Note", into: context)

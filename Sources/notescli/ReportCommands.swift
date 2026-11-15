@@ -33,9 +33,12 @@ struct ReportCreate: ParsableCommand {
         let reportTags = tags?.split(separator: ",").map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter { !$0.isEmpty } ?? []
-        let targetPath = try SafetyExecutor.folderPath(folder, reader: backend.reader)
+        let target = try NotesReportWriter.resolveTarget(
+            title: title, folder: folder, replacing: replace, reader: backend.reader
+        )
+        let replaced = replace ? target.existing.first : nil
         let plan = DryRunPlan(operation: "createReport", target: title,
-                              arguments: ["file": source.path, "folder": folder ?? "",
+                              arguments: ["file": source.path, "folder": target.folder.id,
                                           "tags": reportTags.joined(separator: ","),
                                           "replace": String(replace)],
                               resultingHTML: SafetyExecutor.bodyHTML(title: title, markdown: markdown),
@@ -43,14 +46,14 @@ struct ReportCreate: ParsableCommand {
         var captured: NativeReportResult?
         let result = try SafetyExecutor.run(
             options: write, operation: "createReport",
-            arguments: ["title": title, "file": source.path, "folder": folder ?? "",
+            arguments: ["title": title, "file": source.path, "folder": target.folder.id,
                         "tags": reportTags.joined(separator: ","), "replace": String(replace),
                         "engine": "native"],
-            allowedPaths: targetPath.map { [$0] } ?? [], destructive: replace, plan: plan
+            note: replaced, allowedPaths: [target.folder.path], destructive: replace, plan: plan
         ) {
             let value = try NotesReportWriter().create(NativeReportRequest(
                 title: title, markdown: markdown, assetBaseDirectory: source.deletingLastPathComponent(),
-                folder: folder, tags: reportTags, attachments: attach, replace: replace,
+                folder: target.folder.id, tags: reportTags, attachments: attach, replace: replace,
                 allowShared: write.allowShared
             ))
             captured = value

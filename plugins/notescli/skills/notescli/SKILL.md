@@ -9,7 +9,7 @@ Start broad reads with `list_notes` or `search_notes`, then call `get_note` only
 
 Use a dry run before a write. MCP write tools take `dry_run: true`; use `--dry-run` only when a command's help lists that flag. NotesCLI 1.0 does not expose a CLI write `--dry-run` flag.
 
-Use `create_report` for a research report that needs native tables, bare-URL preview cards, images, SVG or self-contained HTML diagrams, tags, checklists, attachments, citations, and dividers. It accepts Markdown through `body` or a server-side `file`; attachments may be local paths or HTTPS URLs. For the CLI, run `notescli report create --title "Report title" --file report.md --folder "Research" --tags research,sources --json`. Read the requested and written counts before claiming success. The call fails and removes the partial note if native readback does not match. Set `replace: true` or pass `--replace` when rerunning the same title.
+Use `create_report` for a research report that needs native tables, bare-URL preview cards, images, diagrams, tags, checklists, attachments, citations, and dividers. An `svg` fence or an `html diagram` fence renders as a diagram; a plain `html` fence stays code. The tool accepts Markdown through `body` or a server-side `file`; attachments may be local paths or HTTPS URLs. For the CLI, run `notescli report create --title "Report title" --file report.md --folder "Research" --tags research,sources --json`. Read the requested and written counts before claiming success. The call fails and removes the partial note if native readback does not match. Set `replace: true` or pass `--replace` when rerunning the same title.
 
 Read every write result's `outcome`:
 

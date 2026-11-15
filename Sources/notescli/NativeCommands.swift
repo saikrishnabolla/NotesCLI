@@ -110,7 +110,10 @@ func outputEngineWrite(_ input: EngineWriteResponse, options: GlobalOptions) thr
 
 enum UnifiedNative {
     static func nativeAvailable() -> Bool {
-        NativeNotesWriter().doctor().usable
+        if ProcessInfo.processInfo.environment["NOTESCLI_TEST_NATIVE_AVAILABLE"] == "0" {
+            return false
+        }
+        return NativeNotesWriter().doctor().usable
     }
     static func checklistAutoSort(_ o: GlobalOptions, _ w: WriteOptions, enabled: Bool) throws {
         let backend = try o.writable(); _ = try engine(o, scriptingAvailable: false, fake: backend.isFake)
@@ -159,18 +162,24 @@ enum UnifiedNative {
                        requiresNativeMarkdown: Bool = false) throws -> WriteEngine {
         switch options.resolvedEngine {
         case .native:
-            guard fake || nativeAvailable() else { throw NotesError("native_unavailable", "The native Notes framework check failed. Run notescli engine doctor --json.") }
+            let forcedAvailability = ProcessInfo.processInfo.environment["NOTESCLI_TEST_NATIVE_AVAILABLE"] == "0"
+            guard (fake && !forcedAvailability) || nativeAvailable() else {
+                if scriptingAvailable, !requiresNativeMarkdown, !options.engineWasExplicitlySelected {
+                    return .scripting
+                }
+                throw NotesError("native_unavailable", "The native Notes framework check failed. Run notescli engine doctor --json.")
+            }
             return .native
         case .scripting:
             if requiresNativeMarkdown {
                 throw NotesError(
                     "native_required",
                     "This Markdown contains native Notes elements that scripting cannot place without loss.",
-                    hint: "Pass --engine native explicitly to allow the private native writer."
+                    hint: "Remove --engine scripting to use the default native writer."
                 )
             }
             guard scriptingAvailable else {
-                throw NotesError("native_required", "This operation requires the private native engine.", hint: "Pass --engine native or set NOTESCLI_ENGINE=native.")
+                throw NotesError("native_required", "This operation requires the private native engine.", hint: "Remove --engine scripting to use the default native writer.")
             }
             return .scripting
         }

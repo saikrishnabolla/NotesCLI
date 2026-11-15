@@ -6,9 +6,9 @@ Read status: 85 Done, 8 Partial, and 2 Not possible. Write status: 71 Done, 12 P
 
 | Feature | Read | Write | Notes |
 | --- | --- | --- | --- |
-| Title style | Done | Done | Native paragraph style 0. Scripting imports `<h1>` as 24px bold body text; use `--engine native` for a native Title. |
-| Heading style | Done | Done | Native paragraph style 1. Scripting imports `<h2>` as 18px bold body text; use `--engine native` for a native Heading. |
-| Subheading style | Done | Done | Native paragraph style 2. Scripting imports `<h3>` as bold body text; use `--engine native` for a native Subheading. |
+| Title style | Done | Done | The default native engine writes paragraph style 0. Scripting imports `<h1>` as 24px bold body text. |
+| Heading style | Done | Done | The default native engine writes paragraph style 1. Scripting imports `<h2>` as 18px bold body text. |
+| Subheading style | Done | Done | The default native engine writes paragraph style 2. Scripting imports `<h3>` as bold body text. |
 | Body style | Done | Done | Native paragraph style 3. |
 | Monospaced style | Done | Done | Native paragraph style 4. |
 | Block quote | Done | Done | Paragraph style and quote level are preserved. |

@@ -18,7 +18,7 @@ public enum SnapshotRestorePolicy {
             throw NotesError(
                 "native_required",
                 "This snapshot contains native-only features: \(features.joined(separator: ", ")).",
-                hint: "Pass --engine native for a lossless restore, or --allow-downgrade to permit conversion."
+                hint: "Remove --engine scripting for a lossless native restore, or pass --allow-downgrade to permit conversion."
             )
         }
     }
@@ -29,7 +29,7 @@ public enum SnapshotRestorePolicy {
             throw NotesError(
                 "native_required",
                 "This note contains native-only features: \(features.joined(separator: ", ")).",
-                hint: "Pass --engine native for a lossless write, or --allow-downgrade to permit conversion."
+                hint: "Remove --engine scripting for a lossless native write, or pass --allow-downgrade to permit conversion."
             )
         }
     }

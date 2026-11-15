@@ -332,6 +332,8 @@ struct Append: ParsableCommand {
             action: {
                 switch selected {
                 case .scripting: return try backend.writer().appendToNote(note.summary.id.uuid, markdown: markdown)
+                case .native where backend.isFake:
+                    return try backend.writer().appendToNote(note.summary.id.uuid, markdown: markdown)
                 case .native:
                     let value = try NativeNotesWriter().appendMarkdown(
                         note.summary.id.uuid,

@@ -7587,7 +7587,7 @@ final class MarkdownNativeWriter {
                     throw NotesError(
                         "remote_image_unsupported",
                         "Remote Markdown images are not downloaded automatically.",
-                        hint: "Download the image, reference the local file from Markdown, and pass --engine native."
+                        hint: "Download the image, reference the local file from Markdown, and retry with the default native engine."
                     )
                 }
                 let file = try localResourceURL(resource.source, baseDirectory: input.assetBaseDirectory)

@@ -7,7 +7,7 @@ notescli mcp
 notescli mcp install --client tailscale
 ```
 
-The direct server exposes 54 tools, 31 in read-only mode, or 154 with `--allow-native`. Through the capability host it exposes 48, 30, or 140 tools. Host routing omits tools that accept arbitrary local file paths, using the same filesystem boundary as remote Tailscale access. Use direct routing when the client already has the required macOS permissions and needs those file-based tools.
+The direct server exposes 154 tools in write-enabled mode and 31 in read-only mode. Through the capability host it exposes 140 or 30 tools. Host routing omits tools that accept arbitrary local file paths, using the same filesystem boundary as remote Tailscale access. Use direct routing when the client already has the required macOS permissions and needs those file-based tools.
 
 ## Tools
 
@@ -38,7 +38,7 @@ create_folder  rename_folder  delete_folder  write_markdown
 
 `file_pull` and `file_push` accept `dry_run`. `file_diff` reads the local sidecar merge base and does not write.
 
-Tools added by `--allow-native`:
+Native tools available on write-enabled servers:
 
 ```text
 checklist_list  checklist_add  checklist_toggle  checklist_check_all
@@ -96,7 +96,7 @@ Restart desktop clients after changing their config.
 ## Tailscale endpoint
 
 ```bash
-notescli mcp install --client tailscale --allow-native --write-folders "Notes > Oracle"
+notescli mcp install --client tailscale --write-folders "Notes > Oracle"
 notescli mcp token show
 notescli mcp token rotate
 ```
@@ -137,7 +137,9 @@ Every Notes write uses the folder allowlist, concurrency checks, journal, snapsh
 
 `history` and `diff` read the exact pre-write snapshots created by NotesCLI. Native `undo` and `revert` can recreate missing scans, recordings, drawings, rich links, maps, tables, table-cell inline objects, Paper documents, and generic files, then verify the restored topology and bytes.
 
-Native tools stay hidden unless the server starts with `--allow-native`. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
+Native tools are available by default on write-enabled servers and stay hidden in read-only mode. `--allow-native` remains accepted for older configurations but is no longer required. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
+
+The server uses native body writes by default. Start it with `--engine scripting` or set `NOTESCLI_ENGINE=scripting` to make body tools use scripting when they support it. Native-only tools still use native unless a tool call explicitly asks for `engine: "scripting"`, which returns an error.
 
 `collaboration_activity` is read-only. It returns bounded raw activity data and hashes. It decodes a JSON tree only when Foundation accepts the stored bytes and does not assign meanings to unknown event formats.
 

@@ -4,6 +4,47 @@ import XCTest
 @testable import NotesSync
 
 final class SyncTests: XCTestCase {
+    private final class AssetDirectoryRecorder: @unchecked Sendable {
+        var values: [URL] = []
+    }
+
+    private final class AssetResolvingWriter: MarkdownAssetResolvingWriting, @unchecked Sendable {
+        let notes: InMemoryNotes
+        let recorder: AssetDirectoryRecorder
+        let assetDirectory: URL?
+
+        init(_ notes: InMemoryNotes, recorder: AssetDirectoryRecorder = AssetDirectoryRecorder(),
+             assetDirectory: URL? = nil) {
+            self.notes = notes
+            self.recorder = recorder
+            self.assetDirectory = assetDirectory
+        }
+
+        func resolvingMarkdownAssets(relativeTo directory: URL) -> any NotesWriting {
+            AssetResolvingWriter(notes, recorder: recorder, assetDirectory: directory)
+        }
+
+        func createNote(title: String, markdown: String, folder: String?) throws -> WriteResult {
+            if let assetDirectory { recorder.values.append(assetDirectory) }
+            return try notes.createNote(title: title, markdown: markdown, folder: folder)
+        }
+        func replaceBody(_ ref: String, markdown: String) throws -> WriteResult {
+            if let assetDirectory { recorder.values.append(assetDirectory) }
+            return try notes.replaceBody(ref, markdown: markdown)
+        }
+        func appendToNote(_ ref: String, markdown: String) throws -> WriteResult {
+            try notes.appendToNote(ref, markdown: markdown)
+        }
+        func renameNote(_ ref: String, title: String) throws -> WriteResult { try notes.renameNote(ref, title: title) }
+        func moveNote(_ ref: String, toFolder: String) throws -> WriteResult { try notes.moveNote(ref, toFolder: toFolder) }
+        func deleteNote(_ ref: String) throws -> WriteResult { try notes.deleteNote(ref) }
+        func createFolder(name: String, parent: String?, account: String?) throws -> WriteResult {
+            try notes.createFolder(name: name, parent: parent, account: account)
+        }
+        func renameFolder(_ ref: String, name: String) throws -> WriteResult { try notes.renameFolder(ref, name: name) }
+        func deleteFolder(_ ref: String) throws -> WriteResult { try notes.deleteFolder(ref) }
+    }
+
     private final class UnknownAfterWrite: NotesWriting, @unchecked Sendable {
         enum Operation { case create, replace, rename, move, delete, createFolder }
         let notes: InMemoryNotes, operation: Operation
@@ -92,6 +133,29 @@ final class SyncTests: XCTestCase {
         XCTAssertThrowsError(try fake.note("New"))
         _ = try sync.run(SyncOptions(directory: root, folder: "Sync"))
         XCTAssertEqual(try fake.note("New").document?.text, "new body")
+    }
+
+    func testNestedMarkdownCreatesAndUpdatesWithAssetsResolvedFromItsOwnDirectory() throws {
+        let fake = fixture(), root = try root()
+        let writer = AssetResolvingWriter(fake)
+        let sync = MarkdownSync(reader: fake, writer: writer)
+        _ = try sync.run(SyncOptions(directory: root, folder: "Sync"))
+        let child = root.appendingPathComponent("Child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let movedDraft = child.appendingPathComponent("Draft.md")
+        try FileManager.default.moveItem(at: root.appendingPathComponent("Draft.md"), to: movedDraft)
+        _ = try sync.run(SyncOptions(directory: root, folder: "Sync"))
+        var draft = MarkdownFile.parse(try String(contentsOf: movedDraft), fallbackTitle: "Draft")
+        draft.body = "updated\n\n![diagram](image.png)"
+        try draft.rendered().write(to: movedDraft, atomically: true, encoding: .utf8)
+        _ = try sync.run(SyncOptions(directory: root, folder: "Sync"))
+
+        try "![diagram](image.png)".write(
+            to: child.appendingPathComponent("Nested.md"), atomically: true, encoding: .utf8
+        )
+        _ = try sync.run(SyncOptions(directory: root, folder: "Sync"))
+
+        XCTAssertEqual(writer.recorder.values, [child.standardizedFileURL, child.standardizedFileURL])
     }
 
     func testOverlappingEditsWriteConflictMarkersAndDoNotOverwriteNotes() throws {

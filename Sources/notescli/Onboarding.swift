@@ -63,13 +63,13 @@ enum Onboarding {
         if !mcpReady() || state.steps["mcp-install"] != "complete" {
             for client in MCPClient.concrete {
                 if MCPConfiguration.status(client) == "installed", try !InstallManifest.ownsMCPClient(client) { continue }
-                let result = try MCPConfiguration.install(client, readOnly: options.readOnly, allowNative: false)
+                let result = try MCPConfiguration.install(client, readOnly: options.readOnly, allowNative: !options.readOnly)
                 if !result.hasPrefix("skipped") {
                     guard let entry = try MCPConfiguration.currentOwnership(client) else {
                         throw NotesError("mcp_entry_missing", "The \(client.label) entry could not be verified after installation.")
                     }
                     try InstallManifest.recordMCPClient(client, readOnly: options.readOnly,
-                                                        allowNative: false, entry: entry)
+                                                        allowNative: !options.readOnly, entry: entry)
                 }
             }
             state.steps["mcp-install"] = "complete"

@@ -102,6 +102,15 @@ func writeExtraEdit(options: GlobalOptions, write: WriteOptions, ref: String) th
                                                   result: WriteResult(outcome: .verified, noteID: note.summary.id, message: "Unchanged; no write made.")), options: options)
         return
     }
+    if selected == .scripting, markdownRequiresNative(edited), !write.allowDowngrade {
+        let fallback = options.resolvedEngine == .native && !options.engineWasExplicitlySelected
+        throw NotesError(
+            fallback ? "native_unavailable" : "native_required",
+            fallback
+                ? "This Markdown needs the native Notes engine, but the native framework check failed."
+                : "This Markdown contains native Notes elements that scripting cannot place without loss."
+        )
+    }
     let plan = DryRunPlan(operation: "edit", target: note.summary.id.uuid, arguments: [:],
                           resultingHTML: SafetyExecutor.bodyHTML(title: note.summary.title, markdown: edited), engine: selected.rawValue)
     var native: NativeWriteResult?
@@ -109,6 +118,11 @@ func writeExtraEdit(options: GlobalOptions, write: WriteOptions, ref: String) th
         arguments: ["ref": note.summary.id.uuid, "body": edited, "engine": selected.rawValue], note: note,
         allowedPaths: [note.summary.folderPath], destructive: true, plan: plan) {
             switch selected {
+            case .native where backend.isFake:
+                return try backend.writer().replaceBody(
+                    note.summary.id.uuid, markdown: edited,
+                    allowAttachmentLoss: write.allowAttachmentLoss
+                )
             case .native:
                 let value = try NativeNotesWriter().writeMarkdown(
                     note.summary.id.uuid,

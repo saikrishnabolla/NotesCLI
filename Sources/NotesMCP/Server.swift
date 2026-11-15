@@ -28,6 +28,7 @@ public final class MCPServer: @unchecked Sendable {
     public let writer: (any NotesWriting)?
     public let readOnly: Bool
     public let allowNative: Bool
+    public let preferNativeWrites: Bool
     public let exposureProfile: MCPToolExposureProfile
     public let readFidelity: String
     public let unavailableReadFields: [String]
@@ -41,6 +42,7 @@ public final class MCPServer: @unchecked Sendable {
     public static let versions = MCPProtocol.legacyVersions
 
     private let nativeHandler: MCPNativeHandler?
+    private let nativeAvailability: (() -> Bool)?
     private let syncWaiter: MCPSyncWaiter?
     private let writeFolders: String?
     private let stateRoot: URL
@@ -49,7 +51,9 @@ public final class MCPServer: @unchecked Sendable {
     var scanPageCorrector: (FrozenAttachmentInput) throws -> FrozenAttachmentInput = ScanCorrection.correctedPage
 
     public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false,
-                allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil, syncWaiter: MCPSyncWaiter? = nil,
+                allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil,
+                nativeAvailable: (() -> Bool)? = nil, syncWaiter: MCPSyncWaiter? = nil,
+                preferNativeWrites: Bool? = nil,
                 writeFolders: String? = nil, stateRoot: URL? = nil,
                 exposureProfile: MCPToolExposureProfile = .local,
                 readFidelity: String = "full", unavailableReadFields: [String] = []) {
@@ -57,10 +61,12 @@ public final class MCPServer: @unchecked Sendable {
         self.writer = writer
         self.readOnly = readOnly
         self.allowNative = allowNative
+        self.preferNativeWrites = preferNativeWrites ?? allowNative
         self.exposureProfile = exposureProfile
         self.readFidelity = readFidelity
         self.unavailableReadFields = unavailableReadFields
         self.nativeHandler = nativeHandler
+        self.nativeAvailability = nativeAvailable
         self.syncWaiter = syncWaiter
         self.writeFolders = writeFolders
         self.stateRoot = stateRoot ?? FileManager.default.temporaryDirectory.appendingPathComponent("notescli-mcp-" + UUID().uuidString)
@@ -185,7 +191,7 @@ public final class MCPServer: @unchecked Sendable {
             t("rename_folder", "Rename a folder.", ["ref", "name"], ["ref": string, "name": string], write: true),
             t("move_folder", "Move a folder below another folder.", ["ref"], ["ref": string, "parent": string, "account": string], write: true, native: true),
             t("delete_folder", "Delete an empty folder.", ["ref"], ["ref": string], write: true, destructive: true),
-            t("write_markdown", "Replace a note with Markdown using the scripting engine.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true)
+            t("write_markdown", "Replace a note with Markdown.", ["ref", "body"], ["ref": string, "body": string], write: true, destructive: true)
         ]
         if allowNative {
             values += [
@@ -1039,12 +1045,10 @@ public final class MCPServer: @unchecked Sendable {
         let nativeBodyTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text"])
         let nativeRoutableTools = nativeBodyTools.union(["create_note"])
         let markdownBodyTools = nativeRoutableTools.subtracting(["replace_text"])
-        let markupTools = Set(["attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear"])
-        if markupTools.contains(tool.name), s("engine") == "scripting" {
-            throw NotesError("native_required", "Editable attachment markup requires the private native engine.")
-        }
-        if tool.name == "recording_summary_clear", s("engine") == "scripting" {
-            throw NotesError("native_required", "Recording summary deletion requires the private native engine.")
+        let nativeSelected = s("engine") == "native"
+            || (s("engine") == nil && allowNative && preferNativeWrites && nativeRoutableTools.contains(tool.name))
+        if tool.native, s("engine") == "scripting" {
+            throw NotesError("native_required", "\(tool.name) has no scripting implementation.")
         }
         if ["file_push", "sync_notes"].contains(tool.name), s("engine") == "native" {
             throw NotesError("unsupported_engine", "The native engine is not available for MCP file or folder sync. Use write_markdown for an explicit native body replacement.")
@@ -1061,24 +1065,30 @@ public final class MCPServer: @unchecked Sendable {
                     hint: "Transfer the file through an approved channel, then use the local CLI or local MCP server."
                 )
             }
-            if markdown.requiresNativeWriter, s("engine") != "native" {
+            if markdown.requiresNativeWriter, !nativeSelected {
                 throw NotesError(
                     "native_required",
                     "This Markdown contains native Notes elements that scripting cannot place without loss.",
-                    hint: "Set engine to native explicitly and start MCP with --allow-native."
+                    hint: "Use a write-enabled MCP server or set engine to native."
                 )
             }
         }
-        if s("engine") == "native", !tool.native {
+        if nativeSelected, !tool.native {
             guard nativeRoutableTools.contains(tool.name) else {
                 throw NotesError("unsupported_engine", "\(tool.name) has no native implementation.")
             }
             guard allowNative else { throw NotesError("native_unavailable", "Native MCP writes are disabled.") }
+            let requiresNativeBody = markdownBodyTools.contains(tool.name)
+                && (s("body").map { NotesMarkdownDocument(parsing: $0).requiresNativeWriter } ?? false)
+            if s("engine") == nil, a["attachments"] == nil, !requiresNativeBody,
+               nativeAvailability?() == false {
+                return try callScriptingWrite(tool, a)
+            }
             return try callNative(tool, a)
         }
         if tool.name == "create_note", a["attachments"] != nil {
             guard s("engine") != "scripting", allowNative else {
-                throw NotesError("native_required", "Attachments require the native engine.", hint: "Start notescli mcp with --allow-native.")
+                throw NotesError("native_required", "Attachments require the native engine.", hint: "Use a write-enabled MCP server or set engine to native.")
             }
             return try callNative(tool, a)
         }
@@ -1532,7 +1542,7 @@ public final class MCPServer: @unchecked Sendable {
     }
 
     private func callNative(_ tool: Tool, _ arguments: [String: Any]) throws -> [String: Any] {
-        guard allowNative else { throw NotesError("native_required", "This tool requires the private native engine.", hint: "Start notescli mcp with --allow-native.") }
+        guard allowNative else { throw NotesError("native_required", "This tool requires the private native engine.", hint: "Use a write-enabled MCP server.") }
         guard let nativeHandler else { throw NotesError("native_unavailable", "The native engine is not available.") }
         if ["ocr_set", "image_labels_set"].contains(tool.name) {
             let clear = arguments["clear"] as? Bool ?? false

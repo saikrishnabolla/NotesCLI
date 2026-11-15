@@ -43,18 +43,21 @@ struct MCPRoot: ParsableCommand {
         subcommands: [MCPInstall.self, MCPUninstall.self, MCPStatus.self, MCPServe.self, MCPToken.self]
     )
     @OptionGroup var options: GlobalOptions
-    @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.") var allowNative = false
+    @Flag(help: "Compatibility flag; native tools are enabled by default for write-enabled servers.") var allowNative = false
 
     func run() throws {
         let backend = try options.backends(live: true)
         let selectedWriter: (any NotesWriting)? = options.readOnly ? nil : try backend.writer()
-        let handler: MCPNativeHandler? = allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
+        let nativeEnabled = allowNative || !options.readOnly
+        let handler: MCPNativeHandler? = nativeEnabled ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
         let environment = ProcessInfo.processInfo.environment
         let exposure: MCPToolExposureProfile = environment["NOTESCLI_MCP_REMOTE_SAFE"] == "1" ||
             environment["NOTESCLI_HOST_ACTIVE"] == "1" ? .remote : .local
         let server = MCPServer(reader: backend.reader, writer: selectedWriter, readOnly: options.readOnly,
-                               allowNative: allowNative, nativeHandler: handler,
+                               allowNative: nativeEnabled, nativeHandler: handler,
+                               nativeAvailable: { UnifiedNative.nativeAvailable() },
                                syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
+                               preferNativeWrites: options.resolvedEngine == .native,
                                stateRoot: NotesSafetyPaths.applicationSupport, exposureProfile: exposure,
                                readFidelity: backend.fidelity.rawValue, unavailableReadFields: backend.unavailableFields)
         server.run()
@@ -73,9 +76,11 @@ struct MCPServe: ParsableCommand {
         let config = try TailscaleMCP.loadConfiguration()
         let backend = try Backends.make(nil, live: true)
         let writer: (any NotesWriting)? = config.readOnly ? nil : try backend.writer()
-        let native: MCPNativeHandler? = config.allowNative ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
+        let nativeEnabled = config.allowNative || !config.readOnly
+        let native: MCPNativeHandler? = nativeEnabled ? { try mcpNativeCall($0, $1, reader: backend.reader) } : nil
         let mcp = MCPServer(reader: backend.reader, writer: writer, readOnly: config.readOnly,
-                            allowNative: config.allowNative, nativeHandler: native,
+                            allowNative: nativeEnabled, nativeHandler: native,
+                            nativeAvailable: { UnifiedNative.nativeAvailable() },
                             syncWaiter: { try NoteSyncWaiter.wait(noteID: $0, modifiedAfter: $1, timeout: $2) },
                             writeFolders: config.writeFolders,
                             stateRoot: NotesSafetyPaths.applicationSupport, exposureProfile: .remote,
@@ -793,13 +798,15 @@ struct MCPInstall: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.", discussion: "The agent skill is in skills/notescli/SKILL.md and is included by the NotesCLI Claude and Codex plugins.")
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
-    @Flag(help: "Expose opt-in tools that write through Apple's private Notes framework.")
+    @Flag(help: "Compatibility flag; native tools are enabled by default for write-enabled clients.")
     var allowNative = false
     @Option(help: "Hard ceiling of comma-separated folder trees for Tailscale writes.")
     var writeFolders: String?
 
-    private var resolvedAllowNative: Bool { allowNative || CommandLine.arguments.contains("--allow-native") }
     private var resolvedReadOnly: Bool { options.readOnly || CommandLine.arguments.contains("--read-only") }
+    private var resolvedAllowNative: Bool {
+        allowNative || CommandLine.arguments.contains("--allow-native") || !resolvedReadOnly
+    }
 
     func validate() throws {
         if resolvedReadOnly && resolvedAllowNative {

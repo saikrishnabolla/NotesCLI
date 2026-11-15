@@ -4,24 +4,57 @@ public final class ScriptingRewriteGuard: NotesWriting, @unchecked Sendable {
     private let writer: any NotesWriting
     private let reader: any NotesReading
     private let allowDowngrade: Bool
+    private let nativeUnavailable: Bool
 
-    public init(writer: any NotesWriting, reader: any NotesReading, allowDowngrade: Bool) {
+    public init(writer: any NotesWriting, reader: any NotesReading, allowDowngrade: Bool,
+                nativeUnavailable: Bool = false) {
         self.writer = writer
         self.reader = reader
         self.allowDowngrade = allowDowngrade
+        self.nativeUnavailable = nativeUnavailable
     }
 
     private func guardRewrite(_ ref: String) throws {
         try SnapshotRestorePolicy.requireScriptingBodyRewriteAllowed(reader.note(ref), allowDowngrade: allowDowngrade)
     }
 
-    public func createNote(title: String, markdown: String, folder: String?) throws -> WriteResult { try writer.createNote(title: title, markdown: markdown, folder: folder) }
-    public func appendToNote(_ ref: String, markdown: String) throws -> WriteResult { try guardRewrite(ref); return try writer.appendToNote(ref, markdown: markdown) }
-    public func replaceBody(_ ref: String, markdown: String) throws -> WriteResult { try guardRewrite(ref); return try writer.replaceBody(ref, markdown: markdown) }
-    public func replaceBody(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult { try guardRewrite(ref); return try writer.replaceBody(ref, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss) }
-    public func prependToNote(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult { try guardRewrite(ref); return try writer.prependToNote(ref, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss) }
-    public func insertUnderHeading(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult { try guardRewrite(ref); return try writer.insertUnderHeading(ref, heading: heading, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss) }
-    public func replaceSection(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult { try guardRewrite(ref); return try writer.replaceSection(ref, heading: heading, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss) }
+    private func guardIncoming(_ markdown: String) throws {
+        guard !NotesMarkdownDocument(parsing: markdown).requiresNativeWriter || allowDowngrade else {
+            if nativeUnavailable {
+                throw NotesError("native_unavailable", "This Markdown needs the native Notes engine, but the native framework check failed.")
+            }
+            throw NotesError("native_required", "This Markdown contains native Notes elements that scripting cannot place without loss.")
+        }
+    }
+
+    public func createNote(title: String, markdown: String, folder: String?) throws -> WriteResult {
+        try guardIncoming(markdown)
+        return try writer.createNote(title: title, markdown: markdown, folder: folder)
+    }
+    public func appendToNote(_ ref: String, markdown: String) throws -> WriteResult {
+        try guardRewrite(ref); try guardIncoming(markdown)
+        return try writer.appendToNote(ref, markdown: markdown)
+    }
+    public func replaceBody(_ ref: String, markdown: String) throws -> WriteResult {
+        try guardRewrite(ref); try guardIncoming(markdown)
+        return try writer.replaceBody(ref, markdown: markdown)
+    }
+    public func replaceBody(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        try guardRewrite(ref); try guardIncoming(markdown)
+        return try writer.replaceBody(ref, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss)
+    }
+    public func prependToNote(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        try guardRewrite(ref); try guardIncoming(markdown)
+        return try writer.prependToNote(ref, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss)
+    }
+    public func insertUnderHeading(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        try guardRewrite(ref); try guardIncoming(markdown)
+        return try writer.insertUnderHeading(ref, heading: heading, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss)
+    }
+    public func replaceSection(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
+        try guardRewrite(ref); try guardIncoming(markdown)
+        return try writer.replaceSection(ref, heading: heading, markdown: markdown, allowAttachmentLoss: allowAttachmentLoss)
+    }
     public func replaceText(_ ref: String, find: String, replacement: String, allowAttachmentLoss: Bool) throws -> WriteResult { try guardRewrite(ref); return try writer.replaceText(ref, find: find, replacement: replacement, allowAttachmentLoss: allowAttachmentLoss) }
     public func renameNote(_ ref: String, title: String) throws -> WriteResult { try writer.renameNote(ref, title: title) }
     public func moveNote(_ ref: String, toFolder: String) throws -> WriteResult { try writer.moveNote(ref, toFolder: toFolder) }

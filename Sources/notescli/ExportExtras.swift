@@ -41,7 +41,9 @@ private struct FilePush: ParsableCommand {
             allowedPaths: [note.summary.folderPath], destructive: true, plan: plan, emitDryRun: false, action: {
                 do {
                     let writer = try bodyRewriteWriter(options: options, allowDowngrade: write.allowDowngrade,
-                                                       allowShared: write.allowShared, backend: backend)
+                                                       allowShared: write.allowShared,
+                                                       assetBaseDirectory: url.deletingLastPathComponent(),
+                                                       backend: backend)
                     let value = try SingleFileSync(reader: backend.reader, writer: writer).push(from: url)
                     report = value
                     return WriteResult(outcome: .verified, noteID: note.summary.id, message: value.message)

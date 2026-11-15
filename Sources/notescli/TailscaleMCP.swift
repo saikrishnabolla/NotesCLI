@@ -212,7 +212,7 @@ enum TailscaleMCP {
             "mounted": mounted,
             "endpoint": config?.endpoint ?? NSNull(),
             "read_only": config?.readOnly ?? false,
-            "allow_native": config?.allowNative ?? false,
+            "allow_native": config.map { $0.allowNative || !$0.readOnly } ?? false,
             "write_folders": config?.writeFolders ?? NSNull(),
         ]
     }

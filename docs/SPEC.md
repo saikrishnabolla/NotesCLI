@@ -7,7 +7,7 @@ Notes CLIs and MCP servers (see PARITY.md), then do better on fidelity and safet
 - `NotesCore` (pure Swift, no Apple-only frameworks): model, protobuf body decoding, Markdown/HTML/plain renderers, Markdown parsing.
 - `NotesStore` (macOS): `NotesReading` over a read-only snapshot of NoteStore.sqlite.
 - `NotesAutomation` (macOS): `NotesWriting` through Notes.app scripting (AppleScript/JXA via osascript or NSAppleScript).
-- `NotesNative` (macOS): opt-in rich writes through Apple's private Notes framework.
+- `NotesNative` (macOS): default rich writes through Apple's private Notes framework.
 - `NotesSafety`: write allowlists, concurrency checks, journal entries, and snapshots.
 - `NotesIndex` and `NotesSync`: local search, export, and Markdown synchronization.
 - `NotesMCP`: MCP server over stdio or authenticated Streamable HTTP over Tailscale, exposing the same operations.
@@ -22,7 +22,7 @@ Notes CLIs and MCP servers (see PARITY.md), then do better on fidelity and safet
 
 ## Rules
 - Reads never write to NoteStore.sqlite. Copy db + wal + shm to a private temp dir, open read-only there, delete the copy after. Do not open the live DB with write flags.
-- Scripting is the default write engine. Native writes run only with `--engine native`, `NOTESCLI_ENGINE=native`, or MCP `--allow-native`.
+- Native is the default write engine when an operation has a native implementation. `--engine scripting` or `NOTESCLI_ENGINE=scripting` selects scripting explicitly. Operations without a native implementation fall back to scripting. If the native framework is unavailable, plain writes fall back to scripting; rich and native-only writes stop instead of losing content. Write-enabled MCP servers expose native tools by default; read-only servers hide all write tools.
 - The native engine uses Apple's private Notes framework and Notes' persistent Core Data store. It can break after a macOS update. Run the native doctor first and keep backups.
 - Never modify NoteStore.sqlite with SQL.
 - Every write is read back from a fresh snapshot and reported as `verified`, `unverified`, `unknown` (timeouts), or `rolled_back` (a failed native create whose partial note was moved to Recently Deleted). Never retry a write whose outcome is unknown.

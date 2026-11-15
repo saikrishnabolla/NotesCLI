@@ -365,6 +365,17 @@ final class SafetyTests: XCTestCase {
         }
         let allowed = ScriptingRewriteGuard(writer: reader, reader: reader, allowDowngrade: true)
         XCTAssertEqual(try allowed.appendToNote("welcome", markdown: "x").outcome, .verified)
+
+        let plain = InMemoryNotes.sample()
+        let unavailable = ScriptingRewriteGuard(
+            writer: plain, reader: plain, allowDowngrade: false, nativeUnavailable: true
+        )
+        for write in [
+            { try unavailable.createNote(title: "Rich", markdown: "- [ ] task", folder: "Notes") },
+            { try unavailable.replaceBody("welcome", markdown: "| A | B |\n|---|---|\n| 1 | 2 |") },
+        ] {
+            XCTAssertThrowsError(try write()) { XCTAssertEqual(($0 as? NotesError)?.code, "native_unavailable") }
+        }
     }
 
     func testParityDocsStateTheNativeRestoreGuardAndJournalPreimages() throws {

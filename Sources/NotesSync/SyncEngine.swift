@@ -5,6 +5,10 @@ public protocol LosslessAttachmentWriting: NotesWriting {
     var supportsLosslessAttachmentRoundTrip: Bool { get }
 }
 
+public protocol MarkdownAssetResolvingWriting: NotesWriting {
+    func resolvingMarkdownAssets(relativeTo directory: URL) -> any NotesWriting
+}
+
 public struct SyncOptions: Sendable {
     public var directory: URL
     public var folder: String
@@ -151,7 +155,9 @@ public final class MarkdownSync {
                     report.actions.append(.init(.restore, noteID: id, path: localNote.relativePath, message: "Recreate the missing Notes copy."))
                     if !options.dryRun {
                         let folder = try ensureFolder(for: localNote.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders, state: &state, stateURL: stateURL)
-                        let result = try requireWriter().createNote(title: localNote.markdown.title, markdown: localNote.markdown.body, folder: folder)
+                        let result = try markdownWriter(for: localNote.url).createNote(
+                            title: localNote.markdown.title, markdown: localNote.markdown.body, folder: folder
+                        )
                         if result.outcome != .verified {
                             try stagePendingCreate(result: result, file: localNote.markdown, path: localNote.relativePath,
                                                    replacing: id, state: &state, stateURL: stateURL, root: root)
@@ -245,14 +251,14 @@ public final class MarkdownSync {
                 }
                 report.actions.append(.init(.updateNote, noteID: id, path: localNote.relativePath, message: "Merge non-overlapping edits into both copies."))
                 if !options.dryRun {
-                    guard try accepted(requireWriter().replaceBody(id, markdown: merged.text), action: "merge note", pending: .init(kind: .update, noteID: id, expected: StableHash.hex(merged.text)), state: &state, stateURL: stateURL) else { continue }
+                    guard try accepted(markdownWriter(for: localNote.url).replaceBody(id, markdown: merged.text), action: "merge note", pending: .init(kind: .update, noteID: id, expected: StableHash.hex(merged.text)), state: &state, stateURL: stateURL) else { continue }
                     localNote.markdown.body = merged.text; localNote.markdown.modified = Date(); try write(localNote.markdown, to: localNote.url)
                     state.entries[id] = entry(file: localNote.markdown, path: localNote.relativePath, folder: relativeFolder(localNote.relativePath), modified: localNote.markdown.modified)
                 }
             } else if localChanged || localMetadataChanged {
                 report.actions.append(.init(.updateNote, noteID: id, path: localNote.relativePath, message: "Apply the local Markdown changes to Notes."))
                 if !options.dryRun {
-                    if localChanged, !(try accepted(requireWriter().replaceBody(id, markdown: localNote.markdown.body), action: "update note", pending: .init(kind: .update, noteID: id, expected: StableHash.hex(localNote.markdown.body)), state: &state, stateURL: stateURL)) { continue }
+                    if localChanged, !(try accepted(markdownWriter(for: localNote.url).replaceBody(id, markdown: localNote.markdown.body), action: "update note", pending: .init(kind: .update, noteID: id, expected: StableHash.hex(localNote.markdown.body)), state: &state, stateURL: stateURL)) { continue }
                     let filenameTitle = localNote.url.deletingPathExtension().lastPathComponent
                     let localTitle = localNote.markdown.title == previous.title && localNote.relativePath != previous.path ? filenameTitle : localNote.markdown.title
                     if localTitle != remote.title {
@@ -302,7 +308,9 @@ public final class MarkdownSync {
             if !options.dryRun {
                 let folder = try ensureFolder(for: item.relativePath, rootFolder: rootFolder, options: options, report: &report, known: &knownFolders, state: &state, stateURL: stateURL)
                 let title = item.markdown.title.isEmpty ? item.url.deletingPathExtension().lastPathComponent : item.markdown.title
-                let result = try requireWriter().createNote(title: title, markdown: item.markdown.body, folder: folder)
+                let result = try markdownWriter(for: item.url).createNote(
+                    title: title, markdown: item.markdown.body, folder: folder
+                )
                 if result.outcome != .verified {
                     try stagePendingCreate(result: result, file: item.markdown, path: item.relativePath,
                                            replacing: nil, state: &state, stateURL: stateURL, root: root)
@@ -429,6 +437,12 @@ public final class MarkdownSync {
     private func requireWriter() throws -> any NotesWriting {
         guard let writer else { throw NotesSyncError.invalidState("A writer is required for this sync action.") }
         return writer
+    }
+
+    private func markdownWriter(for file: URL) throws -> any NotesWriting {
+        let writer = try requireWriter()
+        guard let resolver = writer as? any MarkdownAssetResolvingWriting else { return writer }
+        return resolver.resolvingMarkdownAssets(relativeTo: file.deletingLastPathComponent())
     }
 
     private func accepted(_ result: WriteResult, action: String, pending: SyncState.PendingOperation,

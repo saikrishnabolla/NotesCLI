@@ -591,14 +591,16 @@ final class ProtocolTests: XCTestCase {
                                        operationID: "native-operation", value: ["ok": true])
         })
         _ = try call(server, "create_note", ["title": "With file", "body": "Body", "folder": "Notes", "attachments": ["/tmp/file"]])
-        let refused = try call(server, "create_note", ["title": "Checklist", "body": "- [ ] task"])
-        XCTAssertEqual(refused["isError"] as? Bool, true)
-        XCTAssertEqual(((try structured(refused)["error"] as? [String: Any])?["code"] as? String), "native_required")
+        _ = try call(server, "create_note", ["title": "Checklist", "body": "- [ ] task"])
         _ = try call(server, "create_note", ["title": "Checklist", "body": "- [ ] task", "engine": "native"])
         _ = try call(server, "create_note", ["title": "Native", "body": "Body", "folder": "Notes", "engine": "native"])
         _ = try call(server, "update_note", ["ref": "Welcome", "body": "Changed", "engine": "native"])
-        XCTAssertEqual(calls.map(\.0), ["create_note", "create_note", "create_note", "update_note"])
-        XCTAssertEqual(calls[3].1["ref"] as? String, "welcome")
+        let scripted = try structured(call(server, "create_note", [
+            "title": "Scripted", "body": "Body", "folder": "Notes", "engine": "scripting",
+        ]))
+        XCTAssertEqual(scripted["engine"] as? String, "scripting")
+        XCTAssertEqual(calls.map(\.0), ["create_note", "create_note", "create_note", "create_note", "update_note"])
+        XCTAssertEqual(calls[4].1["ref"] as? String, "welcome")
     }
     func testNativeEngineRequestsNeverSilentlyDowngrade() throws {
         let fake = InMemoryNotes.sample()
@@ -623,6 +625,13 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(((try structured(attachmentDowngrade)["error"] as? [String: Any])?["code"] as? String), "native_required")
         XCTAssertEqual(calls, 0)
 
+        let nativeOnlyDowngrade = try call(server, "checklist_add", [
+            "ref": "welcome", "text": "No downgrade", "engine": "scripting",
+        ])
+        XCTAssertEqual(nativeOnlyDowngrade["isError"] as? Bool, true)
+        XCTAssertEqual(((try structured(nativeOnlyDowngrade)["error"] as? [String: Any])?["code"] as? String), "native_required")
+        XCTAssertEqual(calls, 0)
+
         let dryRun = try structured(call(server, "create_note", [
             "title": "Dry run", "body": "Body", "folder": "Notes", "engine": "native", "dry_run": true,
         ]))
@@ -637,6 +646,47 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(unavailable["isError"] as? Bool, true)
         XCTAssertEqual(((try structured(unavailable)["error"] as? [String: Any])?["code"] as? String), "native_unavailable")
         XCTAssertEqual(try fake.notes(NoteQuery()).count, 2)
+    }
+
+    func testDefaultMCPNativeWritesFallBackOnlyWhenLossless() throws {
+        let fake = InMemoryNotes.sample()
+        let unavailable = MCPServer(
+            reader: fake, writer: fake, allowNative: true,
+            nativeHandler: { _, _ in throw NotesError("native_unavailable", "Unavailable") },
+            nativeAvailable: { false }
+        )
+
+        let plain = try structured(call(unavailable, "create_note", [
+            "title": "Fallback", "body": "Body", "folder": "Notes",
+        ]))
+        XCTAssertEqual(plain["engine"] as? String, "scripting")
+
+        let rich = try call(unavailable, "create_note", [
+            "title": "No downgrade", "body": "- [ ] task", "folder": "Notes",
+        ])
+        XCTAssertEqual(rich["isError"] as? Bool, true)
+        XCTAssertEqual(((try structured(rich)["error"] as? [String: Any])?["code"] as? String), "native_unavailable")
+
+        let explicitNative = try call(unavailable, "create_note", [
+            "title": "No fallback", "body": "Body", "folder": "Notes", "engine": "native",
+        ])
+        XCTAssertEqual(explicitNative["isError"] as? Bool, true)
+        XCTAssertEqual(((try structured(explicitNative)["error"] as? [String: Any])?["code"] as? String), "native_unavailable")
+
+        var nativeCalls = 0
+        let scriptingPreferred = MCPServer(
+            reader: fake, writer: fake, allowNative: true,
+            nativeHandler: { _, _ in
+                nativeCalls += 1
+                return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+            },
+            preferNativeWrites: false
+        )
+        let scripted = try structured(call(scriptingPreferred, "create_note", [
+            "title": "Scripting default", "body": "Body", "folder": "Notes",
+        ]))
+        XCTAssertEqual(scripted["engine"] as? String, "scripting")
+        XCTAssertEqual(nativeCalls, 0)
     }
     func testScriptingBodyRewriteRequiresNativeOrExplicitDowngrade() throws {
         let sample = InMemoryNotes.sample()
@@ -1258,7 +1308,9 @@ final class ProtocolTests: XCTestCase {
             return try MCPNativeResult(result: result, value: ["restored": true])
         }, stateRoot: root)
 
-        let first = try structured(call(server, "update_note", ["ref": "welcome", "body": "first"]))
+        let first = try structured(call(server, "update_note", [
+            "ref": "welcome", "body": "first", "engine": "scripting",
+        ]))
         let firstID = try XCTUnwrap(first["journalID"] as? String)
         let snapshots = try structured(call(server, "history", ["ref": "welcome"]))["snapshots"] as? [[String: Any]]
         XCTAssertEqual(snapshots?.count, 1)
@@ -1266,7 +1318,9 @@ final class ProtocolTests: XCTestCase {
         let diff = try structured(call(server, "diff", ["ref": "welcome", "snapshot": snapshotID]))
         XCTAssertTrue((diff["diff"] as? String)?.contains("first") == true)
 
-        let second = try structured(call(server, "update_note", ["ref": "welcome", "body": "second"]))
+        let second = try structured(call(server, "update_note", [
+            "ref": "welcome", "body": "second", "engine": "scripting",
+        ]))
         let secondID = try XCTUnwrap(second["journalID"] as? String)
         let conflict = try structured(call(server, "undo", ["operation_id": firstID]))
         XCTAssertEqual((conflict["error"] as? [String: Any])?["code"] as? String, "undo_conflict")

@@ -58,39 +58,71 @@ func makeWriter(reader: any NotesReading) throws -> any NotesWriting {
         noteReader: { try SQLiteNotesStore(refresh: true).note($0) })
 }
 
-final class NativeBodyWriter: NotesWriting, LosslessAttachmentWriting, @unchecked Sendable {
+final class NativeBodyWriter: NotesWriting, LosslessAttachmentWriting, MarkdownAssetResolvingWriting, @unchecked Sendable {
     let supportsLosslessAttachmentRoundTrip = true
     private let base: any NotesWriting
     private let allowShared: Bool
+    private let assetBaseDirectory: URL?
 
-    init(base: any NotesWriting, allowShared: Bool) {
+    init(base: any NotesWriting, allowShared: Bool, assetBaseDirectory: URL?) {
         self.base = base
         self.allowShared = allowShared
+        self.assetBaseDirectory = assetBaseDirectory
+    }
+
+    func resolvingMarkdownAssets(relativeTo directory: URL) -> any NotesWriting {
+        NativeBodyWriter(base: base, allowShared: allowShared, assetBaseDirectory: directory)
     }
 
     func createNote(title: String, markdown: String, folder: String?) throws -> WriteResult {
-        try base.createNote(title: title, markdown: markdown, folder: folder)
+        try NativeNotesWriter().createNote(
+            title: title,
+            input: NativeMarkdownInput(source: markdown, assetBaseDirectory: assetBaseDirectory),
+            folder: folder,
+            allowShared: allowShared
+        ).write.writeResult
     }
     func appendToNote(_ ref: String, markdown: String) throws -> WriteResult {
-        try NativeNotesWriter().appendMarkdown(ref, markdown: markdown, allowShared: allowShared).writeResult
+        try NativeNotesWriter().appendMarkdown(
+            ref,
+            input: NativeMarkdownInput(source: markdown, assetBaseDirectory: assetBaseDirectory),
+            allowShared: allowShared
+        ).writeResult
     }
     func replaceBody(_ ref: String, markdown: String) throws -> WriteResult {
-        try NativeNotesWriter().writeMarkdown(ref, markdown: markdown, dryRun: false, backup: false,
-                                              allowShared: allowShared).writeResult
+        try NativeNotesWriter().writeMarkdown(
+            ref,
+            input: NativeMarkdownInput(source: markdown, assetBaseDirectory: assetBaseDirectory),
+            dryRun: false,
+            backup: false,
+            allowShared: allowShared
+        ).writeResult
     }
     func replaceBody(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
         try replaceBody(ref, markdown: markdown)
     }
     func prependToNote(_ ref: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
-        try NativeNotesWriter().prependMarkdown(ref, markdown: markdown, allowShared: allowShared).writeResult
+        try NativeNotesWriter().prependMarkdown(
+            ref,
+            input: NativeMarkdownInput(source: markdown, assetBaseDirectory: assetBaseDirectory),
+            allowShared: allowShared
+        ).writeResult
     }
     func insertUnderHeading(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
-        try NativeNotesWriter().insertMarkdown(ref, underHeading: heading, markdown: markdown,
-                                               allowShared: allowShared).writeResult
+        try NativeNotesWriter().insertMarkdown(
+            ref,
+            underHeading: heading,
+            input: NativeMarkdownInput(source: markdown, assetBaseDirectory: assetBaseDirectory),
+            allowShared: allowShared
+        ).writeResult
     }
     func replaceSection(_ ref: String, heading: String, markdown: String, allowAttachmentLoss: Bool) throws -> WriteResult {
-        try NativeNotesWriter().replaceSection(ref, heading: heading, markdown: markdown,
-                                               allowShared: allowShared).writeResult
+        try NativeNotesWriter().replaceSection(
+            ref,
+            heading: heading,
+            input: NativeMarkdownInput(source: markdown, assetBaseDirectory: assetBaseDirectory),
+            allowShared: allowShared
+        ).writeResult
     }
     func replaceText(_ ref: String, find: String, replacement: String, allowAttachmentLoss: Bool) throws -> WriteResult {
         try NativeNotesWriter().replaceText(ref, find: find, replacement: replacement,
@@ -111,10 +143,17 @@ final class NativeBodyWriter: NotesWriting, LosslessAttachmentWriting, @unchecke
 }
 
 func bodyRewriteWriter(options: GlobalOptions, allowDowngrade: Bool, allowShared: Bool,
-                       backend: Backends) throws -> any NotesWriting {
+                       assetBaseDirectory: URL?, backend: Backends) throws -> any NotesWriting {
     let base = try backend.writer()
     if options.resolvedEngine == .native, !backend.isFake {
-        return NativeBodyWriter(base: base, allowShared: allowShared)
+        guard UnifiedNative.nativeAvailable() else {
+            if options.engineWasExplicitlySelected {
+                throw NotesError("native_unavailable", "The native Notes framework check failed. Run notescli engine doctor --json.")
+            }
+            return ScriptingRewriteGuard(writer: base, reader: backend.reader, allowDowngrade: allowDowngrade,
+                                         nativeUnavailable: true)
+        }
+        return NativeBodyWriter(base: base, allowShared: allowShared, assetBaseDirectory: assetBaseDirectory)
     }
     return ScriptingRewriteGuard(writer: base, reader: backend.reader, allowDowngrade: allowDowngrade)
 }

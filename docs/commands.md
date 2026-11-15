@@ -89,7 +89,7 @@ notescli replace-text <ref> <find> <replacement>
 notescli clip <url> [--folder <folder>]
 ```
 
-`add` opens `$EDITOR` when no body source is given. `add --attach` requires `--engine native` and creates the note and attachments in one save. Native `edit` preserves attachments named by `notescli-attachment:ID`; scripting `edit` still refuses attachment loss. `delete` moves notes to Recently Deleted.
+`add` opens `$EDITOR` when no body source is given. `add --attach` uses the native engine and creates the note and attachments in one save. Native `edit` preserves attachments named by `notescli-attachment:ID`; scripting `edit` still refuses attachment loss. `delete` moves notes to Recently Deleted.
 
 ## Folder writes
 
@@ -112,7 +112,7 @@ Deleting a folder moves its notes to Recently Deleted.
 
 ## Rich writes
 
-These commands require `--engine native` unless a scripting path is listed:
+These commands use the default native engine unless a scripting path is listed:
 
 ```text
 notescli checklist add|toggle|check-all|uncheck-all|clear-done|list ...
@@ -165,7 +165,7 @@ notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. `link capture` creates the native Synapse web attachment used for Share-sheet links. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. `map add` accepts only Apple Maps HTTPS URLs. Scan commands create and edit ordered native scan galleries; crop still lacks visible Mac/iPhone/PDF proof. Local scans accept up to 200 MB. MCP `scan_add` accepts up to 3 MB of decoded image data so requests fit the 4 MiB transport limit. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript; each segment's `fragment` index picks the audio fragment it belongs to, and 0 is the default. `recording transcribe` transcribes each fragment of a recording in order. Readback checks each segment's text, timing, speaker, and fragment. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. `link capture` creates the native Synapse web attachment used for Share-sheet links. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. `map add` accepts only Apple Maps HTTPS URLs. Scan commands create and edit ordered native scan galleries; crop still lacks visible Mac/iPhone/PDF proof. Local scans accept up to 200 MB. MCP `scan_add` accepts up to 3 MB of decoded image data so requests fit the 4 MiB transport limit. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript; each segment's `fragment` index picks the audio fragment it belongs to, and 0 is the default. `recording transcribe` transcribes each fragment of a recording in order. Readback checks each segment's text, timing, speaker, and fragment. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. Writes use the native engine by default. Commands without a native implementation fall back to scripting, and `--engine scripting` selects scripting explicitly. Write results include `engine` and `operationID`.
 
 Settings commands read and write Notes' container preference files and verify the stored value. `settings view` reads the list or gallery mode Notes last saved for its main window; it cannot change it.
 
@@ -206,7 +206,7 @@ notescli file diff <path>
 ```
 
 `undo` and `revert` accept a note reference for snapshots or a journal operation ID for a recorded setting or Smart Folder rule preimage.
-Snapshots with native-only features require `--engine native`. Pass `--allow-downgrade` to permit scripting conversion. Native restore recreates missing scans and markup, recordings and fragments, Paper documents, multi-canvas System Paper, modern and classic drawings, rich links, maps, tables, table-cell inline objects, paragraph links, PDFs, images, and files, including types without a canonical extension. It preserves paragraph and checklist UUIDs, restores private payloads, remaps attachment IDs, and verifies structure and archived bytes through fresh native and database reads. Paper verification compares the drawing assets and their semantic contents because Notes rewrites its CRDT and database bytes. A failed Paper restore purges only the newly created files when the guard proves ownership, but still reports an `unknown` result. Unknown future attachment graphs are refused.
+Snapshots with native-only features use the native engine. Pass `--allow-downgrade` with `--engine scripting` to permit scripting conversion. Native restore recreates missing scans and markup, recordings and fragments, Paper documents, multi-canvas System Paper, modern and classic drawings, rich links, maps, tables, table-cell inline objects, paragraph links, PDFs, images, and files, including types without a canonical extension. It preserves paragraph and checklist UUIDs, restores private payloads, remaps attachment IDs, and verifies structure and archived bytes through fresh native and database reads. Paper verification compares the drawing assets and their semantic contents because Notes rewrites its CRDT and database bytes. A failed Paper restore purges only the newly created files when the guard proves ownership, but still reports an `unknown` result. Unknown future attachment graphs are refused.
 
 ## Export
 
@@ -247,4 +247,4 @@ notescli mcp status [--client claude-code|claude-desktop|codex|cursor|vscode|tai
 notescli mcp token show|rotate
 ```
 
-Running `notescli mcp` with no subcommand starts the stdio server. Client selection defaults to `all`.
+Running `notescli mcp` with no subcommand starts the stdio server. Native tools are available by default on write-enabled servers. `--allow-native` remains accepted for older configurations. Client selection defaults to `all`.

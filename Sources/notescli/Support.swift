@@ -12,12 +12,16 @@ enum WriteEngine: String, ExpressibleByArgument, Codable {
 
 struct GlobalOptions: ParsableArguments {
     @Option(help: "Backend: default or fake. Also accepts NOTESCLI_BACKEND.") var backend: String?
-    @Option(help: "Write engine: scripting (default) or native. Also accepts NOTESCLI_ENGINE.")
-    var engine: WriteEngine = .scripting
+    @Option(help: "Write engine: native (default) or scripting. Also accepts NOTESCLI_ENGINE.")
+    var engine: WriteEngine = .native
     @Flag(help: "Refuse all writes.") var readOnly = false
     @Flag(help: "Print JSON, including errors on stderr.") var json = false
     @Flag(help: "Suppress non-essential human output. Errors are still printed.") var quiet = false
     func backends(live: Bool = false) throws -> Backends { try Backends.make(backend, live: live) }
+    var engineWasExplicitlySelected: Bool {
+        if CommandLine.arguments.contains(where: { $0 == "--engine" || $0.hasPrefix("--engine=") }) { return true }
+        return WriteEngine(rawValue: ProcessInfo.processInfo.environment["NOTESCLI_ENGINE"] ?? "") != nil
+    }
     var resolvedEngine: WriteEngine {
         if CommandLine.arguments.contains(where: { $0 == "--engine" || $0.hasPrefix("--engine=") }) { return engine }
         return WriteEngine(rawValue: ProcessInfo.processInfo.environment["NOTESCLI_ENGINE"] ?? "") ?? engine

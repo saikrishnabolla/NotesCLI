@@ -254,7 +254,7 @@ final class CLITests: XCTestCase {
         let reinstalled = try run(["mcp", "install", "--client", "codex"], environment: environment)
         XCTAssertEqual(reinstalled.0, 0, reinstalled.2)
         var modified = try String(contentsOf: config, encoding: .utf8)
-        modified = modified.replacingOccurrences(of: #"args = ["mcp"]"#, with: #"args = ["mcp", "--read-only"]"#)
+        modified = modified.replacingOccurrences(of: #"args = ["mcp", "--allow-native"]"#, with: #"args = ["mcp", "--read-only"]"#)
         try modified.write(to: config, atomically: true, encoding: .utf8)
         let refused = try run(["mcp", "uninstall", "--client", "codex", "--json"], environment: environment)
         XCTAssertNotEqual(refused.0, 0)
@@ -373,7 +373,7 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: config, encoding: .utf8), entry)
     }
 
-    func testMCPInstallPersistsAllowNativeForEveryFileBasedStdioClient() throws {
+    func testMCPInstallEnablesNativeForEveryWriteEnabledStdioClientByDefault() throws {
         let cases: [(String, String, String)] = [
             ("codex", ".codex/config.toml", ""),
             ("claude-desktop", "Library/Application Support/Claude/claude_desktop_config.json", "mcpServers"),
@@ -384,7 +384,7 @@ final class CLITests: XCTestCase {
             let home = try temporaryHome()
             defer { try? FileManager.default.removeItem(at: home) }
             let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
-            let result = try run(["mcp", "install", "--client", client, "--allow-native"], environment: environment)
+            let result = try run(["mcp", "install", "--client", client], environment: environment)
             XCTAssertEqual(result.0, 0, "\(client): \(result.2)")
             let data = try Data(contentsOf: home.appendingPathComponent(relativePath))
             if serversKey.isEmpty {
@@ -1075,16 +1075,16 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(changed.0, 0, changed.2); XCTAssertFalse(changed.1.contains("Unchanged"))
         let addEditor = try run(["--backend", "fake", "add"], environment: ["EDITOR": "printf 'new body' >"])
         XCTAssertEqual(addEditor.0, 0, addEditor.2)
-        let scripted = try run(["--backend", "fake", "--json", "add", "Engine", "--body", "Body"])
-        let scriptedJSON = try JSONSerialization.jsonObject(with: Data(scripted.1.utf8)) as! [String: Any]
-        XCTAssertEqual(scriptedJSON["engine"] as? String, "scripting")
-        XCTAssertEqual((scriptedJSON["result"] as? [String: Any])?["outcome"] as? String, "verified")
+        let native = try run(["--backend", "fake", "--json", "add", "Engine", "--body", "Body"])
+        let nativeJSON = try JSONSerialization.jsonObject(with: Data(native.1.utf8)) as! [String: Any]
+        XCTAssertEqual(nativeJSON["engine"] as? String, "native")
+        XCTAssertEqual((nativeJSON["result"] as? [String: Any])?["outcome"] as? String, "verified")
         let folder = try run(["--backend", "fake", "--json", "folder", "create", "Engine folder"])
         let folderJSON = try JSONSerialization.jsonObject(with: Data(folder.1.utf8)) as! [[String: Any]]
         XCTAssertEqual(folderJSON.first?["engine"] as? String, "scripting")
         let batch = try run(["--backend", "fake", "--json", "delete", "welcome", "--yes"])
         let batchJSON = try JSONSerialization.jsonObject(with: Data(batch.1.utf8)) as! [[String: Any]]
-        XCTAssertEqual(batchJSON.first?["engine"] as? String, "scripting")
+        XCTAssertEqual(batchJSON.first?["engine"] as? String, "native")
 
         for command in [["open", "Demo", "--account"], ["open", "Notes", "--folder"]] {
             let value = try run(["--backend", "fake"] + command)
@@ -1132,6 +1132,32 @@ final class CLITests: XCTestCase {
         }
     }
 
+    func testWriteEnabledStdioMCPExposesNativeToolsByDefault() throws {
+        let requests = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"# + "\n" +
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"# + "\n"
+        let result = try run(["--backend", "fake", "mcp"], input: requests)
+
+        XCTAssertEqual(result.0, 0, result.2)
+        let response = try XCTUnwrap(result.1.split(separator: "\n").last)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any])
+        let tools = try XCTUnwrap((object["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        XCTAssertTrue(tools.contains { $0["name"] as? String == "checklist_add" })
+
+        let readOnly = try run(["--backend", "fake", "--read-only", "mcp"], input: requests)
+        XCTAssertEqual(readOnly.0, 0, readOnly.2)
+        let readOnlyResponse = try XCTUnwrap(readOnly.1.split(separator: "\n").last)
+        let readOnlyObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(readOnlyResponse.utf8)) as? [String: Any])
+        let readOnlyTools = try XCTUnwrap((readOnlyObject["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        XCTAssertFalse(readOnlyTools.contains { $0["name"] as? String == "checklist_add" })
+        XCTAssertFalse(readOnlyTools.contains { $0["name"] as? String == "create_note" })
+
+        let scriptingRequests = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}"# + "\n" +
+            #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_note","arguments":{"title":"Scripted","body":"Body","dry_run":true}}}"# + "\n"
+        let scripting = try run(["--backend", "fake", "--engine=scripting", "mcp"], input: scriptingRequests)
+        XCTAssertEqual(scripting.0, 0, scripting.2)
+        XCTAssertTrue(scripting.1.contains(#"\"engine\":\"scripting\""#), scripting.1)
+    }
+
     func testUnifiedCommandTreeRoutesAndHidesLegacyNames() throws {
         let help = try run(["--help"])
         XCTAssertEqual(help.0, 0, help.2)
@@ -1147,63 +1173,66 @@ final class CLITests: XCTestCase {
         }
     }
 
-    func testNativeWritesAreOptInAndLegacySyntaxStillParses() throws {
-        let commands = [
-            ["ocr", "set", "welcome", "--attachment", "image-1", "--text", "words"],
-            ["image-labels", "set", "welcome", "--attachment", "image-1", "--text", "receipt"],
-            ["checklist", "add", "welcome", "item"], ["pin", "welcome"], ["unpin", "welcome"],
-            ["tag", "add", "welcome", "demo"], ["link", "add", "welcome", "shopping"],
-            ["link", "capture", "welcome", "https://example.com"],
-            ["text", "insert", "welcome", "x", "--position", "0"],
-            ["format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body"],
-            ["attach", "welcome", "/tmp/missing"], ["table", "create", "welcome", "--rows", "[[\"x\"]]"],
-            ["duplicate", "welcome"], ["restore", "welcome"], ["folder", "move", "Notes", "Notes"]
-        ]
-        for command in commands {
-            let value = try run(["--backend", "fake", "--json"] + command)
-            XCTAssertNotEqual(value.0, 0, "\(command) unexpectedly succeeded")
-            XCTAssertTrue(value.2.contains("native_required"), "\(command): \(value.2)")
-        }
+    func testNativeWritesAreDefaultAndScriptingRemainsExplicitFallback() throws {
+        let checklist = try run([
+            "--backend", "fake", "--json", "checklist", "add", "welcome", "item", "--dry-run",
+        ])
+        XCTAssertEqual(checklist.0, 0, checklist.2)
+        XCTAssertTrue(checklist.1.contains(#""engine":"native""#), checklist.1)
+
         let richBody = "<mark data-apple-notes-highlight=\"mint\">marked</mark>"
         let rich = try run(["--backend", "fake", "--json", "add", "Rich", "--body", richBody])
-        XCTAssertNotEqual(rich.0, 0)
-        XCTAssertTrue(rich.2.contains("native_required"), rich.2)
-        let richNative = try run([
-            "--backend", "fake", "--engine=native", "--json", "add", "Rich",
-            "--body", richBody, "--dry-run",
+        XCTAssertEqual(rich.0, 0, rich.2)
+        XCTAssertTrue(rich.1.contains(#""engine":"native""#), rich.1)
+
+        let scripted = try run([
+            "--backend", "fake", "--engine=scripting", "--json", "add", "Plain", "--body", "Body",
         ])
-        XCTAssertEqual(richNative.0, 0, richNative.2)
-        let nativeReads = [
-            ["checklist", "list", "welcome"], ["link", "list", "welcome"],
-            ["text", "find", "welcome", "Welcome"],
-            ["native-checklist", "list", "welcome"], ["native-link", "list", "welcome"],
-            ["native-text", "search", "welcome", "--text", "Welcome"]
-        ]
-        for command in nativeReads {
-            let value = try run(["--backend", "fake", "--json"] + command)
-            XCTAssertTrue(value.2.contains("native_required"), "native read did not require opt-in: \(command): \(value.2)")
-        }
-        let aliases = [
+        XCTAssertEqual(scripted.0, 0, scripted.2)
+        XCTAssertTrue(scripted.1.contains(#""engine":"scripting""#), scripted.1)
+
+        let richScripted = try run([
+            "--backend", "fake", "--engine=scripting", "--json", "add", "Rich", "--body", richBody,
+        ])
+        XCTAssertNotEqual(richScripted.0, 0)
+        XCTAssertTrue(richScripted.2.contains("native_required"), richScripted.2)
+
+        let unavailable = ["NOTESCLI_TEST_NATIVE_AVAILABLE": "0"]
+        let fallback = try run(["--backend", "fake", "--json", "add", "Fallback", "--body", "Body"],
+                               environment: unavailable)
+        XCTAssertEqual(fallback.0, 0, fallback.2)
+        XCTAssertTrue(fallback.1.contains(#""engine":"scripting""#), fallback.1)
+
+        let forcedNative = try run([
+            "--backend", "fake", "--engine=native", "--json", "add", "Unavailable", "--body", "Body",
+        ], environment: unavailable)
+        XCTAssertNotEqual(forcedNative.0, 0)
+        XCTAssertTrue(forcedNative.2.contains("native_unavailable"), forcedNative.2)
+
+        let richEdit = try run([
+            "--backend", "fake", "--json", "edit", "welcome", "--dry-run",
+        ], environment: [
+            "NOTESCLI_TEST_NATIVE_AVAILABLE": "0",
+            "EDITOR": "printf -- '- [ ] task\\n' >",
+        ])
+        XCTAssertNotEqual(richEdit.0, 0)
+        XCTAssertTrue(richEdit.2.contains("native_unavailable"), richEdit.2)
+
+        let environmentScripting = try run([
+            "--backend", "fake", "--json", "add", "Environment", "--body", "Body",
+        ], environment: ["NOTESCLI_ENGINE": "scripting"])
+        XCTAssertEqual(environmentScripting.0, 0, environmentScripting.2)
+        XCTAssertTrue(environmentScripting.1.contains(#""engine":"scripting""#), environmentScripting.1)
+
+        for alias in [
             ["native-checklist", "insert", "welcome", "--text", "item"],
             ["native-tag", "add", "demo", "--ref", "welcome"],
-            ["native-link", "add", "welcome", "--target", "shopping"],
             ["native-text", "insert", "welcome", "--text", "x", "--position", "0"],
-            ["native-format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body"],
-            ["native-attachment", "file", "welcome", "--path", "/tmp/missing"],
-            ["native-table", "create", "welcome", "--rows", "[[\"x\"]]"],
-            ["native-duplicate", "welcome"], ["native-restore", "welcome"],
-            ["native-move-folder", "Notes", "--parent", "Notes"]
-        ]
-        for command in aliases {
-            let value = try run(["--backend", "fake", "--json"] + command)
-            XCTAssertTrue(value.2.contains("native_required"), "legacy syntax did not route: \(command): \(value.2)")
+        ] {
+            let result = try run(["--backend", "fake", "--engine=scripting", "--json"] + alias)
+            XCTAssertNotEqual(result.0, 0, "\(alias) unexpectedly used native")
+            XCTAssertTrue(result.2.contains("native_required"), "\(alias): \(result.2)")
         }
-        let env = try run(["--backend", "fake", "--json", "checklist", "add", "welcome", "item", "--dry-run"], environment: ["NOTESCLI_ENGINE": "native"])
-        XCTAssertFalse(env.2.contains("native_required"), env.2)
-        XCTAssertFalse(env.2.contains("usage"), env.2)
-        let explicit = try run(["--backend", "fake", "--engine=native", "--json", "checklist", "add", "welcome", "item", "--dry-run"], environment: ["NOTESCLI_ENGINE": "scripting"])
-        XCTAssertEqual(explicit.0, 0, explicit.2)
-        XCTAssertTrue(explicit.1.contains(#""engine":"native""#), explicit.1)
     }
 
     func testImageMetadataWritesHonorReadOnlyAndSupportNativeDryRuns() throws {

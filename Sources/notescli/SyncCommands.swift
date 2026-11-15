@@ -25,7 +25,7 @@ struct SyncCommand: ParsableCommand {
         if dryRun || isStatus { writer = nil }
         else {
             writer = try bodyRewriteWriter(options: options, allowDowngrade: allowDowngrade,
-                                           allowShared: false, backend: backend)
+                                           allowShared: false, assetBaseDirectory: url, backend: backend)
         }
         let report = try MarkdownSync(reader: backend.reader, writer: writer).run(
             SyncOptions(directory: url, folder: selectedFolder, propagateDeletes: propagateDeletes, dryRun: dryRun || isStatus))
@@ -57,7 +57,7 @@ struct SyncDaemonCommand: ParsableCommand {
                 if dryRun { writer = nil }
                 else {
                     writer = try bodyRewriteWriter(options: options, allowDowngrade: allowDowngrade,
-                                                   allowShared: false, backend: backend)
+                                                   allowShared: false, assetBaseDirectory: url, backend: backend)
                 }
                 let report = try MarkdownSync(reader: backend.reader, writer: writer).run(
                     SyncOptions(directory: url, folder: selectedFolder, propagateDeletes: propagateDeletes, dryRun: dryRun))

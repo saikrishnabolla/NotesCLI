@@ -89,7 +89,7 @@ enum SafetyExecutor {
         if let note, note.summary.isShared == true {
             guard options.allowShared else { throw NotesError("shared_write_refused", "The note is shared. Pass --allow-shared to confirm the write.") }
             guard plan.engine == "native" else {
-                throw NotesError("native_required", "Shared-note writes require the native engine so Notes can check write permission.", hint: "Pass --engine native with --allow-shared.")
+                throw NotesError("native_required", "Shared-note writes require the native engine so Notes can check write permission.", hint: "Remove --engine scripting and pass --allow-shared.")
             }
         }
         if options.dryRun {
@@ -421,6 +421,11 @@ private func restore(_ ref: String, snapshotID: String?, options: GlobalOptions,
         note: current, allowedPaths: paths, destructive: true, plan: replacePlan,
         action: {
             switch selected {
+            case .native where backend.isFake:
+                return try scriptingWriter.replaceBody(
+                    target, markdown: snapshot.markdown,
+                    allowAttachmentLoss: write.allowAttachmentLoss || write.allowDowngrade
+                )
             case .native:
                 let value = try NativeNotesWriter().restoreSnapshot(
                     target,

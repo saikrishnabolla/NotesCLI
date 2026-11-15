@@ -2,7 +2,7 @@
 
 This reference follows `notescli --help` from version 1.1.11.
 
-`notescli report create --title TITLE --file REPORT.md [--folder FOLDER] [--tags TAGS] [--replace]` creates and verifies one native report. Markdown may include local or HTTPS images, SVG or self-contained HTML diagram fences, bare-URL preview cards, native tables, tags, checklists, attachments, citations, and dividers.
+`notescli report create --title TITLE --file REPORT.md [--folder FOLDER] [--tags TAGS] [--replace]` creates and verifies one native report. Markdown may include local or HTTPS images, bare-URL preview cards, native tables, tags, checklists, attachments, citations, and dividers. An `svg` fence or an `html diagram` fence renders as a diagram; a plain `html` fence stays code.
 
 ## Global options
 

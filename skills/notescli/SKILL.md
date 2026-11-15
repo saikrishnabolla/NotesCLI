@@ -13,7 +13,7 @@ Create research reports in one call with `create_report`, or with:
 notescli report create --title "Report title" --file report.md --folder "Research" --tags research,sources --json
 ```
 
-The report path writes headings, formatted native tables, links, bare-URL preview cards, local and HTTPS images, SVG or self-contained HTML diagram fences, native tags, checklists, file attachments, citations, and dividers. Use local paths or HTTPS URLs for attachments. The result lists requested and written counts, degraded elements, the note ID, and its Notes link. An unsupported or mismatched element fails the call and removes the partial note. Pass `--replace` or `replace: true` to replace one exact-title report on a rerun.
+The report path writes headings, formatted native tables, links, bare-URL preview cards, local and HTTPS images, diagrams, native tags, checklists, file attachments, citations, and dividers. Use an `svg` fence or an `html diagram` fence for a rendered diagram. A plain `html` fence stays code. Use local paths or HTTPS URLs for attachments. The result lists requested and written counts, degraded elements, the note ID, and its Notes link. An unsupported or mismatched element fails the call and removes the partial note. Pass `--replace` or `replace: true` to replace one exact-title report on a rerun.
 
 For ordinary note edits, use `text_find` before `format_inline`; offsets are UTF-16.
 

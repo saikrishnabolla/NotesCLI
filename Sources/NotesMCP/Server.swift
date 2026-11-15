@@ -1904,9 +1904,19 @@ public final class MCPServer: @unchecked Sendable {
         var targetNotes: [Note] = []
         if let ref = arguments["ref"] as? String { targetNotes = [try reader.note(ref)] }
         else if let tag = arguments["tag"] as? String { targetNotes = try reader.notes(NoteQuery(tag: tag)).map { try reader.note($0.id.uuid) } }
-        let note = targetNotes.first
         var paths = targetNotes.map(\.summary.folderPath)
-        if ["create_note", "create_report"].contains(tool.name), let folder = arguments["folder"] as? String {
+        var dispatchArguments = arguments
+        if tool.name == "create_report", let title = arguments["title"] as? String {
+            let target = try NotesReportWriter.resolveTarget(
+                title: title, folder: arguments["folder"] as? String,
+                replacing: arguments["replace"] as? Bool == true, reader: reader
+            )
+            paths.append(target.folder.path)
+            if arguments["replace"] as? Bool == true, let existing = target.existing.first {
+                targetNotes = [existing]
+            }
+            dispatchArguments["folder"] = target.folder.id
+        } else if tool.name == "create_note", let folder = arguments["folder"] as? String {
             paths += try folderPaths(folder)
         }
         if tool.name == "create_quick_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
@@ -1914,7 +1924,7 @@ public final class MCPServer: @unchecked Sendable {
         // MARK: w9-paper begin
         if tool.name == "drawing_create", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         // MARK: w9-paper end
-        var dispatchArguments = arguments
+        let note = targetNotes.first
         if let note { dispatchArguments["ref"] = note.summary.id.uuid }
         if tool.name == "link_add", let target = arguments["target"] as? String {
             dispatchArguments["target"] = try reader.summary(target).id.uuid

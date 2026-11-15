@@ -23,6 +23,12 @@ https://www.apple.com/newsroom/
 
 ## Research flow
 
+Use an `svg` fence or an `html diagram` fence for a rendered diagram. A plain `html` fence stays code:
+
+```html
+<section>This HTML is shown as code.</section>
+```
+
 ```svg
 <svg xmlns="http://www.w3.org/2000/svg" width="700" height="210" viewBox="0 0 700 210">
   <rect width="700" height="210" rx="18" fill="#F3F6FA"/>

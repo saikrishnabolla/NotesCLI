@@ -31,6 +31,8 @@ final class CapabilityHostTests: XCTestCase {
         XCTAssertTrue(CapabilityHostPolicy.allows(["permissions"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["collaboration", "activity", "note-id", "--limit", "10", "--json"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["ocr", "note-id", "--json"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["ocr", "set", "note-id", "--attachment", "image-id", "--text", "words"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["image-labels", "set", "note-id", "--attachment", "image-id", "--clear"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["map", "add", "note-id", "https://maps.apple.com/?q=Apple+Park"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "filter", "note-id", "gallery-id", "page-id", "color"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "state", "note-id", "gallery-id", "page-id"]))

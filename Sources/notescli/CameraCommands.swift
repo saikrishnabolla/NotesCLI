@@ -44,16 +44,17 @@ struct CameraPhoto: ParsableCommand {
         _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
         let note = try backend.reader.note(ref)
         let request = try CameraCaptureRequest(device: device, delay: delay, count: count)
-        let images = try cameraSource(sourceImage).capture(request)
         let arguments = ["ref": note.summary.id.uuid, "device": device ?? "default",
                          "delay": String(delay), "count": String(count),
                          "source": sourceImage == nil ? "avcapture" : "injected", "engine": "native"]
         let plan = DryRunPlan(operation: "cameraPhoto", target: note.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(note), engine: "native")
+        var images: [FrozenAttachmentInput] = []
         var inserted: [NativeAttachmentResult] = []
         let result = try SafetyExecutor.run(options: write, operation: "cameraPhoto", arguments: arguments,
                                             note: note, allowedPaths: [note.summary.folderPath],
                                             destructive: true, plan: plan) {
+            images = try cameraSource(sourceImage).capture(request)
             if backend.isFake { return FakeParityWrite.result(note, storing: "camera photos") }
             let writer = NativeNotesWriter()
             for (index, image) in images.enumerated() {
@@ -91,18 +92,21 @@ struct CameraScan: ParsableCommand {
         _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
         let note = try backend.reader.note(ref)
         let request = try CameraCaptureRequest(device: device, delay: delay, count: count)
-        let captured = try cameraSource(sourceImage).capture(request)
-        let pages = try captured.map(ScanCorrection.correctedPage)
         let arguments = ["ref": note.summary.id.uuid, "device": device ?? "default",
                          "delay": String(delay), "count": String(count),
                          "source": sourceImage == nil ? "avcapture" : "injected",
-                         "page_sha256": pages.map(\.sha256).joined(separator: ","), "engine": "native"]
+                         "page_sha256": "", "engine": "native"]
         let plan = DryRunPlan(operation: "cameraScan", target: note.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(note), engine: "native")
+        var pages: [FrozenAttachmentInput] = []
         var capturedResult: NativeScanResult?
         let result = try SafetyExecutor.run(options: write, operation: "cameraScan", arguments: arguments,
                                             note: note, allowedPaths: [note.summary.folderPath],
-                                            destructive: true, plan: plan, capturePrivatePayloads: !backend.isFake) {
+                                            destructive: true, plan: plan, capturePrivatePayloads: !backend.isFake,
+                                            finishArguments: {
+            ["page_sha256": pages.map(\.sha256).joined(separator: ",")]
+        }) {
+            pages = try cameraSource(sourceImage).capture(request).map(ScanCorrection.correctedPage)
             if backend.isFake { return FakeParityWrite.result(note, storing: "camera scans") }
             let value = try NativeNotesWriter().insertScan(
                 note.summary.id.uuid, pages: pages, position: position, allowShared: write.allowShared

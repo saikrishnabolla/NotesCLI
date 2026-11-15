@@ -156,6 +156,7 @@ public final class MCPServer: @unchecked Sendable {
             // MARK: w9-ux end
             t("count_notes", "Count notes matching filters.", [], filters),
             t("get_stats", "Get note, folder, account, and attachment-kind counts."),
+            t("doctor", "Probe the native private-framework, Core Data, and SQLite contracts."),
             // MARK: w9-ux begin
             t("get_capabilities", "Report Apple Notes feature, engine, permission, and native selector support."),
             // MARK: w9-ux end
@@ -1192,6 +1193,8 @@ public final class MCPServer: @unchecked Sendable {
             var folders: [String: Int] = [:], accounts: [String: Int] = [:]
             for note in notes { folders[note.folderPath.joined(separator: " > "), default: 0] += 1; accounts[note.accountID, default: 0] += 1 }
             return try content(["total": notes.count, "by_folder": folders, "by_account": accounts, "by_kind": reader.attachmentKindCounts()])
+        case "doctor":
+            return try content(try NotePresentation.object(NativeNotesWriter().doctor(forceContractProbe: true)) as! [String: Any])
         // MARK: w9-ux begin
         case "get_capabilities":
             return try content(try NotePresentation.object(CapabilityReporter.report()) as! [String: Any])

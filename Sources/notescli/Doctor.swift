@@ -5,6 +5,7 @@ import NotesAutomation
 import NotesCore
 import NotesHost
 import NotesMCP
+import NotesNative
 
 func automationPermission() -> String {
     var target = AEAddressDesc()
@@ -65,8 +66,30 @@ struct Doctor: ParsableCommand {
     @OptionGroup var options: GlobalOptions
     @Flag(name: .customLong("for-agent"), help: "Return a stable readiness contract for agents.")
     var forAgent = false
+    @Flag(help: "Probe the private Notes runtime contract.")
+    var native = false
+    @Flag(help: "Write and remove a disposable native-feature canary note.")
+    var canary = false
+
+    func validate() throws {
+        if canary && !native { throw ValidationError("--canary requires --native") }
+        if native && forAgent { throw ValidationError("--native cannot be combined with --for-agent") }
+    }
 
     func run() throws {
+        if native {
+            let doctor = NativeNotesWriter().doctor(forceContractProbe: true)
+            if canary {
+                let result = try NativeContractCanary.run(doctor: doctor)
+                if options.json { try Output.json(result) }
+                else { Output.table(["ELEMENT", "RESULT"], result.elements.keys.sorted().map { [$0, result.elements[$0] == true ? "ok" : "failed"] }) }
+            } else if options.json { try Output.json(doctor) }
+            else {
+                let rows = doctor.contract?.features.map { [$0.feature.rawValue, $0.ok ? "ok" : $0.failures.map(\.name).joined(separator: ", ")] } ?? []
+                Output.table(["NATIVE CONTRACT", "RESULT"], rows)
+            }
+            return
+        }
         if forAgent {
             let report = agentReport()
             if options.json { try Output.json(report) }

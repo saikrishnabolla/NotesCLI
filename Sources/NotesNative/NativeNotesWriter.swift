@@ -2317,73 +2317,154 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
-    public func setAttachmentMarkupData(_ ref: String, attachmentID: String, data: Data,
-                                        embedded: Bool, allowShared: Bool) throws -> NativeWriteResult {
-        guard !data.isEmpty, data.count <= 50 * 1024 * 1024 else {
-            throw NotesError("invalid_attachment_markup", "Attachment markup data must be between 1 byte and 50 MB.")
+    private func attachmentMarkupObject(_ attachmentID: String, note: NSManagedObject,
+                                        in context: NSManagedObjectContext,
+                                        forMutation: Bool = false) throws -> NSManagedObject {
+        let matches = try fetch(
+            "ICAttachment",
+            predicate: NSPredicate(format: "identifier ==[c] %@ AND note == %@ AND markedForDeletion == NO",
+                                   attachmentID, note),
+            in: context
+        )
+        guard !matches.isEmpty else {
+            throw NotesError("attachment_not_found", "No live attachment matches \(attachmentID).")
         }
-        let expectedHash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        return try performWrite { context in
-            let note = try note(ref, in: context)
-            try guardWritable(note, allowShared: allowShared)
-            guard let attachment = try fetch(
-                "ICAttachment",
-                predicate: NSPredicate(
-                    format: "identifier == %@ AND note == %@ AND markedForDeletion == NO",
-                    attachmentID,
-                    note
-                ),
-                in: context,
-                limit: 1
-            ).first else {
-                throw NotesError("attachment_not_found", "No live attachment matches \(attachmentID).")
-            }
-            let type = (value(attachment, "typeUTI") as? String ?? "").lowercased()
-            guard type.contains("image") || type.contains("jpeg") || type.contains("png") ||
-                    type.contains("heic") || type.contains("pdf") else {
-                throw NotesError("markup_unsupported", "Editable attachment markup is limited to images and PDFs.")
-            }
-            operation?.noteID = id(note)
-            operation?.attachmentID = attachmentID
+        guard matches.count == 1 else {
+            throw NotesError("ambiguous_attachment", "More than one attachment matches \(attachmentID).")
+        }
+        let attachment = matches[0]
+        var selectors = ["identifier", "typeUTI", "markupModelData", "hasMarkupData"]
+        if forMutation {
+            selectors += ["setMarkupModelData:", "setHasMarkupData:", "updateChangeCountWithReason:"]
+        }
+        try require(selectors, of: attachment)
+        let type = value(attachment, "typeUTI") as? String ?? ""
+        guard AttachmentMarkupPolicy.supports(type) else {
+            throw NotesError("markup_unsupported", "Editable attachment markup is limited to images and PDFs.")
+        }
+        return attachment
+    }
+
+    private func attachmentMarkupExport(_ ref: String, attachmentID: String,
+                                        in context: NSManagedObjectContext) throws -> NativeAttachmentMarkupExport {
+        let note = try note(ref, in: context)
+        let attachment = try attachmentMarkupObject(attachmentID, note: note, in: context)
+        let data = value(attachment, "markupModelData") as? Data ?? Data()
+        guard data.count <= FrozenAttachmentMarkup.maximumBytes else {
+            throw NotesError("attachment_markup_too_large", "Attachment markup is limited to 50 MB.")
+        }
+        let hash = data.isEmpty ? nil : SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let metadata = NativeAttachmentMarkupMetadata(
+            noteID: id(note), attachmentID: id(attachment),
+            typeUTI: value(attachment, "typeUTI") as? String ?? "",
+            hasMarkup: !data.isEmpty, byteCount: data.count, sha256: hash,
+            embedded: (value(attachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false,
+            recognized: !data.isEmpty && FrozenAttachmentMarkup.isKnownArchive(data)
+        )
+        return NativeAttachmentMarkupExport(metadata: metadata, data: data)
+    }
+
+    public func attachmentMarkupMetadata(_ ref: String, attachmentID: String) throws -> NativeAttachmentMarkupMetadata {
+        try performRead { try attachmentMarkupExport(ref, attachmentID: attachmentID, in: $0).metadata }
+    }
+
+    public func attachmentMarkupData(_ ref: String, attachmentID: String) throws -> NativeAttachmentMarkupExport {
+        let value = try performRead { try attachmentMarkupExport(ref, attachmentID: attachmentID, in: $0) }
+        guard value.metadata.hasMarkup else {
+            throw NotesError("attachment_markup_not_found", "The attachment has no editable markup payload.")
+        }
+        return value
+    }
+
+    private func mutateAttachmentMarkup(_ ref: String, attachmentID: String,
+                                        payload: FrozenAttachmentMarkup?, embedded: Bool,
+                                        allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            let target = try note(ref, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            let attachment = try attachmentMarkupObject(attachmentID, note: target, in: context, forMutation: true)
+            let canonicalAttachmentID = id(attachment)
+            operation?.noteID = id(target)
+            operation?.attachmentID = canonicalAttachmentID
             operation?.attachmentType = value(attachment, "typeUTI") as? String
             do {
-                try NCNotesRuntime.setValue(data, forKey: "markupModelData", of: attachment)
-                try NCNotesRuntime.setValue(embedded, forKey: "hasMarkupData", of: attachment)
-                try NCNotesRuntime.updateChangeCount(of: attachment, reason: "Changed editable markup")
-                try save(context, notes: [note])
+                try NCNotesRuntime.setValue(payload?.data, forKey: "markupModelData", of: attachment)
+                try NCNotesRuntime.setValue(payload == nil ? false : embedded, forKey: "hasMarkupData", of: attachment)
+                try NCNotesRuntime.updateChangeCount(of: attachment,
+                                                     reason: payload == nil ? "Cleared editable markup" : "Changed editable markup")
+                try save(context, notes: [target])
             } catch {
                 context.rollback()
                 throw nativeError(error)
             }
-            let fresh = try self.note(id(note), in: context)
-            guard let storedAttachment = try fetch(
-                "ICAttachment",
-                predicate: NSPredicate(format: "identifier == %@ AND note == %@", attachmentID, fresh),
-                in: context,
-                limit: 1
-            ).first,
-                  let stored = value(storedAttachment, "markupModelData") as? Data else {
-                throw NotesError("attachment_markup_unavailable", "Notes did not retain the editable markup payload.")
-            }
-            let storedHash = SHA256.hash(data: stored).map { String(format: "%02x", $0) }.joined()
+            let fresh = try self.note(id(target), in: context)
+            let storedAttachment = try attachmentMarkupObject(canonicalAttachmentID, note: fresh, in: context)
+            let stored = value(storedAttachment, "markupModelData") as? Data
             let storedEmbedded = (value(storedAttachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false
+            let storedHash = stored.flatMap { data in
+                data.isEmpty ? nil : SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            }
+            let expectedHash = payload?.sha256
+            let cleared = stored?.isEmpty != false && !storedEmbedded
+            let native = ["attachmentID": id(storedAttachment),
+                          "sha256": storedHash ?? "", "embedded": String(storedEmbedded),
+                          "hasMarkup": String(stored?.isEmpty == false)]
             return result(
-                id(note),
-                native: ["attachmentID": attachmentID, "sha256": storedHash,
-                         "embedded": String(storedEmbedded)],
-                nativeVerified: storedHash == expectedHash && storedEmbedded == embedded,
+                id(target), native: native,
+                nativeVerified: payload == nil ? cleared : storedHash == expectedHash && storedEmbedded == embedded,
                 sqlite: { decoded in
-                    guard let actual = decoded.attachments.first(where: { $0.id == attachmentID }),
-                          actual.hasEmbeddedMarkup == embedded,
-                          let payload = try? SQLiteNotesStore(refresh: true)
-                            .scanMarkupPayloads(decoded.summary.id.uuid)[attachmentID] else { return nil }
-                    let hash = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                    let actual = decoded.attachments.first { $0.id.caseInsensitiveCompare(canonicalAttachmentID) == .orderedSame }
+                    let sqlitePayload = try? SQLiteNotesStore(refresh: true)
+                        .scanMarkupPayloads(decoded.summary.id.uuid)[canonicalAttachmentID]
+                    if payload == nil {
+                        guard let actual,
+                              (actual.markupDataBytes ?? 0) == 0,
+                              actual.hasEmbeddedMarkup != true,
+                              sqlitePayload == nil else { return nil }
+                        return ["attachmentID": canonicalAttachmentID, "sha256": "", "embedded": "false", "hasMarkup": "false"]
+                    }
+                    guard actual?.markupDataBytes == payload?.byteCount,
+                          actual?.hasEmbeddedMarkup == embedded,
+                          let sqlitePayload else { return nil }
+                    let hash = SHA256.hash(data: sqlitePayload).map { String(format: "%02x", $0) }.joined()
                     return hash == expectedHash
-                        ? ["attachmentID": attachmentID, "sha256": hash, "embedded": String(embedded)] : nil
+                        ? ["attachmentID": canonicalAttachmentID, "sha256": hash,
+                           "embedded": String(embedded), "hasMarkup": "true"] : nil
                 },
-                mismatch: "The editable attachment markup did not match after readback."
+                mismatch: payload == nil
+                    ? "The editable attachment markup remained after clear readback."
+                    : "The editable attachment markup did not match after readback."
             )
         }
+    }
+
+    public func setAttachmentMarkupData(_ ref: String, attachmentID: String, data: Data,
+                                        embedded: Bool, allowShared: Bool) throws -> NativeWriteResult {
+        try setAttachmentMarkup(ref, attachmentID: attachmentID,
+                                payload: FrozenAttachmentMarkup(data: data), embedded: embedded,
+                                allowShared: allowShared)
+    }
+
+    public func setAttachmentMarkup(_ ref: String, attachmentID: String,
+                                    payload: FrozenAttachmentMarkup, embedded: Bool,
+                                    allowShared: Bool) throws -> NativeWriteResult {
+        try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: payload,
+                                   embedded: embedded, allowShared: allowShared)
+    }
+
+    public func copyAttachmentMarkup(_ ref: String, attachmentID: String,
+                                     sourceRef: String, sourceAttachmentID: String,
+                                     allowShared: Bool) throws -> NativeWriteResult {
+        let source = try attachmentMarkupData(sourceRef, attachmentID: sourceAttachmentID)
+        let payload = try FrozenAttachmentMarkup(data: source.data)
+        return try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: payload,
+                                          embedded: source.metadata.embedded, allowShared: allowShared)
+    }
+
+    public func clearAttachmentMarkup(_ ref: String, attachmentID: String,
+                                      allowShared: Bool) throws -> NativeWriteResult {
+        try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: nil,
+                                   embedded: false, allowShared: allowShared)
     }
 
     public func setScanCrop(_ ref: String, attachmentID: String, pageID: String,

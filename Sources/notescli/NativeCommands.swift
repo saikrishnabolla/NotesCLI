@@ -763,7 +763,7 @@ struct AttachCommand: ParsableCommand {
     }
     func run() throws { try writeExtraAttach(options: options, write: write, ref: ref, path: path, pasteboard: pasteboard, position: position, view: view) }
 }
-struct AttachmentCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "attachment", subcommands: [AttachmentDelete.self]) }
+struct AttachmentCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "attachment", subcommands: [AttachmentDelete.self, AttachmentMarkupCommand.self]) }
 struct AttachmentDelete: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "delete")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions; @Argument var ref: String; @Argument var attachmentID: String

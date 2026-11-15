@@ -335,6 +335,21 @@ public final class MCPServer: @unchecked Sendable {
                    "background": ["type": "string", "enum": ["white", "transparent", "auto"]],
                    "dark": bool], write: true, native: true),
                 // MARK: w9-diagram end
+                t("attachment_markup_inspect", "Inspect bounded editable markup metadata for an image or PDF attachment.",
+                  ["ref", "attachment_id"], ["ref": string, "attachment_id": string], native: true),
+                t("attachment_markup_export", "Export an image or PDF attachment's bounded editable markup payload to a new file.",
+                  ["ref", "attachment_id", "output"], ["ref": string, "attachment_id": string, "output": string],
+                  write: true, native: true),
+                t("attachment_markup_set", "Set recognized editable markup from a frozen local file.",
+                  ["ref", "attachment_id", "path"], ["ref": string, "attachment_id": string, "path": string, "embedded": bool],
+                  write: true, native: true, destructive: true),
+                t("attachment_markup_copy", "Copy recognized editable markup from another image or PDF attachment.",
+                  ["ref", "attachment_id", "source_ref", "source_attachment_id"],
+                  ["ref": string, "attachment_id": string, "source_ref": string, "source_attachment_id": string],
+                  write: true, native: true, destructive: true),
+                t("attachment_markup_clear", "Clear editable markup from an image or PDF attachment.",
+                  ["ref", "attachment_id"], ["ref": string, "attachment_id": string],
+                  write: true, native: true, destructive: true),
                 t("delete_attachment", "Delete a native attachment.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string], write: true, native: true, destructive: true),
                 t("table_create", "Create a native table.", ["ref", "rows"], ["ref": string, "rows": rows, "position": integer], write: true, native: true),
                 t("table_set", "Set a native table cell.", ["ref", "attachment_id", "row", "column", "text"], ["ref": string, "attachment_id": string, "row": integer, "column": integer, "text": string], write: true, native: true),
@@ -370,6 +385,7 @@ public final class MCPServer: @unchecked Sendable {
         let pathTools: Set<String> = [
             "save_attachment", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes",
             "recording_add", "recording_create", "attach_file", "diagram_add", "drawing_add", "drawing_create",
+            "attachment_markup_export", "attachment_markup_set",
         ]
         exposed.removeAll { pathTools.contains($0.name) }
         exposed = exposed.map { tool in
@@ -977,6 +993,10 @@ public final class MCPServer: @unchecked Sendable {
         // MARK: w3-write begin
         let nativeBodyTools = Set(["append_to_note", "prepend_to_note", "update_note", "write_markdown", "insert_under_heading", "replace_section", "replace_text"])
         let nativeRoutableTools = nativeBodyTools.union(["create_note"])
+        let markupTools = Set(["attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear"])
+        if markupTools.contains(tool.name), s("engine") == "scripting" {
+            throw NotesError("native_required", "Editable attachment markup requires the private native engine.")
+        }
         if ["file_push", "sync_notes"].contains(tool.name), s("engine") == "native" {
             throw NotesError("unsupported_engine", "The native engine is not available for MCP file or folder sync. Use write_markdown for an explicit native body replacement.")
         }
@@ -1444,9 +1464,62 @@ public final class MCPServer: @unchecked Sendable {
         }
         if tool.name == "undo" { return try callNativeUndo(tool, arguments, nativeHandler: nativeHandler) }
         if tool.name == "revert" { return try callNativeRevert(tool, arguments, nativeHandler: nativeHandler) }
-        if !tool.write {
-            let value = try nativeHandler(tool.name, arguments)
+        if tool.name == "attachment_markup_export" {
+            let note = try reader.note(arguments["ref"] as! String)
+            if arguments["dry_run"] as? Bool == true {
+                return try content(["dry_run": true, "tool": tool.name, "engine": "native",
+                                    "arguments": arguments, "message": "No changes made."])
+            }
+            var dispatch = arguments
+            dispatch["ref"] = note.summary.id.uuid
+            let value = try nativeHandler(tool.name, dispatch)
             return try content(["engine": "native", "value": try JSONSerialization.jsonObject(with: value.value)])
+        }
+        if !tool.write {
+            var dispatch = arguments
+            if tool.name == "attachment_markup_inspect" {
+                dispatch["ref"] = try reader.note(arguments["ref"] as! String).summary.id.uuid
+            }
+            let value = try nativeHandler(tool.name, dispatch)
+            return try content(["engine": "native", "value": try JSONSerialization.jsonObject(with: value.value)])
+        }
+        if tool.name == "attachment_markup_set" {
+            let note = try reader.note(arguments["ref"] as! String)
+            let source = URL(fileURLWithPath: NSString(string: arguments["path"] as! String).expandingTildeInPath)
+            let frozen = try FrozenAttachmentMarkup(file: source)
+            var dispatch = arguments
+            dispatch.removeValue(forKey: "path")
+            dispatch["ref"] = note.summary.id.uuid
+            dispatch["_markup_data"] = frozen.data
+            var recorded = arguments
+            recorded.removeValue(forKey: "path")
+            recorded["markup_sha256"] = frozen.sha256
+            recorded["markup_bytes"] = frozen.byteCount
+            return try safeWrite(tool: tool, arguments: recorded, note: note,
+                                 paths: [note.summary.folderPath], engine: "native", snapshotNotes: [note]) {
+                let value = try nativeHandler(tool.name, dispatch)
+                guard let result = value.result else {
+                    throw NotesError("invalid_native_result", "The native markup write did not return a write result.")
+                }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        if tool.name == "attachment_markup_copy" {
+            let note = try reader.note(arguments["ref"] as! String)
+            let source = try reader.note(arguments["source_ref"] as! String)
+            var dispatch = arguments
+            dispatch["ref"] = note.summary.id.uuid
+            dispatch["source_ref"] = source.summary.id.uuid
+            var recorded = arguments
+            recorded["source_ref"] = source.summary.id.uuid
+            return try safeWrite(tool: tool, arguments: recorded, note: note,
+                                 paths: [note.summary.folderPath], engine: "native", snapshotNotes: [note]) {
+                let value = try nativeHandler(tool.name, dispatch)
+                guard let result = value.result else {
+                    throw NotesError("invalid_native_result", "The native markup copy did not return a write result.")
+                }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
         }
         if tool.name == "checklist_auto_sort" {
             let current = try nativeHandler("journal_get_checklist_auto_sort", [:])

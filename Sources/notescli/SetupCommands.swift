@@ -160,6 +160,11 @@ private struct MCPFolderDateGroupingValue: Codable {
     var type: Int
 }
 
+private struct MCPAttachmentMarkupExportValue: Codable {
+    var metadata: NativeAttachmentMarkupMetadata
+    var path: String
+}
+
 private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: any NotesReading) throws -> MCPNativeResult {
     func string(_ key: String) -> String? { arguments[key] as? String }
     func integer(_ key: String) -> Int? { (arguments[key] as? NSNumber)?.intValue }
@@ -243,6 +248,9 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     }
     let writer = NativeNotesWriter()
     let allowShared = boolean("allow_shared") ?? false
+    if tool.hasPrefix("attachment_markup_"), reader is InMemoryNotes {
+        throw NotesError("native_unavailable", "Editable markup is unavailable with the fake backend.")
+    }
     switch tool {
     case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: writer.checklistAutoSortEnabled())
     case "journal_get_default_account": return try MCPNativeResult(value: writer.defaultAccountIdentifier())
@@ -638,6 +646,32 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         let value = try DiagramWriteService().add(file: diagramFile(string("file")!), to: ref(), options: renderOptions,
                                                   mode: mode, allowShared: allowShared)
         return try MCPNativeResult(result: value.0.write.writeResult, operationID: value.0.write.operationID, value: value.0)
+    case "attachment_markup_inspect":
+        return try MCPNativeResult(value: writer.attachmentMarkupMetadata(
+            ref(), attachmentID: string("attachment_id")!
+        ))
+    case "attachment_markup_export":
+        let value = try writer.attachmentMarkupData(ref(), attachmentID: string("attachment_id")!)
+        let output = URL(fileURLWithPath: NSString(string: string("output")!).expandingTildeInPath)
+        let target = try value.write(to: output)
+        return try MCPNativeResult(value: MCPAttachmentMarkupExportValue(metadata: value.metadata, path: target.path))
+    case "attachment_markup_set":
+        guard let data = arguments["_markup_data"] as? Data else {
+            throw NotesError("invalid_attachment_markup", "The frozen markup payload is missing.")
+        }
+        return try result(writer.setAttachmentMarkup(
+            ref(), attachmentID: string("attachment_id")!, payload: FrozenAttachmentMarkup(data: data),
+            embedded: boolean("embedded") ?? false, allowShared: allowShared
+        ))
+    case "attachment_markup_copy":
+        return try result(writer.copyAttachmentMarkup(
+            ref(), attachmentID: string("attachment_id")!, sourceRef: string("source_ref")!,
+            sourceAttachmentID: string("source_attachment_id")!, allowShared: allowShared
+        ))
+    case "attachment_markup_clear":
+        return try result(writer.clearAttachmentMarkup(
+            ref(), attachmentID: string("attachment_id")!, allowShared: allowShared
+        ))
     case "delete_attachment": return try result(writer.deleteAttachment(ref(), attachmentID: string("attachment_id")!, allowShared: (boolean("allow_shared") ?? false)))
     case "table_create":
         guard let rows = arguments["rows"] as? [[String]] else { throw NotesError("invalid_arguments", "rows must be an array of string arrays.") }

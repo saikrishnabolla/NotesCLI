@@ -103,8 +103,10 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 143)
-        for name in ["ocr_set", "image_labels_set", "handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
+        XCTAssertEqual(nativeTools.count, 148)
+        for name in ["ocr_set", "image_labels_set", "attachment_markup_inspect", "attachment_markup_export",
+                     "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear",
+                     "handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "undo" })

@@ -98,7 +98,8 @@ struct NotesCLI: ParsableCommand {
         if arguments.contains("--help") || arguments.contains("-h") || arguments.contains("--version") {
             return false
         }
-        if CapabilityHostPolicy.commandIndex(arguments).map({ arguments[$0] }) == "doctor" { return false }
+        if let command = CapabilityHostPolicy.commandIndex(arguments).map({ arguments[$0] }),
+           command == "doctor" || command == "capabilities" { return false }
         if route == .auto, HostInstallation.requiresInstallOrUpgrade { return false }
         guard CapabilityHostPolicy.commandIndex(arguments) != nil else {
             return CapabilityHostPolicy.allows(arguments) && (route == .force || CapabilityHostClient.isAvailable())

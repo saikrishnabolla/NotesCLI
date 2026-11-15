@@ -8,7 +8,7 @@ import ObjectiveC.runtime
 import SQLite3
 
 public enum NativeContractFeature: String, Codable, CaseIterable, Sendable {
-    case core, tags, tables, scans, recordings, paper
+    case core, tags, tables, scans, markup, links, recordings, paper
 }
 
 public enum NativeContractFailureKind: String, Codable, Sendable {
@@ -34,6 +34,7 @@ public struct NativeContractReport: Codable, Sendable {
     public var osBuild: String
     public var macOS: String
     public var dyldSharedCacheUUID: String
+    public var frameworkUUIDs: [String: String]
     public var manifestHash: String
     public var cliVersion: String
     public var cacheKey: String
@@ -56,17 +57,21 @@ public struct NativeContractReport: Codable, Sendable {
         )
     }
 
-    public func require(_ feature: NativeContractFeature) throws {
-        let failures = self.feature(.core).failures + (feature == .core ? [] : self.feature(feature).failures)
+    public func require(_ requestedFeatures: Set<NativeContractFeature>) throws {
+        let requested = requestedFeatures.union([.core])
+        let failures = requested.sorted { $0.rawValue < $1.rawValue }.flatMap { feature($0).failures }
         guard failures.isEmpty else {
             let names = failures.map(\.name).sorted().joined(separator: ", ")
+            let featureNames = requested.map(\.rawValue).sorted().joined(separator: ", ")
             throw NotesError(
                 "native_contract_changed",
-                "The native \(feature.rawValue) contract changed: \(names). Nothing was written.",
+                "The native contract for \(featureNames) changed: \(names). Nothing was written.",
                 hint: "Run notescli doctor --native --json for the full report. Plain-text writes may use AppleScript; rich writes require a compatible NotesCLI update."
             )
         }
     }
+
+    public func require(_ feature: NativeContractFeature) throws { try require([feature]) }
 }
 
 struct NativeObjCMessageContract: Sendable {
@@ -76,9 +81,16 @@ struct NativeObjCMessageContract: Sendable {
     var source: String
 }
 
+struct NativeSelectorContract: Sendable {
+    var classNames: [String]
+    var selector: String
+    var isClassMethod: Bool?
+    var feature: NativeContractFeature
+}
+
 enum NativeContractRequirement: Sendable {
     case classNamed(feature: NativeContractFeature, name: String)
-    case selector(feature: NativeContractFeature, className: String?, selector: String,
+    case selector(feature: NativeContractFeature, classNames: [String], selector: String,
                   isClassMethod: Bool?, encoding: String?)
     case attribute(feature: NativeContractFeature, entity: String, name: String)
     case column(feature: NativeContractFeature, table: String, name: String)
@@ -156,11 +168,10 @@ enum NativeContractManifest {
     static var requirements: [NativeContractRequirement] {
         generatedClassFeatures.flatMap { name, features in
             features.map { .classNamed(feature: $0, name: name) }
-        } + generatedSelectorFeatures.flatMap { selector, features in
-            features.map {
-                .selector(feature: $0, className: nil, selector: selector,
-                          isClassMethod: nil, encoding: abiEncodings[selector])
-            }
+        } + generatedSelectorContracts.map { contract in
+            .selector(feature: contract.feature, classNames: contract.classNames,
+                      selector: contract.selector, isClassMethod: contract.isClassMethod,
+                      encoding: abiEncodings[contract.selector])
         } + generatedKVCFeatures.flatMap { name, features in
             features.map { .kvc(feature: $0, name: name) }
         } + generatedIvarFeatures.flatMap { name, features in
@@ -179,8 +190,8 @@ enum NativeContractManifest {
                 return "column|\(feature.rawValue)|\(table)|\(name)"
             case .classNamed(let feature, let name):
                 return "class|\(feature.rawValue)|\(name)"
-            case .selector(let feature, let className, let selector, let isClassMethod, let encoding):
-                return "selector|\(feature.rawValue)|\(className ?? "")|\(selector)|\(isClassMethod.map(String.init) ?? "")|\(encoding ?? "")"
+            case .selector(let feature, let classNames, let selector, let isClassMethod, let encoding):
+                return "selector|\(feature.rawValue)|\(classNames.sorted().joined(separator: ","))|\(selector)|\(isClassMethod.map(String.init) ?? "")|\(encoding ?? "")"
             case .kvc(let feature, let name):
                 return "kvc|\(feature.rawValue)|\(name)"
             case .ivar(let feature, let name):
@@ -197,7 +208,8 @@ enum NativeContractProbe {
     nonisolated(unsafe) private static var memoryCache: [String: NativeContractReport] = [:]
 
     static func evaluate(requirements: [NativeContractRequirement], runtime: NativeContractRuntime,
-                         dyldUUID: String = "test", cliVersion: String = notesCLIVersion,
+                         dyldUUID: String = "test", frameworkUUIDs: [String: String] = [:],
+                         cliVersion: String = notesCLIVersion,
                          manifestHash: String = NativeContractManifest.hash) -> NativeContractReport {
         var failures = Dictionary(uniqueKeysWithValues: NativeContractFeature.allCases.map { ($0, [NativeContractFailure]()) })
         func fail(_ feature: NativeContractFeature, _ kind: NativeContractFailureKind,
@@ -208,18 +220,28 @@ enum NativeContractProbe {
             switch requirement {
             case .classNamed(let feature, let name):
                 if !runtime.classExists(name) { fail(feature, .class, name) }
-            case .selector(let feature, let className, let selector, let isClassMethod, let encoding):
-                let label = className.map { "\(isClassMethod == true ? "+" : "-")[\($0) \(selector)]" } ?? selector
-                let actual: Set<String>
-                if let className, let isClassMethod {
-                    actual = runtime.methodEncoding(class: className, selector: selector, isClassMethod: isClassMethod).map { [$0] } ?? []
-                } else {
-                    actual = runtime.methodEncodings(selector: selector)
+            case .selector(let feature, let classNames, let selector, let isClassMethod, let encoding):
+                guard !classNames.isEmpty else {
+                    fail(feature, .selector, selector)
+                    continue
                 }
-                if actual.isEmpty {
+                let kinds = isClassMethod.map { [$0] } ?? [false, true]
+                let matches = classNames.flatMap { className in
+                    kinds.compactMap { classMethod -> (String, String)? in
+                        runtime.methodEncoding(class: className, selector: selector,
+                                               isClassMethod: classMethod).map {
+                            ("\(classMethod ? "+" : "-")[\(className) \(selector)]", $0)
+                        }
+                    }
+                }
+                let label = classNames.count == 1
+                    ? "\(isClassMethod == true ? "+" : "-")[\(classNames[0]) \(selector)]"
+                    : "\(selector) on {\(classNames.sorted().joined(separator: ", "))}"
+                guard !matches.isEmpty else {
                     fail(feature, .selector, label)
                     continue
                 }
+                let actual = Set(matches.map(\.1))
                 if let encoding, !actual.map(normalizeEncoding).contains(normalizeEncoding(encoding)) {
                     fail(feature, .methodEncoding, label, expected: encoding, actual: actual.sorted().joined(separator: " | "))
                 }
@@ -239,7 +261,8 @@ enum NativeContractProbe {
                 if !runtime.hasIvar(name) { fail(feature, .ivar, name) }
             }
         }
-        let key = cacheKey(dyldUUID: dyldUUID, manifestHash: manifestHash, cliVersion: cliVersion)
+        let key = cacheKey(dyldUUID: dyldUUID, frameworkUUIDs: frameworkUUIDs,
+                           manifestHash: manifestHash, cliVersion: cliVersion)
         let featureReports = NativeContractFeature.allCases.map {
             let rows = failures[$0, default: []].sorted { $0.name < $1.name }
             return NativeFeatureContractReport(feature: $0, failures: rows, ok: rows.isEmpty)
@@ -250,6 +273,7 @@ enum NativeContractProbe {
             osBuild: runtime.osBuild,
             macOS: runtime.macOS,
             dyldSharedCacheUUID: dyldUUID,
+            frameworkUUIDs: frameworkUUIDs,
             manifestHash: manifestHash,
             cliVersion: cliVersion,
             cacheKey: key,
@@ -270,8 +294,10 @@ enum NativeContractProbe {
 
     static func live(force: Bool = false) -> NativeContractReport {
         let dyldUUID = LiveNativeContractRuntime.dyldSharedCacheUUID()
-        let canCache = dyldUUID != "unknown"
-        let key = cacheKey(dyldUUID: dyldUUID, manifestHash: NativeContractManifest.hash,
+        let frameworkUUIDs = LiveNativeContractRuntime.contractFrameworkUUIDs()
+        let canCache = dyldUUID != "unknown" && !frameworkUUIDs.values.contains("unknown")
+        let key = cacheKey(dyldUUID: dyldUUID, frameworkUUIDs: frameworkUUIDs,
+                           manifestHash: NativeContractManifest.hash,
                            cliVersion: notesCLIVersion)
         lock.lock()
         if canCache, !force, let cached = memoryCache[key] { lock.unlock(); return cached }
@@ -281,7 +307,8 @@ enum NativeContractProbe {
             return cached
         }
         let report = evaluate(requirements: NativeContractManifest.requirements,
-                              runtime: LiveNativeContractRuntime(), dyldUUID: dyldUUID)
+                              runtime: LiveNativeContractRuntime(), dyldUUID: dyldUUID,
+                              frameworkUUIDs: frameworkUUIDs)
         if canCache {
             writeCache(report)
             lock.lock(); memoryCache[key] = report; lock.unlock()
@@ -293,8 +320,11 @@ enum NativeContractProbe {
         value.replacingOccurrences(of: #"\d+"#, with: "", options: .regularExpression)
     }
 
-    private static func cacheKey(dyldUUID: String, manifestHash: String, cliVersion: String) -> String {
-        let data = Data("\(dyldUUID)|\(manifestHash)|\(cliVersion)".utf8)
+    private static func cacheKey(dyldUUID: String, frameworkUUIDs: [String: String],
+                                 manifestHash: String, cliVersion: String) -> String {
+        let frameworks = frameworkUUIDs.keys.sorted().map { "\($0)=\(frameworkUUIDs[$0]!)" }
+            .joined(separator: ",")
+        let data = Data("\(dyldUUID)|\(frameworks)|\(manifestHash)|\(cliVersion)".utf8)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -462,16 +492,40 @@ private final class LiveNativeContractRuntime: NativeContractRuntime {
     }
 
     static func dyldSharedCacheUUID() -> String {
-        guard let output = process("/usr/bin/dyld_info", ["-uuid", "/usr/lib/dyld"]) else { return "unknown" }
-        let arch = ProcessInfo.processInfo.machineArchitecture
-        let sections = output.components(separatedBy: "/usr/lib/dyld ").filter { !$0.isEmpty }
-        let selected = sections.first { $0.contains("[\(arch)") } ??
-            sections.first { arch.hasPrefix("arm64") && $0.contains("[arm64") } ?? sections.last
-        guard let selected,
-              let match = selected.range(of: #"[0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27,}"#, options: .regularExpression) else {
-            return "unknown"
+        typealias SharedCacheUUID = @convention(c) (UnsafeMutablePointer<UInt8>) -> Bool
+        if let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_dyld_get_shared_cache_uuid") {
+            var bytes = [UInt8](repeating: 0, count: 16)
+            let found = bytes.withUnsafeMutableBufferPointer {
+                unsafeBitCast(symbol, to: SharedCacheUUID.self)($0.baseAddress!)
+            }
+            if found {
+                return bytes.withUnsafeBufferPointer { NSUUID(uuidBytes: $0.baseAddress!).uuidString }
+            }
         }
-        return String(selected[match]).uppercased()
+        let path = "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_\(ProcessInfo.processInfo.machineArchitecture)"
+        guard let handle = FileHandle(forReadingAtPath: path) else { return "unknown" }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: 0x58)
+            let data = try handle.read(upToCount: 16) ?? Data()
+            guard data.count == 16 else { return "unknown" }
+            return data.withUnsafeBytes {
+                NSUUID(uuidBytes: $0.bindMemory(to: UInt8.self).baseAddress!).uuidString
+            }
+        } catch { return "unknown" }
+    }
+
+    static func contractFrameworkUUIDs() -> [String: String] {
+        Dictionary(uniqueKeysWithValues: contractFrameworks.map { name, path in
+            (name, binaryUUID(path) ?? "unknown")
+        })
+    }
+
+    private static func binaryUUID(_ path: String) -> String? {
+        guard let output = process("/usr/bin/dyld_info", ["-uuid", path]),
+              let match = output.range(of: #"[0-9A-Fa-f]{8}-[0-9A-Fa-f-]{27,}"#,
+                                       options: .regularExpression) else { return nil }
+        return String(output[match]).uppercased()
     }
 
     private static func process(_ executable: String, _ arguments: [String]) -> String? {
@@ -497,6 +551,12 @@ private final class LiveNativeContractRuntime: NativeContractRuntime {
         "/System/Library/PrivateFrameworks/MarkupUI.framework/MarkupUI",
         "/System/Library/Frameworks/PencilKit.framework/PencilKit",
         "/System/Library/Frameworks/PaperKit.framework/PaperKit",
+    ]
+
+    private static let contractFrameworks = [
+        ("NotesShared", "/System/Library/PrivateFrameworks/NotesShared.framework/NotesShared"),
+        ("AnnotationKit", "/System/Library/PrivateFrameworks/AnnotationKit.framework/AnnotationKit"),
+        ("PaperKit", "/System/Library/Frameworks/PaperKit.framework/PaperKit"),
     ]
 }
 

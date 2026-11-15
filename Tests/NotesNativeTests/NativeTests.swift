@@ -73,7 +73,7 @@ final class NativeTests: XCTestCase {
         var writer: NativeNotesWriter!
         writer = NativeNotesWriter(operationID: { "operation-123" }, contextProvider: { context })
 
-        let result = try writer.performWrite { _ in
+        let result = try writer.performWrite(features: [.core]) { _ in
             writer.operation?.committed = true
             throw NotesError("synthetic_nudge_failure", "The Notes.app save nudge timed out.")
         }
@@ -199,7 +199,7 @@ final class NativeTests: XCTestCase {
         var writer: NativeNotesWriter!
         writer = NativeNotesWriter(operationID: { "operation-queue" }, contextProvider: { context })
 
-        _ = try writer.performWrite { context in
+        _ = try writer.performWrite(features: [.core]) { context in
             let object = NSEntityDescription.insertNewObject(forEntityName: "Item", into: context)
             object.setValue("saved", forKey: "value")
             try context.save()
@@ -226,7 +226,7 @@ final class NativeTests: XCTestCase {
         }
         let writer = NativeNotesWriter(operationID: { "operation-reset" }, contextProvider: { context })
 
-        _ = try writer.performWrite { context in
+        _ = try writer.performWrite(features: [.core]) { context in
             XCTAssertTrue(context.registeredObjects.isEmpty)
             return NativeWriteResult(
                 writeResult: WriteResult(outcome: .verified),
@@ -259,7 +259,7 @@ final class NativeTests: XCTestCase {
         let flag = QueueTurnFlag()
         writer = NativeNotesWriter(operationID: { "operation-readback" }, contextProvider: { context })
 
-        let result = try writer.performWriteWithFreshReadback(transaction: { context in
+        let result = try writer.performWriteWithFreshReadback(features: [.core], transaction: { context in
             context.perform { flag.observed = true }
             writer.operation?.committed = true
             return "receipt"

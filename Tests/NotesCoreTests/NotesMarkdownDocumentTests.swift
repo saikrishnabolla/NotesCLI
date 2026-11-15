@@ -20,7 +20,7 @@ final class NotesMarkdownDocumentTests: XCTestCase {
         - [x] After
 
         | Name | Value |
-        | --- | --- |
+        | :--- | :---: |
         | A\\|B | C |
         """)
 
@@ -30,6 +30,20 @@ final class NotesMarkdownDocumentTests: XCTestCase {
         XCTAssertEqual(document.paragraphs[2].indent, 1)
         XCTAssertEqual(document.paragraphs[3].checked, true)
         XCTAssertEqual(document.paragraphs[4].table?.map { $0.map(\.plainText) }, [["Name", "Value"], ["A|B", "C"]])
+        XCTAssertEqual(document.paragraphs[4].table?.first?.map(\.alignment), [.left, .center])
+    }
+
+    func testReportNativeMarkersAreTypedAndRequireNativeWriter() throws {
+        let card = Data("https://example.com/report".utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let document = NotesMarkdownDocument(parsing:
+            "[#research](notescli-tag:research)\n\n[Preview](notescli-card:\(card))")
+
+        XCTAssertEqual(document.paragraphs[0].runs.first?.nativeTag, "research")
+        XCTAssertEqual(document.paragraphs[1].runs.first?.richLinkURL, "https://example.com/report")
+        XCTAssertTrue(document.requiresNativeWriter)
     }
 
     func testInlineFormattingLinksAndNotesExtensions() {

@@ -43,10 +43,13 @@ public struct NotesMarkdownRun: Sendable, Equatable {
     public var link: String?
     public var resource: NotesMarkdownResource?
     public var attachmentID: String?
+    public var nativeTag: String?
+    public var richLinkURL: String?
 
     public init(text: String, bold: Bool = false, italic: Bool = false, strikethrough: Bool = false,
                 underline: Bool = false, code: Bool = false, superscript: Int = 0, highlight: String? = nil,
-                link: String? = nil, resource: NotesMarkdownResource? = nil, attachmentID: String? = nil) {
+                link: String? = nil, resource: NotesMarkdownResource? = nil, attachmentID: String? = nil,
+                nativeTag: String? = nil, richLinkURL: String? = nil) {
         self.text = text
         self.bold = bold
         self.italic = italic
@@ -58,12 +61,19 @@ public struct NotesMarkdownRun: Sendable, Equatable {
         self.link = link
         self.resource = resource
         self.attachmentID = attachmentID
+        self.nativeTag = nativeTag
+        self.richLinkURL = richLinkURL
     }
 }
 
 public struct NotesMarkdownCell: Sendable, Equatable {
+    public enum Alignment: String, Sendable, Equatable { case left, center, right }
     public var runs: [NotesMarkdownRun]
-    public init(runs: [NotesMarkdownRun]) { self.runs = runs }
+    public var alignment: Alignment?
+    public init(runs: [NotesMarkdownRun], alignment: Alignment? = nil) {
+        self.runs = runs
+        self.alignment = alignment
+    }
     public var plainText: String { NotesMarkdownDocument.plainText(runs) }
 }
 
@@ -148,7 +158,8 @@ public struct NotesMarkdownDocument: Sendable {
     }
 
     private static func requiresNativeWriter(_ run: NotesMarkdownRun) -> Bool {
-        run.resource != nil || run.attachmentID != nil || run.highlight != nil || run.underline || run.superscript != 0
+        run.resource != nil || run.attachmentID != nil || run.nativeTag != nil || run.richLinkURL != nil ||
+            run.highlight != nil || run.underline || run.superscript != 0
     }
 }
 
@@ -216,9 +227,16 @@ private extension NotesMarkdownDocument {
 
     static func tableRows(_ table: Table) -> [[NotesMarkdownCell]] {
         func cells(_ markup: Markup) -> [NotesMarkdownCell] {
-            markup.children.compactMap { cell in
+            markup.children.enumerated().compactMap { column, cell in
                 guard let cell = cell as? Table.Cell else { return nil }
-                return NotesMarkdownCell(runs: inlines(cell))
+                let alignment: NotesMarkdownCell.Alignment?
+                switch table.columnAlignments.indices.contains(column) ? table.columnAlignments[column] : nil {
+                case .left?: alignment = .left
+                case .center?: alignment = .center
+                case .right?: alignment = .right
+                case nil: alignment = nil
+                }
+                return NotesMarkdownCell(runs: inlines(cell), alignment: alignment)
             }
         }
         return [cells(table.head)] + table.body.rows.map(cells)
@@ -288,6 +306,17 @@ private extension NotesMarkdownDocument {
         if let link = markup as? Link {
             let label = inlines(link, style: style)
             guard let destination = link.destination else { return label }
+            if destination.hasPrefix("notescli-tag:") {
+                let tag = String(destination.dropFirst("notescli-tag:".count))
+                    .removingPercentEncoding ?? String(destination.dropFirst("notescli-tag:".count))
+                guard !tag.isEmpty, !tag.contains(where: { $0.isWhitespace || $0 == "#" }) else { return label }
+                return [NotesMarkdownRun(text: plainText(label), nativeTag: tag)]
+            }
+            if destination.hasPrefix("notescli-card:") {
+                let encoded = String(destination.dropFirst("notescli-card:".count))
+                guard let value = base64URLDecode(encoded), safeURL(value)?.hasPrefix("http") == true else { return label }
+                return [NotesMarkdownRun(text: plainText(label), richLinkURL: value)]
+            }
             if let id = attachmentID(destination) {
                 return [NotesMarkdownRun(text: plainText(label), attachmentID: id)]
             }
@@ -319,7 +348,8 @@ private extension NotesMarkdownDocument {
         var result: [NotesMarkdownRun] = []
         for run in runs where !run.text.isEmpty || run.resource != nil || run.attachmentID != nil {
             if var last = result.last, last.resource == nil, run.resource == nil, last.attachmentID == nil,
-               run.attachmentID == nil, last.bold == run.bold, last.italic == run.italic,
+               run.attachmentID == nil, last.nativeTag == nil, run.nativeTag == nil,
+               last.richLinkURL == nil, run.richLinkURL == nil, last.bold == run.bold, last.italic == run.italic,
                last.strikethrough == run.strikethrough, last.underline == run.underline,
                last.code == run.code, last.superscript == run.superscript,
                last.highlight == run.highlight, last.link == run.link {
@@ -364,6 +394,14 @@ private extension NotesMarkdownDocument {
         guard destination.lowercased().hasPrefix(prefix) else { return nil }
         let id = String(destination.dropFirst(prefix.count))
         return id.isEmpty ? nil : id
+    }
+
+    static func base64URLDecode(_ value: String) -> String? {
+        var base64 = value.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     static func flatten(_ blocks: [Block], indent: Int = 0, quoteDepth: Int = 0) -> [NotesMarkdownParagraph] {
@@ -443,6 +481,7 @@ private extension NotesMarkdownDocument {
                 let kind = resource.presentation == .image ? "image" : "attachment"
                 return escape("[\(kind): \(resource.alt.isEmpty ? kind : resource.alt)]")
             }
+            if run.nativeTag != nil || run.richLinkURL != nil { return escape(run.text) }
             if run.attachmentID != nil { return escape(run.text) }
             var value = escape(run.text).replacingOccurrences(of: "\n", with: "<br>")
             if run.code { value = "<code>\(value)</code>" }

@@ -6,17 +6,15 @@ on:
 
 jobs:
   test:
-    name: macOS ${{ matrix.macos }}
-    strategy:
-      fail-fast: false
-      matrix:
-        macos: ['14', '26']
-    runs-on: macos-${{ matrix.macos }}
+    name: macOS 26, minimum target 14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Show toolchain
         run: xcodebuild -version && swift --version
-      - name: Build
-        run: swift build
+      - name: Build for macOS 14
+        run: |
+          MACOSX_DEPLOYMENT_TARGET=14.0 swift build
+          test "$(otool -l .build/debug/notescli | awk '/minos/{print $2; exit}')" = "14.0"
       - name: Test
         run: swift test

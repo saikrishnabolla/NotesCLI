@@ -95,6 +95,15 @@ public final class InMemoryNotes: NotesReading, NotesWriting, @unchecked Sendabl
             for tag in Set(n.summary.tags) { tags[tag, default: 0] += 1 }
         }; return tags }
     }
+    public func attachmentKindCounts() throws -> [String: Int] {
+        synchronized {
+            var counts: [String: Int] = [:]
+            for note in noteStore where !note.summary.isLocked {
+                for attachment in note.attachments { counts[attachment.kind, default: 0] += 1 }
+            }
+            return counts
+        }
+    }
     private func nextID() -> String { sequence += 1; return "fake-\(sequence)-\(UUID().uuidString)" }
     private func update(_ ref: String, _ change: (inout Note) throws -> Void) throws -> WriteResult {
         try synchronized {

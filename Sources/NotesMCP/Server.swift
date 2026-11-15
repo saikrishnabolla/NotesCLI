@@ -1,6 +1,7 @@
 import Foundation
 import NotesCore
 import NotesIndex
+import NotesNative
 import NotesSafety
 import NotesStore
 import NotesSync
@@ -31,6 +32,12 @@ public final class MCPServer: @unchecked Sendable {
     public let readFidelity: String
     public let unavailableReadFields: [String]
     public static let textLimit = 48 * 1024
+    /// Caps the base64 page text in one scan_add call so the whole JSON-RPC request,
+    /// including its envelope and escaped slashes, fits the default 4 MiB HTTP body limit.
+    /// The CLI keeps its separate 200 MB local-file limit.
+    public static let maximumScanEncodedBytes = 4_000_000
+    public static let maximumScanDecodedBytes = 3_000_000
+    public static let maximumStdioLineBytes = 4 * 1024 * 1024
     public static let versions = MCPProtocol.legacyVersions
 
     private let nativeHandler: MCPNativeHandler?
@@ -85,6 +92,7 @@ public final class MCPServer: @unchecked Sendable {
         let string: [String: Any] = ["type": "string"]
         let bool: [String: Any] = ["type": "boolean"]
         let integer: [String: Any] = ["type": "integer", "minimum": 0]
+        let coordinate: [String: Any] = ["type": "number", "minimum": 0, "maximum": 1]
         let strings: [String: Any] = ["type": "array", "items": string]
         let rows: [String: Any] = ["type": "array", "items": ["type": "array", "items": string]]
         let alignment: [String: Any] = ["type": "string", "enum": ["left", "right", "center", "justified", "natural"]]
@@ -100,6 +108,7 @@ public final class MCPServer: @unchecked Sendable {
             "size": string,
             "fit": ["type": "string", "enum": ["contain", "stretch"]],
             "fill": ["type": "string", "enum": ["outline", "hatch"]],
+            "legacy": bool,
         ]
         // MARK: w9-paper end
         let page = ["offset": integer, "limit": integer]
@@ -123,6 +132,8 @@ public final class MCPServer: @unchecked Sendable {
             t("search_notes", "Search note titles and bodies with stable cursor paging.", ["query"], ["query": string, "folder": string, "has": string].merging(cursorPage) { old, _ in old }),
             t("query_notes", "Search the local index with boolean, field, date, kind, and stable cursor expressions.", ["query"], ["query": string, "folder": string, "rebuild": bool].merging(cursorPage) { old, _ in old }),
             t("get_note", "Read one note in Markdown, text, HTML, JSON, or outline form.", ["ref"], ["ref": string, "format": ["type": "string", "enum": ["markdown", "text", "html", "json", "outline"]], "attachments": bool].merging(page) { old, _ in old }),
+            t("history", "List the exact pre-write snapshots retained for a note.", ["ref"], ["ref": string]),
+            t("diff", "Compare a retained snapshot with the current note using a line diff.", ["ref"], ["ref": string, "snapshot": string]),
             t("get_notes", "Read several notes.", ["refs"], ["refs": strings, "format": ["type": "string", "enum": ["markdown", "text", "html", "json"]]].merging(page) { old, _ in old }),
             t("list_tags", "List tags and note counts."),
             t("list_attachments", "List attachment metadata for a note.", ["ref"], ["ref": string]),
@@ -185,6 +196,9 @@ public final class MCPServer: @unchecked Sendable {
                 // MARK: w3-write begin
                 t("attach_pasteboard", "Attach the frozen pasteboard bytes to a note.", ["ref"], ["ref": string, "position": integer, "view": string], write: true, native: true),
                 t("add_url", "Add a URL link or native preview card.", ["ref", "url"], ["ref": string, "url": string, "card": bool, "position": integer], write: true, native: true),
+                t("link_capture", "Insert the native rich link Notes uses for shared web content.", ["ref", "url"],
+                  ["ref": string, "url": string, "title": string, "position": integer],
+                  write: true, native: true),
                 t("smart_folder_create", "Create a tag-based Smart Folder.", ["name", "tags", "match"], ["name": string, "tags": strings, "match": ["type": "string", "enum": ["any", "all"]]], write: true, native: true),
                 t("smart_folder_rename", "Rename one Smart Folder after an expected-count check.", ["ref", "name", "expected_count"], ["ref": string, "name": string, "expected_count": integer], write: true, native: true),
                 // MARK: w4-format begin
@@ -208,8 +222,11 @@ public final class MCPServer: @unchecked Sendable {
                 t("tag_remove", "Remove a native tag.", ["ref", "tag"], ["ref": string, "tag": string], write: true, native: true),
                 t("tag_rename", "Rename a native tag after checking its note count.", ["tag", "new_name", "expected_count"], ["tag": string, "new_name": string, "expected_count": integer], write: true, native: true),
                 t("tag_delete", "Delete a native tag after checking its note count.", ["tag", "expected_count"], ["tag": string, "expected_count": integer], write: true, native: true, destructive: true),
-                t("link_add", "Insert a native note link.", ["ref", "target"], ["ref": string, "target": string, "text": string, "position": integer], write: true, native: true),
+                t("link_add", "Insert a native note or paragraph link.", ["ref", "target"],
+                  ["ref": string, "target": string, "text": string, "paragraph_id": string,
+                   "paragraph_name": string, "position": integer], write: true, native: true),
                 t("link_list", "List native note links.", ["ref"], ["ref": string], native: true),
+                t("collaboration_activity", "Export a note's stored collaboration activity events as raw, hashed payloads. Read-only; JSON is shown only when the bytes parse as JSON.", ["ref"], ["ref": string, "limit": ["type": "integer", "minimum": 1, "maximum": CollaborationActivityLimits.maximumEventLimit]], native: true),
                 t("text_find", "Find native UTF-16 text ranges.", ["ref", "text"], ["ref": string, "text": string, "case_insensitive": bool], native: true),
                 t("text_insert", "Insert text at a UTF-16 position.", ["ref", "text", "position"], ["ref": string, "text": string, "position": integer], write: true, native: true),
                 t("text_delete", "Delete a UTF-16 range.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer], write: true, native: true, destructive: true),
@@ -219,15 +236,86 @@ public final class MCPServer: @unchecked Sendable {
                 t("format_inline", "Apply native inline formatting.", ["ref", "start", "length"], ["ref": string, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "clear_link": bool, "clear_color": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number"], "highlight": highlight, "clear_highlight": bool], write: true, native: true),
                 t("insert_divider", "Insert a native divider line.", ["ref"], ["ref": string, "position": integer], write: true, native: true),
                 t("insert_math", "Insert a native math graph expression.", ["ref", "expression"], ["ref": string, "expression": string, "position": integer], write: true, native: true),
+                t("evaluate_math", "Evaluate an expression with Apple's Calculate framework.", ["expression"], ["expression": string], native: true),
+                t("insert_math_result", "Insert an evaluated expression as Notes-compatible plain text.", ["ref", "expression"], ["ref": string, "expression": string, "position": integer], write: true, native: true),
                 t("insert_mention", "Insert a participant mention in a shared note.", ["ref", "text", "user_record_name"], ["ref": string, "text": string, "user_record_name": string, "position": integer], write: true, native: true),
                 t("table_format_cell", "Apply native inline formatting inside a table cell.", ["ref", "attachment_id", "row", "column", "start", "length"], ["ref": string, "attachment_id": string, "row": integer, "column": integer, "start": integer, "length": integer, "bold": bool, "italic": bool, "underline": bool, "strike": bool, "link": string, "color": string, "highlight": highlight, "clear_link": bool, "clear_color": bool, "clear_highlight": bool, "superscript": bool, "subscript": bool, "clear_script": bool, "font_name": string, "font_size": ["type": "number", "exclusiveMinimum": 0]], write: true, native: true),
                 t("table_convert_to_text", "Replace a native table with tab- or comma-separated text.", ["ref", "attachment_id"], ["ref": string, "attachment_id": string, "separator": ["type": "string", "enum": ["tab", "comma"]]], write: true, native: true, destructive: true),
                 t("get_folder_sort", "Read a folder's native custom sort.", ["ref"], ["ref": string], native: true),
                 t("set_folder_sort", "Set a folder's native custom sort.", ["ref", "by", "direction"], ["ref": string, "by": string, "direction": string], write: true, native: true),
                 t("set_default_account", "Set the account Notes uses for new notes.", ["account_id"], ["account_id": string], write: true, native: true),
+                t("get_folder_date_grouping", "Read whether a folder groups notes by date.", ["ref"], ["ref": string], native: true),
+                t("set_folder_date_grouping", "Set whether a folder groups notes by date.", ["ref", "enabled"], ["ref": string, "enabled": bool], write: true, native: true),
+                t("get_default_paragraph_style", "Read the paragraph style used for new notes.", native: true),
+                t("set_default_paragraph_style", "Set the paragraph style used for new notes.", ["style"],
+                  ["style": ["type": "string", "enum": ["title", "heading", "subheading", "body", "monospaced"]]], write: true, native: true),
+                t("get_notes_settings", "Read Notes' global sort, date grouping, default text size, Quick Note resume, and automatic tag conversion settings.", native: true),
+                t("set_global_note_sort", "Set the global note sort.", ["sort"],
+                  ["sort": ["type": "string", "enum": ["modified", "created", "title"]]], write: true, native: true),
+                t("set_global_date_grouping", "Set whether Notes groups notes by date globally.", ["enabled"],
+                  ["enabled": bool], write: true, native: true),
+                t("set_default_text_size", "Set the default note text size.", ["points"],
+                  ["points": ["type": "integer", "enum": [10, 12, 14, 18, 24]]], write: true, native: true),
+                t("set_resume_last_quick_note", "Set whether Quick Note resumes the last Quick Note.", ["enabled"],
+                  ["enabled": bool], write: true, native: true),
+                t("set_auto_convert_tags", "Set whether Notes automatically converts typed hashtags to tags.", ["enabled"],
+                  ["enabled": bool], write: true, native: true),
+                t("create_quick_note", "Create a native Quick Note from Markdown.", ["title", "body"],
+                  ["title": string, "body": string, "folder": string], write: true, native: true),
+                t("set_quick_note", "Convert a note to or from a native Quick Note.", ["ref", "enabled"],
+                  ["ref": string, "enabled": bool], write: true, native: true, destructive: true),
+                t("ocr_attachment", "Recognize text in a downloaded image attachment without changing Notes.", ["ref"],
+                  ["ref": string, "attachment_id": string, "languages": strings, "title": string], native: true),
+                t("handwriting_recognize", "Recognize text in editable Paper strokes without changing Notes.", ["ref", "attachment_id"],
+                  ["ref": string, "attachment_id": string, "locale": string], native: true),
+                t("handwriting_persist", "Recognize editable Paper strokes and store the result in Notes.", ["ref", "attachment_id"],
+                  ["ref": string, "attachment_id": string, "locale": string], write: true, native: true),
+                t("handwriting_set", "Replace or clear a Paper attachment's stored handwriting text.", ["ref", "attachment_id"],
+                  ["ref": string, "attachment_id": string, "text": string, "clear": bool], write: true, native: true),
+                t("paper_add", "Create a native Paper PDF or Paper scan from a base64-encoded PDF.", ["ref", "pdf"],
+                  ["ref": string,
+                   "pdf": ["type": "string", "contentEncoding": "base64", "minLength": 1,
+                           "maxLength": Self.maximumScanEncodedBytes],
+                   "subtype": ["type": "string", "enum": ["pdf", "scan"]],
+                   "filename": string, "position": integer], write: true, native: true),
+                t("paper_regenerate_fallback", "Regenerate a native Paper attachment's fallback PDF.", ["ref", "attachment_id"],
+                  ["ref": string, "attachment_id": string], write: true, native: true),
+                t("map_add", "Insert a native Apple Maps location card.", ["ref", "url"],
+                  ["ref": string, "url": string, "position": integer], write: true, native: true),
+                t("scan_add", "Create a native scanned document from 1 to 100 base64-encoded image pages. All pages together may hold at most 4,000,000 base64 characters (3,000,000 decoded bytes). Use the notescli scan add command with local files for larger scans.", ["ref", "pages"],
+                  ["ref": string,
+                   "pages": ["type": "array", "minItems": 1, "maxItems": 100,
+                             "items": ["type": "string", "contentEncoding": "base64", "minLength": 1, "maxLength": Self.maximumScanEncodedBytes],
+                             "description": "Base64 image pages. Total length across all pages must not exceed 4,000,000 characters."],
+                   "page_names": ["type": "array", "maxItems": 100, "items": string], "position": integer], write: true, native: true),
+                t("scan_append", "Append 1 to 100 base64-encoded image pages to an existing scanned document. page_id may identify any current page.", ["ref", "attachment_id", "page_id", "pages"],
+                  ["ref": string, "attachment_id": string, "page_id": string,
+                   "pages": ["type": "array", "minItems": 1, "maxItems": 100,
+                             "items": ["type": "string", "contentEncoding": "base64", "minLength": 1, "maxLength": Self.maximumScanEncodedBytes]],
+                   "page_names": ["type": "array", "maxItems": 100, "items": string]], write: true, native: true),
+                t("scan_page_state", "Read native filter, orientation, crop, markup, and page order for a scanned-document page.", ["ref", "attachment_id", "page_id"],
+                  ["ref": string, "attachment_id": string, "page_id": string], native: true),
+                t("scan_filter", "Apply a native filter to a scanned-document page.", ["ref", "attachment_id", "page_id", "filter"],
+                  ["ref": string, "attachment_id": string, "page_id": string,
+                   "filter": ["type": "string", "enum": ["photo", "color", "grayscale", "black-and-white", "whiteboard"]]], write: true, native: true),
+                t("scan_rotate", "Set a scanned-document page orientation.", ["ref", "attachment_id", "page_id", "orientation"],
+                  ["ref": string, "attachment_id": string, "page_id": string,
+                   "orientation": ["type": "string", "enum": ["upright", "upside-down", "left", "right"]]], write: true, native: true),
+                t("scan_crop", "Set a scanned-document page crop with normalized quadrilateral coordinates.",
+                  ["ref", "attachment_id", "page_id", "bottom_left_x", "bottom_left_y", "bottom_right_x", "bottom_right_y",
+                   "top_left_x", "top_left_y", "top_right_x", "top_right_y"],
+                  ["ref": string, "attachment_id": string, "page_id": string,
+                   "bottom_left_x": coordinate, "bottom_left_y": coordinate,
+                   "bottom_right_x": coordinate, "bottom_right_y": coordinate,
+                   "top_left_x": coordinate, "top_left_y": coordinate,
+                   "top_right_x": coordinate, "top_right_y": coordinate], write: true, native: true),
+                t("scan_move", "Move a scanned-document page to a zero-based index.", ["ref", "attachment_id", "page_id", "to_index"],
+                  ["ref": string, "attachment_id": string, "page_id": string, "to_index": ["type": "integer", "minimum": 0]], write: true, native: true),
+                t("scan_delete", "Delete one page from a multi-page scanned document.", ["ref", "attachment_id", "page_id"],
+                  ["ref": string, "attachment_id": string, "page_id": string], write: true, native: true, destructive: true),
                 // MARK: w4-format end
                 // MARK: w9-paper begin
-                t("drawing_add", "Convert an SVG to an editable Paper drawing and add it to a note.", ["ref", "svg"],
+                t("drawing_add", "Convert an SVG to an editable Paper drawing or legacy Notes sketch and add it to a note.", ["ref", "svg"],
                   drawingInput.merging(["ref": string, "position": integer]) { old, _ in old }, write: true, native: true),
                 t("drawing_create", "Create a note containing an editable Paper drawing.", ["folder", "title", "svg"],
                   drawingInput.merging(["folder": string, "title": string]) { old, _ in old }, write: true, native: true),
@@ -251,7 +339,11 @@ public final class MCPServer: @unchecked Sendable {
                 t("table_remove_row", "Remove a native table row.", ["ref", "attachment_id", "index"], ["ref": string, "attachment_id": string, "index": integer], write: true, native: true, destructive: true),
                 t("table_remove_column", "Remove a native table column.", ["ref", "attachment_id", "index"], ["ref": string, "attachment_id": string, "index": integer], write: true, native: true, destructive: true),
                 t("duplicate_note", "Duplicate a note.", ["ref"], ["ref": string, "title": string], write: true, native: true),
-                t("restore_note", "Restore a note from Recently Deleted.", ["ref"], ["ref": string, "folder": string], write: true, native: true)
+                t("restore_note", "Restore a note from Recently Deleted.", ["ref"], ["ref": string, "folder": string], write: true, native: true),
+                t("undo", "Undo one journaled write when its recorded post-state still matches.", ["operation_id"],
+                  ["operation_id": string, "allow_shared": bool], write: true, native: true, destructive: true),
+                t("revert", "Restore one exact retained snapshot after taking a new safety snapshot.", ["ref"],
+                  ["ref": string, "snapshot": string, "allow_shared": bool], write: true, native: true, destructive: true)
             ]
         }
         // MARK: w3-read begin
@@ -528,6 +620,9 @@ public final class MCPServer: @unchecked Sendable {
         if let issue = validate(arguments, tool: tool) {
             throw MCPRPCError(code: -32602, message: issue, data: nil)
         }
+        if ["scan_add", "scan_append"].contains(tool.name), let issue = scanPayloadIssue(arguments) {
+            throw MCPRPCError(code: -32602, message: issue.message, data: (try? NotePresentation.object(issue)) as? [String: Any])
+        }
         if context.cancellation.isCancelled { throw MCPRequestCancelled() }
         let access: MCPExecutionGate.Access = tool.write ? .write : .read
         guard executionGate.acquire(access, cancellation: context.cancellation) else { throw MCPRequestCancelled() }
@@ -574,13 +669,28 @@ public final class MCPServer: @unchecked Sendable {
                 if let minimum = spec["exclusiveMinimum"] as? NSNumber, number.doubleValue <= minimum.doubleValue {
                     return "\(key) must be greater than \(minimum)"
                 }
+                if let minimum = spec["minimum"] as? NSNumber, number.doubleValue < minimum.doubleValue {
+                    return "\(key) must be at least \(minimum)"
+                }
+                if let maximum = spec["maximum"] as? NSNumber, number.doubleValue > maximum.doubleValue {
+                    return "\(key) must be at most \(maximum)"
+                }
             // MARK: w9-paper end
             case "array": if !(value is [Any]) { return "\(key) must be an array" }
             default: break
             }
             if let values = spec["enum"] as? [String], !values.contains(value as? String ?? "") {
                 let last = values.last ?? ""
-                let choices = values.dropLast().joined(separator: ", ") + (values.count > 1 ? ", or " : "") + last
+                let choices = values.count == 2 ? "\(values[0]) or \(values[1])" :
+                    values.dropLast().joined(separator: ", ") + (values.count > 1 ? ", or " : "") + last
+                return "Invalid \(key); use \(choices)."
+            }
+            if let values = spec["enum"] as? [Int],
+               let number = value as? NSNumber, !values.contains(number.intValue) {
+                let last = values.last.map(String.init) ?? ""
+                let choices = values.count == 2 ? "\(values[0]) or \(values[1])" :
+                    values.dropLast().map(String.init).joined(separator: ", ") +
+                    (values.count > 1 ? ", or " : "") + last
                 return "Invalid \(key); use \(choices)."
             }
         }
@@ -598,7 +708,32 @@ public final class MCPServer: @unchecked Sendable {
             }
         }
         // MARK: w9-diagram end
+        if ["scan_add", "scan_append"].contains(tool.name) {
+            guard let pages = args["pages"] as? [String], (1...100).contains(pages.count) else {
+                return "pages must contain between 1 and 100 base64 strings"
+            }
+            if let names = args["page_names"] as? [String], names.count != pages.count {
+                return "page_names must have the same count as pages"
+            }
+        }
         return nil
+    }
+
+    private static let scanTooLarge = NotesError("scan_too_large",
+        "MCP scan_add accepts at most 4,000,000 base64 characters (3,000,000 decoded bytes) across all pages. Use the notescli scan add command with local files for larger scans.")
+
+    /// Checks scan_add pages before any write: aggregate size first, then every page must decode.
+    private func scanPayloadIssue(_ args: [String: Any]) -> NotesError? {
+        guard let pages = args["pages"] as? [String] else { return nil }
+        guard pages.reduce(0, { $0 + $1.utf8.count }) <= Self.maximumScanEncodedBytes else { return Self.scanTooLarge }
+        var decoded = 0
+        for (index, page) in pages.enumerated() {
+            guard let data = Data(base64Encoded: page), !data.isEmpty else {
+                return NotesError("invalid_scan_page", "pages[\(index)] is not valid nonempty base64.")
+            }
+            decoded += data.count
+        }
+        return decoded <= Self.maximumScanDecodedBytes ? nil : Self.scanTooLarge
     }
 
     private func content(_ structured: [String: Any], isError: Bool = false) throws -> [String: Any] {
@@ -879,6 +1014,17 @@ public final class MCPServer: @unchecked Sendable {
             if format == "json", value.1 == nil { result["note"] = try JSONSerialization.jsonObject(with: Data(rendered.utf8)) }
             if format == "outline", value.1 == nil { result["outline"] = try JSONSerialization.jsonObject(with: Data(rendered.utf8)) }
             return try content(result)
+        case "history":
+            let note = try reader.note(s("ref")!)
+            let snapshots = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots")).history(note.summary.id.uuid)
+            return try content(["note_id": note.summary.id.uuid, "snapshots": NotePresentation.object(snapshots)])
+        case "diff":
+            let note = try reader.note(s("ref")!)
+            let snapshot = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots"))
+                .load(note.summary.id.uuid, snapshot: s("snapshot"))
+            let current = note.document?.markdown(attachments: note.attachments) ?? ""
+            return try content(["note_id": note.summary.id.uuid, "snapshot": snapshot.info.id,
+                                "diff": SnapshotLineDiff.unified(snapshot: snapshot.markdown, current: current)])
         case "get_notes":
             let refs = a["refs"] as! [String], format = s("format") ?? "markdown", maximum = min(limit, 100)
             let selected = Array(refs.dropFirst(offset).prefix(maximum))
@@ -1103,9 +1249,190 @@ public final class MCPServer: @unchecked Sendable {
         }
     }
 
+    private struct NativeUndoDispatch {
+        var note: Note?
+        var paths: [[String]]
+        var tool: String
+        var arguments: [String: Any]
+    }
+
+    private func nativeUndoDispatch(_ action: JournalRestoreAction, allowShared: Bool) throws -> NativeUndoDispatch {
+        var arguments: [String: Any] = ["allow_shared": allowShared]
+        func noteDispatch(_ noteID: String, tool: String, values: [String: Any]) throws -> NativeUndoDispatch {
+            let note = try reader.note(noteID)
+            return NativeUndoDispatch(note: note, paths: [note.summary.folderPath], tool: tool,
+                                      arguments: arguments.merging(values.merging(["ref": note.summary.id.uuid]) { _, new in new }) { _, new in new })
+        }
+        func cropText(_ value: ScanCrop) -> String {
+            "\(value.bottomLeft.x),\(value.bottomLeft.y);\(value.bottomRight.x),\(value.bottomRight.y);\(value.topLeft.x),\(value.topLeft.y);\(value.topRight.x),\(value.topRight.y)"
+        }
+        switch action {
+        case .checklistAutoSort(let enabled):
+            arguments["enabled"] = enabled
+            return NativeUndoDispatch(note: nil, paths: [], tool: "checklist_auto_sort", arguments: arguments)
+        case .folderSort(let folderID, let order, let direction):
+            let folder = try folder(folderID)
+            arguments.merge(["ref": folder.id, "by": order, "direction": direction]) { _, new in new }
+            return NativeUndoDispatch(note: nil, paths: [folder.path], tool: "set_folder_sort", arguments: arguments)
+        case .folderDateGrouping(let folderID, let type):
+            let folder = try folder(folderID)
+            arguments.merge(["ref": folder.id, "type": type]) { _, new in new }
+            return NativeUndoDispatch(note: nil, paths: [folder.path], tool: "_journal_set_folder_date_grouping_type", arguments: arguments)
+        case .defaultParagraphStyle(let style):
+            arguments["style"] = style
+            return NativeUndoDispatch(note: nil, paths: [], tool: "set_default_paragraph_style", arguments: arguments)
+        case .globalNoteSort(let sort):
+            arguments["sort"] = sort
+            return NativeUndoDispatch(note: nil, paths: [], tool: "set_global_note_sort", arguments: arguments)
+        case .globalDateGrouping(let enabled):
+            arguments["enabled"] = enabled
+            return NativeUndoDispatch(note: nil, paths: [], tool: "set_global_date_grouping", arguments: arguments)
+        case .defaultTextSize(let points):
+            arguments["points"] = points
+            return NativeUndoDispatch(note: nil, paths: [], tool: "set_default_text_size", arguments: arguments)
+        case .resumeLastQuickNote(let enabled):
+            arguments["enabled"] = enabled
+            return NativeUndoDispatch(note: nil, paths: [], tool: "set_resume_last_quick_note", arguments: arguments)
+        case .autoConvertToTags(let enabled):
+            arguments["enabled"] = enabled
+            return NativeUndoDispatch(note: nil, paths: [], tool: "set_auto_convert_tags", arguments: arguments)
+        case .quickNote(let noteID, let enabled):
+            return try noteDispatch(noteID, tool: "set_quick_note", values: ["enabled": enabled])
+        case .defaultAccount(let identifier):
+            arguments["account_id"] = identifier
+            return NativeUndoDispatch(note: nil, paths: [], tool: "set_default_account", arguments: arguments)
+        case .smartFolderQuery(let folderID, let queryJSON):
+            let folder = try folder(folderID)
+            arguments.merge(["ref": folder.id, "query_json": queryJSON, "expected_count": 1]) { _, new in new }
+            return NativeUndoDispatch(note: nil, paths: [folder.path], tool: "smart_folder_edit_rules", arguments: arguments)
+        case .scanFilter(let noteID, let attachmentID, let pageID, let filter, let expected):
+            var values: [String: Any] = ["attachment_id": attachmentID, "page_id": pageID, "filter": filter]
+            if let expected { values["expected_filter"] = expected }
+            return try noteDispatch(noteID, tool: "scan_filter", values: values)
+        case .scanOrientation(let noteID, let attachmentID, let pageID, let orientation, let expected):
+            var values: [String: Any] = ["attachment_id": attachmentID, "page_id": pageID, "orientation": orientation]
+            if let expected { values["expected_orientation"] = expected }
+            return try noteDispatch(noteID, tool: "scan_rotate", values: values)
+        case .scanCrop(let noteID, let attachmentID, let pageID, let crop, let expected):
+            var values: [String: Any] = [
+                "attachment_id": attachmentID, "page_id": pageID,
+                "bottom_left_x": crop.bottomLeft.x, "bottom_left_y": crop.bottomLeft.y,
+                "bottom_right_x": crop.bottomRight.x, "bottom_right_y": crop.bottomRight.y,
+                "top_left_x": crop.topLeft.x, "top_left_y": crop.topLeft.y,
+                "top_right_x": crop.topRight.x, "top_right_y": crop.topRight.y,
+            ]
+            if let expected { values["expected_crop"] = cropText(expected) }
+            return try noteDispatch(noteID, tool: "scan_crop", values: values)
+        case .scanMove(let noteID, let attachmentID, let pageID, let index, let expectedPageIDs):
+            var values: [String: Any] = ["attachment_id": attachmentID, "page_id": pageID, "to_index": index]
+            if let expectedPageIDs { values["expected_page_ids"] = expectedPageIDs }
+            return try noteDispatch(noteID, tool: "scan_move", values: values)
+        case .scanUndelete(let noteID, let attachmentID, let pageID, let index, let expectedPageIDs):
+            var values: [String: Any] = ["attachment_id": attachmentID, "page_id": pageID, "to_index": index]
+            if let expectedPageIDs { values["expected_page_ids"] = expectedPageIDs }
+            return try noteDispatch(noteID, tool: "_journal_restore_scan_page", values: values)
+        case .scanDeletePages(let noteID, let attachmentID, let pageIDs, let expectedPageIDs):
+            return try noteDispatch(noteID, tool: "_journal_delete_scan_pages",
+                                    values: ["attachment_id": attachmentID, "page_ids": pageIDs,
+                                             "expected_page_ids": expectedPageIDs])
+        }
+    }
+
+    private func callNativeUndo(_ tool: Tool, _ arguments: [String: Any], nativeHandler: MCPNativeHandler) throws -> [String: Any] {
+        guard let operationID = arguments["operation_id"] as? String,
+              let entry = try WriteJournal.openReadOnlyIfExists(url: stateRoot.appendingPathComponent("journal.sqlite"))?.entry(id: operationID) else {
+            throw NotesError("journal_not_found", "The journal operation was not found.")
+        }
+        guard entry.outcome == .verified else {
+            throw NotesError("unsafe_undo", "Only a verified journal operation can be undone automatically.")
+        }
+        let allowShared = arguments["allow_shared"] as? Bool ?? false
+        if let action = try entry.restoreAction() {
+            var dispatch = try nativeUndoDispatch(action, allowShared: allowShared)
+            if let expected = try entry.restoreExpectation() {
+                switch expected {
+                case .checklistAutoSort(let value), .globalDateGrouping(let value),
+                     .resumeLastQuickNote(let value), .autoConvertToTags(let value), .quickNote(let value):
+                    dispatch.arguments["expected_enabled"] = value
+                case .folderSort(let order, let direction):
+                    dispatch.arguments["expected_by"] = order
+                    dispatch.arguments["expected_direction"] = direction
+                case .folderDateGrouping(let type):
+                    dispatch.arguments["expected_type"] = type
+                case .defaultParagraphStyle(let value):
+                    dispatch.arguments["expected_style"] = value
+                case .globalNoteSort(let value):
+                    dispatch.arguments["expected_sort"] = value
+                case .defaultTextSize(let value):
+                    dispatch.arguments["expected_points"] = value
+                case .defaultAccount(let value):
+                    dispatch.arguments["expected_account_id"] = value
+                case .smartFolderQuery(let value):
+                    dispatch.arguments["expected_query_json"] = value
+                }
+            }
+            return try safeWrite(tool: tool, arguments: arguments, note: dispatch.note, paths: dispatch.paths,
+                                 engine: "native", snapshotNotes: dispatch.note.map { [$0] } ?? []) {
+                let value = try nativeHandler(dispatch.tool, dispatch.arguments)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native undo did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        guard let noteID = entry.noteID ?? entry.stableDispatchIdentity,
+              let snapshotID = entry.snapshotID, let postRevision = entry.postRevision else {
+            throw NotesError("journal_preimage_missing", "The operation has no exact snapshot and verified post-write revision.")
+        }
+        let current = try reader.note(noteID)
+        guard ConcurrencyGuard.revision(current) == postRevision else {
+            throw NotesError("undo_conflict", "The note changed after journal operation \(entry.id); refusing to overwrite later edits.")
+        }
+        let snapshot = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots"))
+            .loadRestorable(current.summary.id.uuid, snapshot: snapshotID)
+        let snapshotStore = SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots"))
+        var dispatch: [String: Any] = ["ref": current.summary.id.uuid,
+                                       "_snapshot_note": snapshot.note,
+                                       "_expected_revision": ConcurrencyGuard.revision(current),
+                                       "allow_shared": allowShared]
+        if let modified = current.summary.modified { dispatch["_expected_modified"] = modified }
+        if let material = try snapshotStore.restoreMaterial(for: snapshot) {
+            dispatch["_restore_material"] = material
+        }
+        if let writeFolders = arguments["write_folders"] { dispatch["write_folders"] = writeFolders }
+        return try safeWrite(tool: tool, arguments: arguments, note: current, paths: [current.summary.folderPath, snapshot.note.summary.folderPath],
+                             engine: "native", snapshotNotes: [current]) {
+            let value = try nativeHandler("_journal_restore_snapshot", dispatch)
+            guard let result = value.result else { throw NotesError("invalid_native_result", "The native undo did not return a write result.") }
+            return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+        }
+    }
+
+    private func callNativeRevert(_ tool: Tool, _ arguments: [String: Any], nativeHandler: MCPNativeHandler) throws -> [String: Any] {
+        let current = try reader.note(arguments["ref"] as! String)
+        let snapshot = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots"))
+            .loadRestorable(current.summary.id.uuid, snapshot: arguments["snapshot"] as? String)
+        let snapshotStore = SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots"))
+        var dispatch: [String: Any] = ["ref": current.summary.id.uuid,
+                                      "_snapshot_note": snapshot.note,
+                                      "_expected_revision": ConcurrencyGuard.revision(current),
+                                      "allow_shared": arguments["allow_shared"] as? Bool ?? false]
+        if let modified = current.summary.modified { dispatch["_expected_modified"] = modified }
+        if let material = try snapshotStore.restoreMaterial(for: snapshot) {
+            dispatch["_restore_material"] = material
+        }
+        return try safeWrite(tool: tool, arguments: arguments, note: current,
+                             paths: [current.summary.folderPath, snapshot.note.summary.folderPath],
+                             engine: "native", snapshotNotes: [current]) {
+            let value = try nativeHandler("_journal_restore_snapshot", dispatch)
+            guard let result = value.result else { throw NotesError("invalid_native_result", "The native revert did not return a write result.") }
+            return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+        }
+    }
+
     private func callNative(_ tool: Tool, _ arguments: [String: Any]) throws -> [String: Any] {
         guard allowNative else { throw NotesError("native_required", "This tool requires the private native engine.", hint: "Start notescli mcp with --allow-native.") }
         guard let nativeHandler else { throw NotesError("native_unavailable", "The native engine is not available.") }
+        if tool.name == "undo" { return try callNativeUndo(tool, arguments, nativeHandler: nativeHandler) }
+        if tool.name == "revert" { return try callNativeRevert(tool, arguments, nativeHandler: nativeHandler) }
         if !tool.write {
             let value = try nativeHandler(tool.name, arguments)
             return try content(["engine": "native", "value": try JSONSerialization.jsonObject(with: value.value)])
@@ -1130,6 +1457,60 @@ public final class MCPServer: @unchecked Sendable {
             }
             var recorded = arguments
             recorded["previous_account_id"] = previous
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
+                let value = try nativeHandler(tool.name, arguments)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        if tool.name == "set_default_paragraph_style" {
+            let current = try nativeHandler("get_default_paragraph_style", [:])
+            guard let value = try JSONSerialization.jsonObject(with: current.value) as? [String: Any],
+                  let previous = value["style"] as? String else {
+                throw NotesError("invalid_native_result", "The native engine did not return the default-style preimage.")
+            }
+            var recorded = arguments
+            recorded["previous_style"] = previous
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
+                let value = try nativeHandler(tool.name, arguments)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        if ["set_global_note_sort", "set_global_date_grouping", "set_default_text_size", "set_resume_last_quick_note", "set_auto_convert_tags"].contains(tool.name) {
+            let current = try nativeHandler("get_notes_settings", [:])
+            guard let settings = try JSONSerialization.jsonObject(with: current.value) as? [String: Any] else {
+                throw NotesError("invalid_native_result", "The native engine did not return the Notes settings preimage.")
+            }
+            var recorded = arguments
+            switch tool.name {
+            case "set_global_note_sort":
+                guard let previous = settings["sort"] as? String else {
+                    throw NotesError("invalid_native_result", "The native engine did not return the global-sort preimage.")
+                }
+                recorded["previous_sort"] = previous
+            case "set_global_date_grouping":
+                guard let previous = settings["groupsByDate"] as? Bool else {
+                    throw NotesError("invalid_native_result", "The native engine did not return the date-grouping preimage.")
+                }
+                recorded["previous_enabled"] = previous
+            case "set_default_text_size":
+                guard let previous = settings["defaultTextSize"] as? Int else {
+                    throw NotesError("invalid_native_result", "The native engine did not return the text-size preimage.")
+                }
+                recorded["previous_points"] = previous
+            case "set_resume_last_quick_note":
+                guard let previous = settings["resumesLastQuickNote"] as? Bool else {
+                    throw NotesError("invalid_native_result", "The native engine did not return the Quick Note resume preimage.")
+                }
+                recorded["previous_enabled"] = previous
+            case "set_auto_convert_tags":
+                guard let previous = settings["autoConvertsToTags"] as? Bool else {
+                    throw NotesError("invalid_native_result", "The native engine did not return the automatic-tag-conversion preimage.")
+                }
+                recorded["previous_enabled"] = previous
+            default: break
+            }
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
                 let value = try nativeHandler(tool.name, arguments)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
@@ -1206,6 +1587,25 @@ public final class MCPServer: @unchecked Sendable {
                 return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
             }
         }
+        if tool.name == "set_folder_date_grouping" {
+            let target = try folder(arguments["ref"] as! String)
+            guard !target.isSmartFolder, !target.isRecentlyDeleted else { throw NotesError("folder_not_found", "No writable folder matches the reference.") }
+            let current = try nativeHandler("get_folder_date_grouping", ["ref": target.id])
+            guard let value = try JSONSerialization.jsonObject(with: current.value) as? [String: Any],
+                  let previousType = value["type"] as? Int, (0...2).contains(previousType) else {
+                throw NotesError("invalid_native_result", "The native engine did not return the folder-grouping preimage.")
+            }
+            var dispatch = arguments
+            dispatch["ref"] = target.id
+            var recorded = arguments
+            recorded["stable_id"] = target.id
+            recorded["previous_type"] = String(previousType)
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [target.path], engine: "native") {
+                let value = try nativeHandler(tool.name, dispatch)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
         // MARK: w4-format end
         var targetNotes: [Note] = []
         if let ref = arguments["ref"] as? String { targetNotes = [try reader.note(ref)] }
@@ -1213,6 +1613,7 @@ public final class MCPServer: @unchecked Sendable {
         let note = targetNotes.first
         var paths = targetNotes.map(\.summary.folderPath)
         if tool.name == "create_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
+        if tool.name == "create_quick_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         if tool.name == "restore_note", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
         // MARK: w9-paper begin
         if tool.name == "drawing_create", let folder = arguments["folder"] as? String { paths += try folderPaths(folder) }
@@ -1222,7 +1623,81 @@ public final class MCPServer: @unchecked Sendable {
         if tool.name == "link_add", let target = arguments["target"] as? String {
             dispatchArguments["target"] = try reader.summary(target).id.uuid
         }
-        return try safeWrite(tool: tool, arguments: arguments, note: note, paths: paths, engine: "native", snapshotNotes: targetNotes) {
+        var recordedArguments = arguments
+        if tool.name == "set_quick_note", let note {
+            recordedArguments["previous_enabled"] = note.summary.isSystemPaper == true
+        }
+        if ["scan_filter", "scan_rotate", "scan_crop", "scan_move", "scan_delete", "scan_append"].contains(tool.name) {
+            let current = try nativeHandler("scan_page_state", dispatchArguments)
+            let state = try JSONDecoder().decode(NativeScanPageState.self, from: current.value)
+            guard state.noteID == note?.summary.id.uuid,
+                  let pageID = dispatchArguments["page_id"] as? String else {
+                throw NotesError("invalid_native_result", "The native engine did not return the scanned-page preimage.")
+            }
+            func encode(_ value: ScanCrop) -> String {
+                "\(value.bottomLeft.x),\(value.bottomLeft.y);\(value.bottomRight.x),\(value.bottomRight.y);\(value.topLeft.x),\(value.topLeft.y);\(value.topRight.x),\(value.topRight.y)"
+            }
+            switch tool.name {
+            case "scan_filter":
+                let previous = state.filter.rawValue
+                recordedArguments["previous_filter"] = previous
+                dispatchArguments["expected_filter"] = previous
+            case "scan_rotate":
+                let previous = state.orientation.rawValue
+                recordedArguments["previous_orientation"] = previous
+                dispatchArguments["expected_orientation"] = previous
+            case "scan_crop":
+                func coordinate(_ key: String) -> Double? { (arguments[key] as? NSNumber)?.doubleValue }
+                guard let previous = state.crop,
+                      let blx = coordinate("bottom_left_x"), let bly = coordinate("bottom_left_y"),
+                      let brx = coordinate("bottom_right_x"), let bry = coordinate("bottom_right_y"),
+                      let tlx = coordinate("top_left_x"), let tly = coordinate("top_left_y"),
+                      let trx = coordinate("top_right_x"), let tryValue = coordinate("top_right_y") else {
+                    throw NotesError("invalid_native_result", "The native engine did not return the scan-crop preimage.")
+                }
+                let target = ScanCrop(
+                    bottomLeft: ScanPoint(x: blx, y: bly), bottomRight: ScanPoint(x: brx, y: bry),
+                    topLeft: ScanPoint(x: tlx, y: tly), topRight: ScanPoint(x: trx, y: tryValue))
+                recordedArguments["previous_crop"] = encode(previous)
+                recordedArguments["crop"] = encode(target)
+                dispatchArguments["expected_crop"] = encode(previous)
+            case "scan_move":
+                guard let previous = state.pageIDs.firstIndex(of: pageID),
+                      let target = arguments["to_index"] as? Int, state.pageIDs.indices.contains(target) else {
+                    throw NotesError("invalid_native_result", "The native engine did not return the scan-page order preimage.")
+                }
+                var applied = state.pageIDs
+                applied.remove(at: previous)
+                applied.insert(pageID, at: target)
+                recordedArguments["previous_index"] = previous
+                recordedArguments["previous_page_order"] = state.pageIDs
+                recordedArguments["applied_page_order"] = applied
+                dispatchArguments["expected_page_ids"] = state.pageIDs
+            case "scan_delete":
+                guard state.pageIDs.count > 1,
+                      let previous = state.pageIDs.firstIndex(of: pageID) else {
+                    throw NotesError("scan_last_page_refused", "Refusing to delete the only page in a scanned document.")
+                }
+                recordedArguments["previous_index"] = previous
+                recordedArguments["previous_page_order"] = state.pageIDs
+                recordedArguments["applied_page_order"] = state.pageIDs.filter { $0 != pageID }
+                dispatchArguments["expected_page_ids"] = state.pageIDs
+            case "scan_append":
+                recordedArguments["previous_page_order"] = state.pageIDs
+                dispatchArguments["expected_page_ids"] = state.pageIDs
+            default: break
+            }
+        }
+        if ["scan_add", "scan_append"].contains(tool.name), let pages = arguments["pages"] as? [String] {
+            let decoded = pages.compactMap { Data(base64Encoded: $0) }
+            guard decoded.count == pages.count else {
+                throw NotesError("invalid_scan_page", "Every scan page must be valid base64.")
+            }
+            recordedArguments.removeValue(forKey: "pages")
+            recordedArguments["page_count"] = pages.count
+            recordedArguments["page_sha256"] = decoded.map(FrozenAttachmentInput.hash).joined(separator: ",")
+        }
+        return try safeWrite(tool: tool, arguments: recordedArguments, note: note, paths: paths, engine: "native", snapshotNotes: targetNotes) {
             let value = try nativeHandler(tool.name, dispatchArguments)
             guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
             return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
@@ -1257,11 +1732,6 @@ public final class MCPServer: @unchecked Sendable {
             for key in ["dry_run", "idempotency_key", "if_modified", "expect_revision", "write_folders"] { clean.removeValue(forKey: key) }
             return try content(["dry_run": true, "tool": tool.name, "engine": engine, "arguments": clean, "message": "No changes made."])
         }
-        if !snapshotNotes.isEmpty {
-            for target in snapshotNotes { _ = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots")).save(target) }
-        } else if tool.destructive, let note {
-            _ = try SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots")).save(note)
-        }
         try FileManager.default.createDirectory(at: stateRoot, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         var recorded = arguments
         recorded["tool"] = tool.name; recorded["engine"] = engine
@@ -1274,8 +1744,86 @@ public final class MCPServer: @unchecked Sendable {
             throw NotesError("write_outcome_unknown", "The recorded operation has an unresolved outcome.")
         }
         do {
+            var snapshotIDs: [String: String] = [:]
+            let snapshotStore = SnapshotStore(rootURL: stateRoot.appendingPathComponent("snapshots"))
+            if !snapshotNotes.isEmpty {
+                for target in snapshotNotes {
+                    let payloads = engine == "native" && target.attachments.contains(where: { $0.kind == "drawing" })
+                        ? try NativeNotesWriter().snapshotDrawingPayloads(target.summary.id.uuid) : [:]
+                    let scanMarkupPayloads = engine == "native"
+                        && target.attachments.contains(where: { $0.kind == "scan" || ($0.markupDataBytes ?? 0) > 0 })
+                        ? try SQLiteNotesStore(refresh: true).scanMarkupPayloads(target.summary.id.uuid) : [:]
+                    let paperBundlePayloads = engine == "native"
+                        && target.attachments.contains(where: { $0.typeUTI.lowercased().contains("paper") })
+                        ? try NativeNotesWriter().snapshotPaperBundlePayloads(target.summary.id.uuid) : [:]
+                    let linkPayloads = engine == "native" && target.attachments.contains(where: {
+                        $0.url != nil || ($0.synapseDataBytes ?? 0) > 0 || ($0.linkPreviewMetadataBytes ?? 0) > 0
+                    }) ? try NativeNotesWriter().snapshotLinkPayloads(target.summary.id.uuid) : [:]
+                    snapshotIDs[target.summary.id.uuid] = try snapshotStore.save(
+                        target, drawingPayloads: payloads, paperBundlePayloads: paperBundlePayloads,
+                        linkPayloads: linkPayloads,
+                        scanMarkupPayloads: scanMarkupPayloads
+                    ).id
+                }
+            } else if tool.destructive, let note {
+                let payloads = engine == "native" && note.attachments.contains(where: { $0.kind == "drawing" })
+                    ? try NativeNotesWriter().snapshotDrawingPayloads(note.summary.id.uuid) : [:]
+                let scanMarkupPayloads = engine == "native"
+                    && note.attachments.contains(where: { $0.kind == "scan" || ($0.markupDataBytes ?? 0) > 0 })
+                    ? try SQLiteNotesStore(refresh: true).scanMarkupPayloads(note.summary.id.uuid) : [:]
+                let paperBundlePayloads = engine == "native"
+                    && note.attachments.contains(where: { $0.typeUTI.lowercased().contains("paper") })
+                    ? try NativeNotesWriter().snapshotPaperBundlePayloads(note.summary.id.uuid) : [:]
+                let linkPayloads = engine == "native" && note.attachments.contains(where: {
+                    $0.url != nil || ($0.synapseDataBytes ?? 0) > 0 || ($0.linkPreviewMetadataBytes ?? 0) > 0
+                }) ? try NativeNotesWriter().snapshotLinkPayloads(note.summary.id.uuid) : [:]
+                snapshotIDs[note.summary.id.uuid] = try snapshotStore.save(
+                    note, drawingPayloads: payloads, paperBundlePayloads: paperBundlePayloads,
+                    linkPayloads: linkPayloads,
+                    scanMarkupPayloads: scanMarkupPayloads
+                ).id
+            }
+            if let note, let snapshotID = snapshotIDs[note.summary.id.uuid] { recorded["snapshot_id"] = snapshotID }
+            if snapshotIDs.count > 1 { recorded["snapshot_ids"] = snapshotIDs }
+            if !snapshotIDs.isEmpty {
+                let snapshotArguments = try JSONSerialization.data(withJSONObject: recorded, options: [.sortedKeys])
+                try journal.updateRecordedArguments(begun.entry.id, arguments: snapshotArguments)
+            }
             let started = Date().addingTimeInterval(-1)
             var (result, details, operationID) = try action()
+            var undoMetadataChanged = false
+            if tool.name == "scan_append",
+               let detail = details as? [String: Any],
+               let created = detail["pageAttachmentIDs"] as? [String],
+               let previous = recorded["previous_page_order"] as? [String],
+               !created.isEmpty {
+                recorded["created_page_ids"] = created
+                recorded["applied_page_order"] = previous + created
+                undoMetadataChanged = true
+            }
+            if ["smart_folder_edit_rules", "smart_folder_edit_typed"].contains(tool.name),
+               let detail = details as? [String: Any],
+               let verification = detail["verification"] as? [String: Any],
+               let native = verification["nativeReadback"] as? [String: Any],
+               let query = native["queryJSON"] as? String, !query.isEmpty {
+                recorded["query_json"] = query
+                undoMetadataChanged = true
+            }
+            if let note,
+               let current = try? reader.note(note.summary.id.uuid) {
+                recorded["post_revision"] = ConcurrencyGuard.revision(current)
+                undoMetadataChanged = true
+            }
+            if undoMetadataChanged {
+                do {
+                    let finalArguments = try JSONSerialization.data(withJSONObject: recorded, options: [.sortedKeys])
+                    try journal.updateRecordedArguments(begun.entry.id, arguments: finalArguments)
+                } catch {
+                    let warning = "The write succeeded, but its undo metadata could not be completed."
+                    result.message = [result.message, warning].compactMap { $0 }.joined(separator: " ")
+                }
+            }
+            result.journalID = begun.entry.id
             if arguments["wait_sync"] as? Bool == true, result.outcome == .verified,
                let noteID = result.noteID?.uuid, !noteID.isEmpty {
                 let timeout = (arguments["sync_timeout"] as? NSNumber)?.doubleValue ?? 30
@@ -1286,6 +1834,7 @@ public final class MCPServer: @unchecked Sendable {
             try journal.finish(begun.entry.id, outcome: outcome, noteID: identity, result: result, message: result.message)
             var value: [String: Any] = ["engine": engine, "result": try NotePresentation.object(result)]
             if let operationID { value["operationID"] = operationID }
+            value["journalID"] = begun.entry.id
             if let details { value["details"] = details }
             return try content(value, isError: result.outcome == .unknown || result.outcome == .rolledBack)
         } catch {
@@ -1426,18 +1975,35 @@ public final class MCPServer: @unchecked Sendable {
         }
 
         var buffer = Data()
+        var discardingOversizedLine = false
         while true {
             let chunk = input.availableData
             if chunk.isEmpty { break }
-            buffer.append(chunk)
-            while let newline = buffer.firstIndex(of: 0x0a) {
-                var line = Data(buffer[..<newline])
-                buffer.removeSubrange(...newline)
-                if line.last == 0x0d { line.removeLast() }
-                submit(line)
+            var start = chunk.startIndex
+            while start < chunk.endIndex {
+                let newline = chunk[start...].firstIndex(of: 0x0a)
+                let end = newline ?? chunk.endIndex
+                let segment = chunk[start..<end]
+                if !discardingOversizedLine {
+                    if buffer.count + segment.count > Self.maximumStdioLineBytes {
+                        buffer.removeAll(keepingCapacity: false)
+                        discardingOversizedLine = true
+                        writer.send(self.error(id: NSNull(), code: -32600, message: "Request exceeds the 4 MiB stdio limit"))
+                    } else {
+                        buffer.append(contentsOf: segment)
+                    }
+                }
+                guard let newline else { break }
+                if !discardingOversizedLine {
+                    if buffer.last == 0x0d { buffer.removeLast() }
+                    submit(buffer)
+                    buffer.removeAll(keepingCapacity: true)
+                }
+                discardingOversizedLine = false
+                start = chunk.index(after: newline)
             }
         }
-        if !buffer.isEmpty { submit(buffer) }
+        if !discardingOversizedLine, !buffer.isEmpty { submit(buffer) }
         group.wait()
     }
 }

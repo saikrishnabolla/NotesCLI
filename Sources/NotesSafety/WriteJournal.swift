@@ -8,8 +8,37 @@ public enum JournalOutcome: String, Codable, Sendable { case started, verified, 
 public enum JournalRestoreAction: Sendable, Equatable {
     case checklistAutoSort(enabled: Bool)
     case folderSort(folderID: String, order: String, direction: String)
+    case folderDateGrouping(folderID: String, type: Int)
+    case defaultParagraphStyle(style: String)
+    case globalNoteSort(sort: String)
+    case globalDateGrouping(enabled: Bool)
+    case defaultTextSize(points: Int)
+    case resumeLastQuickNote(enabled: Bool)
+    case autoConvertToTags(enabled: Bool)
+    case quickNote(noteID: String, enabled: Bool)
     case defaultAccount(identifier: String)
     case smartFolderQuery(folderID: String, queryJSON: String)
+    case scanFilter(noteID: String, attachmentID: String, pageID: String, filter: String, expectedCurrent: String?)
+    case scanOrientation(noteID: String, attachmentID: String, pageID: String, orientation: String, expectedCurrent: String?)
+    case scanCrop(noteID: String, attachmentID: String, pageID: String, crop: ScanCrop, expectedCurrent: ScanCrop?)
+    case scanMove(noteID: String, attachmentID: String, pageID: String, index: Int, expectedPageIDs: [String]?)
+    case scanUndelete(noteID: String, attachmentID: String, pageID: String, index: Int, expectedPageIDs: [String]?)
+    case scanDeletePages(noteID: String, attachmentID: String, pageIDs: [String], expectedPageIDs: [String])
+}
+
+public enum JournalRestoreExpectation: Sendable, Equatable {
+    case checklistAutoSort(Bool)
+    case folderSort(order: String, direction: String)
+    case folderDateGrouping(type: Int)
+    case defaultParagraphStyle(String)
+    case globalNoteSort(String)
+    case globalDateGrouping(Bool)
+    case defaultTextSize(Int)
+    case resumeLastQuickNote(Bool)
+    case autoConvertToTags(Bool)
+    case quickNote(Bool)
+    case defaultAccount(String)
+    case smartFolderQuery(String)
 }
 
 public struct JournalEntry: Codable, Sendable {
@@ -30,11 +59,34 @@ public struct JournalEntry: Codable, Sendable {
         return identity
     }
 
+    public var snapshotID: String? { recordedString("snapshot_id") }
+    public var postRevision: String? { recordedString("post_revision") }
+
+    private func recordedString(_ key: String) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: arguments) as? [String: Any],
+              let value = object[key] as? String, !value.isEmpty else { return nil }
+        return value
+    }
+
     public func restoreAction() throws -> JournalRestoreAction? {
         guard let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any] else {
             throw NotesError("invalid_journal", "The journal arguments are unreadable.")
         }
         func string(_ key: String) -> String? { object[key] as? String }
+        func strings(_ key: String) -> [String]? {
+            if let values = object[key] as? [String] { return values }
+            return string(key).map { $0.isEmpty ? [] : $0.split(separator: ",").map(String.init) }
+        }
+        func crop(_ key: String) -> ScanCrop? {
+            guard let value = string(key) else { return nil }
+            let points = value.split(separator: ";", omittingEmptySubsequences: false).compactMap { pair -> ScanPoint? in
+                let values = pair.split(separator: ",", omittingEmptySubsequences: false)
+                guard values.count == 2, let x = Double(values[0]), let y = Double(values[1]) else { return nil }
+                return ScanPoint(x: x, y: y)
+            }
+            guard points.count == 4 else { return nil }
+            return ScanCrop(bottomLeft: points[0], bottomRight: points[1], topLeft: points[2], topRight: points[3])
+        }
         func required(_ key: String) throws -> String {
             guard let value = string(key), !value.isEmpty else {
                 throw NotesError("journal_preimage_missing", "Journal operation \(id) has no \(key) preimage.")
@@ -52,11 +104,141 @@ public struct JournalEntry: Codable, Sendable {
         case "folderSort", "set_folder_sort":
             return .folderSort(folderID: try required("stable_id"), order: try required("previous_by"),
                                direction: try required("previous_direction"))
+        case "folderDateGrouping", "set_folder_date_grouping":
+            let type: Int?
+            if let value = object["previous_type"] as? Int { type = value }
+            else if let value = string("previous_type").flatMap(Int.init) { type = value }
+            else if let value = string("previous_enabled").flatMap(Bool.init) { type = value ? 2 : 1 }
+            else { type = nil }
+            guard let type, (0...2).contains(type) else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no valid previous_type preimage.")
+            }
+            return .folderDateGrouping(folderID: try required("stable_id"), type: type)
+        case "defaultParagraphStyle", "set_default_paragraph_style":
+            return .defaultParagraphStyle(style: try required("previous_style"))
+        case "globalNoteSort", "set_global_note_sort":
+            return .globalNoteSort(sort: try required("previous_sort"))
+        case "globalDateGrouping", "set_global_date_grouping":
+            guard let enabled = string("previous_enabled").flatMap(Bool.init) ?? object["previous_enabled"] as? Bool else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no previous_enabled preimage.")
+            }
+            return .globalDateGrouping(enabled: enabled)
+        case "defaultTextSize", "set_default_text_size":
+            guard let points = string("previous_points").flatMap(Int.init) ?? object["previous_points"] as? Int else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no previous_points preimage.")
+            }
+            return .defaultTextSize(points: points)
+        case "resumeLastQuickNote", "set_resume_last_quick_note":
+            guard let enabled = string("previous_enabled").flatMap(Bool.init) ?? object["previous_enabled"] as? Bool else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no previous_enabled preimage.")
+            }
+            return .resumeLastQuickNote(enabled: enabled)
+        case "autoConvertToTags", "set_auto_convert_tags":
+            guard let enabled = string("previous_enabled").flatMap(Bool.init) ?? object["previous_enabled"] as? Bool else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no previous_enabled preimage.")
+            }
+            return .autoConvertToTags(enabled: enabled)
+        case "setQuickNote", "set_quick_note":
+            guard let enabled = string("previous_enabled").flatMap(Bool.init) ?? object["previous_enabled"] as? Bool else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no previous_enabled preimage.")
+            }
+            let noteID: String
+            if let stableID = string("stable_id"), !stableID.isEmpty { noteID = stableID }
+            else { noteID = try required("ref") }
+            return .quickNote(noteID: noteID, enabled: enabled)
         case "setDefaultAccount", "set_default_account":
             return .defaultAccount(identifier: try required("previous_account_id"))
         case "smartFolderEditRules", "smartFolderEditTyped", "smart_folder_edit_rules", "smart_folder_edit_typed":
             return .smartFolderQuery(folderID: try required("stable_id"), queryJSON: try required("previous_query_json"))
+        case "scanFilter", "scan_filter":
+            return .scanFilter(noteID: try required("stable_id"), attachmentID: try required("attachment_id"),
+                               pageID: try required("page_id"), filter: try required("previous_filter"),
+                               expectedCurrent: string("filter"))
+        case "scanOrientation", "scan_rotate":
+            return .scanOrientation(noteID: try required("stable_id"), attachmentID: try required("attachment_id"),
+                                    pageID: try required("page_id"), orientation: try required("previous_orientation"),
+                                    expectedCurrent: string("orientation"))
+        case "scanCrop", "scan_crop":
+            guard let previous = crop("previous_crop") else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no valid previous_crop preimage.")
+            }
+            return .scanCrop(noteID: try required("stable_id"), attachmentID: try required("attachment_id"),
+                             pageID: try required("page_id"), crop: previous, expectedCurrent: crop("crop"))
+        case "scanMove", "scan_move":
+            let index = string("previous_index").flatMap(Int.init) ?? object["previous_index"] as? Int
+            guard let index, index >= 0 else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no valid previous_index preimage.")
+            }
+            return .scanMove(noteID: try required("stable_id"), attachmentID: try required("attachment_id"),
+                             pageID: try required("page_id"), index: index,
+                             expectedPageIDs: strings("applied_page_order"))
+        case "scanDelete", "scan_delete":
+            let index = string("previous_index").flatMap(Int.init) ?? object["previous_index"] as? Int
+            guard let index, index >= 0 else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no valid previous_index preimage.")
+            }
+            return .scanUndelete(noteID: try required("stable_id"), attachmentID: try required("attachment_id"),
+                                 pageID: try required("page_id"), index: index,
+                                 expectedPageIDs: strings("applied_page_order"))
+        case "scanAppend", "scan_append":
+            guard let pageIDs = strings("created_page_ids"), !pageIDs.isEmpty,
+                  let applied = strings("applied_page_order"), !applied.isEmpty else {
+                throw NotesError("journal_preimage_missing", "Journal operation \(id) has no completed scan-page result.")
+            }
+            return .scanDeletePages(noteID: try required("stable_id"), attachmentID: try required("attachment_id"),
+                                    pageIDs: pageIDs, expectedPageIDs: applied)
         default: return nil
+        }
+    }
+
+    public func restoreExpectation() throws -> JournalRestoreExpectation? {
+        guard let object = try JSONSerialization.jsonObject(with: arguments) as? [String: Any] else {
+            throw NotesError("invalid_journal", "The journal arguments are unreadable.")
+        }
+        func string(_ key: String) -> String? { object[key] as? String }
+        func required(_ key: String) throws -> String {
+            guard let value = string(key), !value.isEmpty else {
+                throw NotesError("journal_postimage_missing", "Journal operation \(id) has no \(key) result state; refusing an unsafe undo.")
+            }
+            return value
+        }
+        func boolean(_ key: String) throws -> Bool {
+            if let value = object[key] as? Bool { return value }
+            if let value = string(key).flatMap(Bool.init) { return value }
+            throw NotesError("journal_postimage_missing", "Journal operation \(id) has no \(key) result state; refusing an unsafe undo.")
+        }
+        func integer(_ key: String) throws -> Int {
+            if let value = object[key] as? Int { return value }
+            if let value = string(key).flatMap(Int.init) { return value }
+            throw NotesError("journal_postimage_missing", "Journal operation \(id) has no \(key) result state; refusing an unsafe undo.")
+        }
+        switch operation {
+        case "checklistAutoSort", "checklist_auto_sort":
+            return .checklistAutoSort(try boolean("enabled"))
+        case "folderSort", "set_folder_sort":
+            return .folderSort(order: try required("by"), direction: try required("direction"))
+        case "folderDateGrouping", "set_folder_date_grouping":
+            return .folderDateGrouping(type: try boolean("enabled") ? 2 : 1)
+        case "defaultParagraphStyle", "set_default_paragraph_style":
+            return .defaultParagraphStyle(try required("style"))
+        case "globalNoteSort", "set_global_note_sort":
+            return .globalNoteSort(try required("sort"))
+        case "globalDateGrouping", "set_global_date_grouping":
+            return .globalDateGrouping(try boolean("enabled"))
+        case "defaultTextSize", "set_default_text_size":
+            return .defaultTextSize(try integer("points"))
+        case "resumeLastQuickNote", "set_resume_last_quick_note":
+            return .resumeLastQuickNote(try boolean("enabled"))
+        case "autoConvertToTags", "set_auto_convert_tags":
+            return .autoConvertToTags(try boolean("enabled"))
+        case "setQuickNote", "set_quick_note":
+            return .quickNote(try boolean("enabled"))
+        case "setDefaultAccount", "set_default_account":
+            return .defaultAccount(try required("account_id"))
+        case "smartFolderEditRules", "smartFolderEditTyped", "smart_folder_edit_rules", "smart_folder_edit_typed":
+            return .smartFolderQuery(try required("query_json"))
+        default:
+            return nil
         }
     }
 }
@@ -145,6 +327,21 @@ public final class WriteJournal: @unchecked Sendable {
             } else { sqlite3_bind_null(statement, 3) }
             bind(message, 4, statement); bind(id, 5, statement)
             guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(database) == 1 else { throw NotesError("journal_not_found", "Journal entry \(id) was not found.") }
+        }
+    }
+
+    public func updateRecordedArguments(_ id: String, arguments: Data) throws {
+        try lock.withLock {
+            var statement: OpaquePointer?
+            try prepare("UPDATE operations SET arguments=? WHERE id=?", &statement)
+            defer { sqlite3_finalize(statement) }
+            _ = arguments.withUnsafeBytes {
+                sqlite3_bind_blob(statement, 1, $0.baseAddress, Int32($0.count), Self.transient)
+            }
+            bind(id, 2, statement)
+            guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(database) == 1 else {
+                throw NotesError("journal_not_found", "Journal entry \(id) was not found.")
+            }
         }
     }
 

@@ -1,10 +1,11 @@
 import AppKit
+import NotesCore
 import PencilKit
 
 /// A comparable copy of one PencilKit stroke: ink type, sRGB colour, and each point's position, width, and opacity.
 /// Positions include the stroke transform, so they are in drawing coordinates.
-public struct PaperStrokeRecord: Equatable, Sendable {
-    public struct Point: Equatable, Sendable {
+public struct PaperStrokeRecord: Codable, Equatable, Sendable {
+    public struct Point: Codable, Equatable, Sendable {
         public var x: Double, y: Double, width: Double, opacity: Double
         public init(x: Double, y: Double, width: Double, opacity: Double) {
             self.x = x; self.y = y; self.width = width; self.opacity = opacity
@@ -33,6 +34,31 @@ public struct PaperStrokeRecord: Equatable, Sendable {
     /// Every stroke in the drawings, in order.
     public static func records(_ drawings: [PKDrawing]) -> [PaperStrokeRecord] {
         drawings.flatMap(\.strokes).map(PaperStrokeRecord.init)
+    }
+
+    public static func drawing(_ records: [PaperStrokeRecord]) throws -> PKDrawing {
+        let strokes = try records.map { record -> PKStroke in
+            guard record.points.count >= 2, record.color.count == 4,
+                  record.color.allSatisfy({ $0.isFinite && (0...1).contains($0) }),
+                  record.points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.width.isFinite &&
+                      $0.width > 0 && $0.opacity.isFinite && (0...1).contains($0.opacity) }) else {
+                throw NotesError("invalid_drawing_snapshot", "The saved drawing stroke data is invalid.")
+            }
+            guard let ink = PKInk.InkType(rawValue: record.ink) else {
+                throw NotesError("invalid_drawing_snapshot", "The saved drawing uses an unknown ink type.")
+            }
+            let color = NSColor(srgbRed: record.color[0], green: record.color[1], blue: record.color[2],
+                                alpha: record.color[3])
+            let points = record.points.enumerated().map { index, point in
+                PKStrokePoint(location: CGPoint(x: point.x, y: point.y), timeOffset: Double(index) / 120,
+                              size: CGSize(width: point.width, height: point.width), opacity: point.opacity,
+                              force: 1, azimuth: 0, altitude: .pi / 2)
+            }
+            return PKStroke(ink: PKInk(ink, color: color),
+                            path: PKStrokePath(controlPoints: points, creationDate: Date(timeIntervalSince1970: 0)))
+        }
+        guard !strokes.isEmpty else { throw NotesError("invalid_drawing_snapshot", "The saved drawing has no strokes.") }
+        return PKDrawing(strokes: strokes)
     }
 
     /// Returns nil when the read-back strokes match the expected ones within `tolerance`,

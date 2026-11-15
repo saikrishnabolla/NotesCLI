@@ -137,6 +137,10 @@ final class ReaderDecodeTests: XCTestCase {
         XCTAssertEqual(try NotesTableDecoder.decode(PB.storedGzip(PB.wrap(pool + header))), [["B","D"],["A","C"]])
         let rtl = PB.bytes(3, PB.bytes(1, PB.bytes(2, PB.text(4,"CRTableColumnDirectionRightToLeft"))))
         XCTAssertEqual(try NotesTableDecoder.decode(PB.wrap(pool + rtl + header)), [["D","B"],["C","A"]])
+        let decodedRTL = try NotesTableDecoder.decodeTable(PB.wrap(pool + rtl + header))
+        XCTAssertTrue(decodedRTL.rightToLeft)
+        XCTAssertEqual(decodedRTL.cells.map { $0.map(\.text) }, [["D","B"],["C","A"]])
+        XCTAssertFalse(try NotesTableDecoder.decodeTable(PB.wrap(pool + header)).rightToLeft)
         var inlineObjects = objects
         let inline = PB.bytes(12,PB.text(1,"tag") + PB.text(2,"com.apple.notes.inlinetextattachment.hashtag"))
         inlineObjects[10] = PB.bytes(10,PB.note("\u{fffc}",[PB.int(1,1) + inline]))

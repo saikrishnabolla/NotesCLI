@@ -7,13 +7,14 @@ import NotesAutomation
 import NotesNative
 import NotesSafety
 import NotesHost
+import NotesStore
 import Darwin
 
 @main
 struct NotesCLI: ParsableCommand {
     nonisolated(unsafe) private static var hostParentMonitor: DispatchSourceProcess?
     static let version = notesCLIVersion
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self, HostCommand.self, UninstallCommand.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, OCRCommand.self, HandwritingCommand.self, PaperCommand.self, MapCommand.self, ScanCommand.self, MathCommand.self, QuickNoteCommand.self, SettingsCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, CollaborationCommand.self, DeepLink.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self, HostCommand.self, UninstallCommand.self])
     @OptionGroup var options: GlobalOptions
     @Flag(name: .customLong("no-recent"), help: "Hide recently edited titles on the home screen. Also set by NOTESCLI_HOME_RECENT=0.")
     var noRecent = false
@@ -37,6 +38,7 @@ struct NotesCLI: ParsableCommand {
 
     static func main() {
         do {
+            if try runInternalCommand() { return }
             if shouldUseCapabilityHost() {
                 Darwin.exit(try CapabilityHostClient.run(arguments: Array(CommandLine.arguments.dropFirst())))
             }
@@ -57,6 +59,17 @@ struct NotesCLI: ParsableCommand {
             FileHandle.standardError.write(Data((diagnostic + "\n").utf8))
             Darwin.exit(code == 64 ? 2 : 1)
         }
+    }
+
+    private static func runInternalCommand() throws -> Bool {
+        let arguments = CommandLine.arguments
+        guard arguments.count == 4, arguments[1] == "__legacy-drawing-read" else { return false }
+        guard arguments[3].hasPrefix("/") else {
+            throw NotesError("invalid_output", "The helper output path must be absolute.")
+        }
+        let data = try LegacyDrawingFreshReader.payload(attachmentID: arguments[2])
+        try data.write(to: URL(fileURLWithPath: arguments[3]), options: [.atomic])
+        return true
     }
 
     private static func startHostParentMonitor() {
@@ -86,6 +99,7 @@ struct NotesCLI: ParsableCommand {
             return false
         }
         if CapabilityHostPolicy.commandIndex(arguments).map({ arguments[$0] }) == "doctor" { return false }
+        if route == .auto, HostInstallation.requiresInstallOrUpgrade { return false }
         guard CapabilityHostPolicy.commandIndex(arguments) != nil else {
             return CapabilityHostPolicy.allows(arguments) && (route == .force || CapabilityHostClient.isAvailable())
         }
@@ -158,13 +172,28 @@ struct Show: ParsableCommand {
         EXAMPLES:
           notescli show '#8800'
           notescli show '#8800' --format json
+          printf '%s\n' "$NOTES_PASSWORD" | notescli show '#8800' --password-stdin --no-attachments
         """)
     @OptionGroup var options: GlobalOptions
     @Argument var ref: String
     @Option var format: NoteFormat = .markdown
     @Flag var noAttachments = false
+    @Flag(help: "Read a Notes-password-locked body using one password from stdin. Never stores the password.")
+    var passwordStdin = false
     func run() throws {
-        let backend = try options.backends(), note = try backend.reader.note(ref)
+        let backend = try options.backends()
+        let note: Note
+        if passwordStdin {
+            guard let reader = backend.reader as? SQLiteNotesStore else {
+                throw NotesError("locked_note_full_access_required", "Locked-note decryption requires the full read backend.")
+            }
+            let summary = try reader.summary(ref)
+            if !noAttachments, summary.attachmentCount > 0 {
+                throw NotesError("locked_attachments_unsupported", "This locked note has encrypted attachments that are not yet available.",
+                                 hint: "Use --no-attachments to read only the decrypted body.")
+            }
+            note = try reader.note(ref, password: inputPassword())
+        } else { note = try backend.reader.note(ref) }
         if format == .outline {
             let outline = note.document?.outline() ?? []
             if options.json { try Output.readJSON(outline, backend: backend) }
@@ -234,12 +263,30 @@ struct Add: ParsableCommand {
         let backend = try options.writable()
         let markdown = try inputBody(body: body, stdin: stdin, file: file, allowEditor: true)
         if !attach.isEmpty { try writeExtraCreate(options: options, write: write, title: title, folder: folder, markdown: markdown, paths: attach); return }
+        let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
         let targetPath = try SafetyExecutor.folderPath(folder, reader: backend.reader)
         let paths = targetPath.map { [$0] } ?? []
-        let plan = DryRunPlan(operation: "createNote", target: title, arguments: ["folder": folder ?? ""], resultingHTML: SafetyExecutor.bodyHTML(title: title, markdown: markdown))
-        if let result = try SafetyExecutor.run(options: write, operation: "createNote", arguments: ["title": title, "body": markdown, "folder": folder ?? ""],
-            allowedPaths: paths, plan: plan, action: { try backend.writer().createNote(title: title, markdown: markdown, folder: folder) }) {
-            try Output.write(result, json: options.json)
+        let plan = DryRunPlan(operation: "createNote", target: title, arguments: ["folder": folder ?? ""],
+                              resultingHTML: SafetyExecutor.bodyHTML(title: title, markdown: markdown), engine: selected.rawValue)
+        var native: NativeCreateResult?
+        if let result = try SafetyExecutor.run(options: write, operation: "createNote",
+            arguments: ["title": title, "body": markdown, "folder": folder ?? "", "engine": selected.rawValue],
+            allowedPaths: paths, plan: plan, action: {
+                switch selected {
+                case .scripting:
+                    return try backend.writer().createNote(title: title, markdown: markdown, folder: folder)
+                case .native where backend.isFake:
+                    return try backend.writer().createNote(title: title, markdown: markdown, folder: folder)
+                case .native:
+                    let value = try NativeNotesWriter().createNote(title: title, markdown: markdown, folder: folder,
+                                                                   attachments: [], allowShared: write.allowShared)
+                    native = value
+                    return value.write.writeResult
+                }
+            }) {
+            try outputEngineWrite(EngineWriteResponse(engine: selected.rawValue, result: result,
+                                                      operationID: native?.write.operationID,
+                                                      verification: native?.write.verification), options: options)
         }
     }
 }
@@ -361,6 +408,7 @@ struct Delete: ParsableCommand {
     }
     func run() throws {
         let backend = try options.writable()
+        let selected = try UnifiedNative.engine(options, scriptingAvailable: true, fake: backend.isFake)
         let notes = try selectedNotes(reader: backend.reader, refs: refs, fromQuery: fromQuery, folder: folder, account: account, tag: tag, max: max)
         if !write.dryRun { try confirm("Move \(notes.count) note(s) to Recently Deleted?", yes: yes) }
         var items: [BatchItemResult] = []
@@ -370,13 +418,26 @@ struct Delete: ParsableCommand {
                 var itemWrite = write
                 itemWrite.idempotencyKey = write.idempotencyKey.map { "\($0):\(note.summary.id.uuid)" }
                 let plan = DryRunPlan(operation: "deleteNote", target: note.summary.id.uuid, arguments: [:],
-                                      resultingHTML: try SafetyExecutor.plannedHTML(note, backend: backend, write: write))
-                let result = try SafetyExecutor.run(options: itemWrite, operation: "deleteNote", arguments: ["ref": note.summary.id.uuid],
+                                      resultingHTML: try SafetyExecutor.plannedHTML(note, backend: backend, write: write), engine: selected.rawValue)
+                let result = try SafetyExecutor.run(options: itemWrite, operation: "deleteNote",
+                    arguments: ["ref": note.summary.id.uuid, "engine": selected.rawValue],
                     note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan, emitDryRun: false,
-                    action: { try backend.writer().deleteNote(note.summary.id.uuid) })
+                    capturePrivatePayloads: !backend.isFake,
+                    action: {
+                        switch selected {
+                        case .scripting:
+                            return try backend.writer().deleteNote(note.summary.id.uuid)
+                        case .native where backend.isFake:
+                            return try backend.writer().deleteNote(note.summary.id.uuid)
+                        case .native:
+                            return try NativeNotesWriter().deleteNote(note.summary.id.uuid, allowShared: write.allowShared).writeResult
+                        }
+                    })
                 plans.append(plan)
-                items.append(BatchItemResult(ref: note.summary.id.uuid, result: result, error: nil))
-            } catch let error as NotesError { items.append(BatchItemResult(ref: note.summary.id.uuid, result: nil, error: error)) }
+                items.append(BatchItemResult(ref: note.summary.id.uuid, result: result, error: nil, engine: selected.rawValue))
+            } catch let error as NotesError {
+                items.append(BatchItemResult(ref: note.summary.id.uuid, result: nil, error: error, engine: selected.rawValue))
+            }
         }
         if write.dryRun {
             try outputDryRunPlans(plans, json: options.json)
@@ -384,7 +445,7 @@ struct Delete: ParsableCommand {
     }
 }
 struct FolderCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "folder", subcommands: [CreateFolder.self, RenameFolder.self, MoveFolder.self, DeleteFolder.self, FolderExists.self, FolderSortCommand.self])
+    static let configuration = CommandConfiguration(commandName: "folder", subcommands: [CreateFolder.self, RenameFolder.self, MoveFolder.self, DeleteFolder.self, FolderExists.self, FolderSortCommand.self, FolderGroupByDateCommand.self])
     @OptionGroup var options: GlobalOptions
 }
 struct CreateFolder: ParsableCommand {

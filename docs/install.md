@@ -11,13 +11,15 @@ notescli setup
 
 The formula lives in the [saikrishnabolla/homebrew-notescli](https://github.com/saikrishnabolla/homebrew-notescli) tap. It installs the notarized universal release binary and does not build Swift source.
 
+After `brew upgrade notescli`, run `notescli onboard` to replace the capability host with the same version.
+
 ## Release archive
 
 Download the `.tar.gz` file and its `.sha256` file from the same release. Check the archive, then install it on your `PATH`:
 
 ```bash
-grep 'tar.gz$' notescli-1.1.6-macos-universal.sha256 | shasum -a 256 -c -
-tar -xzf notescli-1.1.6-macos-universal.tar.gz
+grep 'tar.gz$' notescli-1.1.9-macos-universal.sha256 | shasum -a 256 -c -
+tar -xzf notescli-1.1.9-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
 mkdir -p "$HOME/Applications"
 ditto "NotesCLI Capability Host.app" "$HOME/Applications/NotesCLI Capability Host.app"
@@ -34,10 +36,10 @@ git clone https://github.com/saikrishnabolla/NotesCLI.git
 cd NotesCLI
 swift build -c release
 install -m 755 .build/release/notescli "$HOME/.local/bin/notescli"
-notescli setup
+notescli doctor
 ```
 
-A local source build is not notarized. Release archives are signed with Developer ID and notarized by Apple.
+A local source build is not notarized and does not include the capability-host app. It runs in the calling terminal, which needs its own permissions. Release archives include the signed and notarized host.
 
 ## Grant permissions
 

@@ -151,6 +151,21 @@ func inputBody(body: String?, stdin: Bool, file: String? = nil, allowEditor: Boo
     throw ValidationError("Provide --body or --stdin.")
 }
 
+func inputPassword() throws -> String {
+    let maximumBytes = 4_096
+    guard let data = try FileHandle.standardInput.read(upToCount: maximumBytes + 1),
+          data.count <= maximumBytes else {
+        throw NotesError("password_too_long", "The password from stdin is too long.")
+    }
+    var bytes = data
+    if bytes.suffix(2) == Data([0x0d, 0x0a]) { bytes.removeLast(2) }
+    else if bytes.last == 0x0a { bytes.removeLast() }
+    guard !bytes.contains(0), let password = String(data: bytes, encoding: .utf8) else {
+        throw NotesError("invalid_password_input", "The password from stdin must be UTF-8 text without NUL bytes.")
+    }
+    return password
+}
+
 enum FuzzySearch {
     static func tokens(_ text: String) -> [String] {
         text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "en_US_POSIX")).split { !$0.isLetter && !$0.isNumber }.map(String.init)

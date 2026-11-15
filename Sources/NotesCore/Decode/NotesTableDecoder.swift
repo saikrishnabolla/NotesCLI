@@ -2,11 +2,25 @@ import Foundation
 
 /// Reconstructs ICTable's ordered row/column identities and redirected cell references.
 public enum NotesTableDecoder {
+    public struct DecodedTable: Sendable, Equatable {
+        public var cells: [[TableCellDocument]]
+        public var rightToLeft: Bool
+
+        public init(cells: [[TableCellDocument]], rightToLeft: Bool) {
+            self.cells = cells
+            self.rightToLeft = rightToLeft
+        }
+    }
+
     public static func decode(_ data: Data, inlineText: (InlineRef) -> String? = { _ in nil }) throws -> [[String]] {
         try decodeDocuments(data, inlineText: inlineText).map { $0.map { $0.document.plainText() } }
     }
 
     public static func decodeDocuments(_ data: Data, inlineText: (InlineRef) -> String? = { _ in nil }) throws -> [[TableCellDocument]] {
+        try decodeTable(data, inlineText: inlineText).cells
+    }
+
+    public static func decodeTable(_ data: Data, inlineText: (InlineRef) -> String? = { _ in nil }) throws -> DecodedTable {
         let root = try ProtobufMessage(NotesInflate.decompressIfNeeded(data))
         let versions = try root.messages(2)
         guard versions.count == 1 else { throw DecodeError.invalidTable }
@@ -85,6 +99,6 @@ public enum NotesTableDecoder {
                 result[r][c] = TableCellDocument(text: document.text, runs: document.runs)
             }
         }
-        return rtl ? result.map { Array($0.reversed()) } : result
+        return DecodedTable(cells: rtl ? result.map { Array($0.reversed()) } : result, rightToLeft: rtl)
     }
 }

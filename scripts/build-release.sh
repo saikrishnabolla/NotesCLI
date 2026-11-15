@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${NOTESCLI_VERSION:-1.1.6}"
+VERSION="${NOTESCLI_VERSION:-1.1.9}"
 IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bolla (GXKRUPGJVF)}"
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
 HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"
@@ -17,12 +17,13 @@ if [[ "$IDENTITY" != "-" && -z "$NOTARY_PROFILE" ]]; then
     exit 1
 fi
 
-mkdir -p "$OUTPUT_DIR"
+mkdir -p "$OUTPUT_DIR" "$ROOT/.build"
 STAGING="$(mktemp -d "$ROOT/.build/notescli-release.XXXXXX")"
 trap 'rm -rf -- "$STAGING"' EXIT
 RELEASE_INFO_PLIST="$STAGING/Info.plist"
 cp "$INFO_PLIST" "$RELEASE_INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$RELEASE_INFO_PLIST"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$RELEASE_INFO_PLIST"
 HOST_APP="$STAGING/NotesCLI Capability Host.app"
 mkdir -p "$HOST_APP/Contents/MacOS" "$HOST_APP/Contents/Helpers"
 cp "$HOST_INFO_PLIST" "$HOST_APP/Contents/Info.plist"
@@ -65,6 +66,14 @@ ARCHITECTURES="$(lipo -archs "$STAGING/notescli")"
     exit 1
 }
 echo "Architectures: $ARCHITECTURES"
+[[ "$("$STAGING/notescli" --version)" == "$VERSION" ]] || {
+    echo "The release executable version does not match $VERSION." >&2
+    exit 1
+}
+[[ "$("$HOST_APP/Contents/Helpers/notescli" --version)" == "$VERSION" ]] || {
+    echo "The capability host's CLI version does not match $VERSION." >&2
+    exit 1
+}
 for BINARY in "$HOST_APP/Contents/MacOS/NotesCLI Capability Host" "$HOST_APP/Contents/Helpers/notescli"; do
     INNER_ARCHITECTURES="$(lipo -archs "$BINARY")"
     [[ " $INNER_ARCHITECTURES " == *" arm64 "* && " $INNER_ARCHITECTURES " == *" x86_64 "* ]] || {
@@ -98,6 +107,18 @@ echo "Embedded Info.plist: NSAppleEventsUsageDescription present"
     exit 1
 }
 echo "Embedded Info.plist: NSSpeechRecognitionUsageDescription present"
+[[ "$(plutil -extract CFBundleShortVersionString raw "$STAGING/embedded-Info.plist")" == "$VERSION" ]] || {
+    echo "The embedded CLI short version does not match $VERSION." >&2; exit 1;
+}
+[[ "$(plutil -extract CFBundleVersion raw "$STAGING/embedded-Info.plist")" == "$VERSION" ]] || {
+    echo "The embedded CLI build version does not match $VERSION." >&2; exit 1;
+}
+[[ "$(plutil -extract CFBundleShortVersionString raw "$HOST_APP/Contents/Info.plist")" == "$VERSION" ]] || {
+    echo "The capability host short version does not match $VERSION." >&2; exit 1;
+}
+[[ "$(plutil -extract CFBundleVersion raw "$HOST_APP/Contents/Info.plist")" == "$VERSION" ]] || {
+    echo "The capability host build version does not match $VERSION." >&2; exit 1;
+}
 
 if [[ -n "$NOTARY_PROFILE" ]]; then
     echo "Notarizing and stapling NotesCLI Capability Host.app"
@@ -110,7 +131,7 @@ fi
 
 echo "Validating distributed artifacts with Gatekeeper"
 codesign --verify --strict --verbose=4 "$STAGING/notescli"
-spctl -a -t execute -vv "$HOST_APP"
+if [[ "$IDENTITY" != "-" ]]; then spctl -a -t execute -vv "$HOST_APP"; fi
 
 ZIP="$OUTPUT_DIR/notescli-$VERSION-macos-universal.zip"
 TARBALL="$OUTPUT_DIR/notescli-$VERSION-macos-universal.tar.gz"
@@ -119,6 +140,22 @@ rm -f -- "$ZIP" "$TARBALL" "$CHECKSUMS"
 (cd "$STAGING" && zip -q -X -r "$ZIP" notescli "NotesCLI Capability Host.app")
 COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$STAGING" notescli "NotesCLI Capability Host.app"
 (cd "$OUTPUT_DIR" && shasum -a 256 "$(basename "$ZIP")" "$(basename "$TARBALL")") > "$CHECKSUMS"
+
+ZIP_VERIFY="$STAGING/verify-zip"
+TAR_VERIFY="$STAGING/verify-tar"
+mkdir -p "$ZIP_VERIFY" "$TAR_VERIFY"
+ditto -x -k "$ZIP" "$ZIP_VERIFY"
+tar -xzf "$TARBALL" -C "$TAR_VERIFY"
+for EXTRACTED in "$ZIP_VERIFY" "$TAR_VERIFY"; do
+    [[ "$("$EXTRACTED/notescli" --version)" == "$VERSION" ]]
+    [[ "$("$EXTRACTED/NotesCLI Capability Host.app/Contents/Helpers/notescli" --version)" == "$VERSION" ]] || {
+        echo "An extracted capability host contains the wrong CLI version." >&2; exit 1;
+    }
+    codesign --verify --strict --verbose=4 "$EXTRACTED/notescli"
+    codesign --verify --deep --strict --verbose=4 "$EXTRACTED/NotesCLI Capability Host.app"
+    if [[ -n "$NOTARY_PROFILE" ]]; then xcrun stapler validate "$EXTRACTED/NotesCLI Capability Host.app"; fi
+    if [[ "$IDENTITY" != "-" ]]; then spctl -a -t execute -vv "$EXTRACTED/NotesCLI Capability Host.app"; fi
+done
 
 "$ROOT/scripts/update-formula.sh" --version "$VERSION" --archive "$TARBALL"
 

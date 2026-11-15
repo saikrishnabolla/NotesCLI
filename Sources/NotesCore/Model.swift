@@ -269,16 +269,52 @@ public struct TranscriptWord: Codable, Sendable, Hashable {
 public struct RecordingMetadata: Codable, Sendable, Hashable {
     public var summary: String?
     public var topLineSummary: String?
+    public var summaryVersion: Int?
+    public var externalModelAttributionProviderName: String?
+    public var externalModelAttributionSymbolName: String?
     public var localSpeakerHandle: String?
     public var remoteSpeakerHandle: String?
     public var callType: Int?
     public var isCallRecording: Bool?
     public var startTime: Date?
-    public init(summary: String? = nil, topLineSummary: String? = nil, localSpeakerHandle: String? = nil,
+    public init(summary: String? = nil, topLineSummary: String? = nil, summaryVersion: Int? = nil,
+                externalModelAttributionProviderName: String? = nil,
+                externalModelAttributionSymbolName: String? = nil,
+                localSpeakerHandle: String? = nil,
                 remoteSpeakerHandle: String? = nil, callType: Int? = nil, isCallRecording: Bool? = nil, startTime: Date? = nil) {
         self.summary = summary; self.topLineSummary = topLineSummary; self.localSpeakerHandle = localSpeakerHandle
+        self.summaryVersion = summaryVersion
+        self.externalModelAttributionProviderName = externalModelAttributionProviderName
+        self.externalModelAttributionSymbolName = externalModelAttributionSymbolName
         self.remoteSpeakerHandle = remoteSpeakerHandle; self.callType = callType
         self.isCallRecording = isCallRecording; self.startTime = startTime
+    }
+}
+
+public struct RecordingFragmentMetadata: Codable, Sendable, Hashable {
+    public var id: String
+    public var createdDate: Date?
+    public var transcriptVersion: Int?
+
+    public init(id: String, createdDate: Date? = nil, transcriptVersion: Int? = nil) {
+        self.id = id; self.createdDate = createdDate; self.transcriptVersion = transcriptVersion
+    }
+}
+
+public struct ScanPoint: Codable, Sendable, Hashable {
+    public var x: Double
+    public var y: Double
+    public init(x: Double, y: Double) { self.x = x; self.y = y }
+}
+
+public struct ScanCrop: Codable, Sendable, Hashable {
+    public var bottomLeft: ScanPoint
+    public var bottomRight: ScanPoint
+    public var topLeft: ScanPoint
+    public var topRight: ScanPoint
+    public init(bottomLeft: ScanPoint, bottomRight: ScanPoint, topLeft: ScanPoint, topRight: ScanPoint) {
+        self.bottomLeft = bottomLeft; self.bottomRight = bottomRight
+        self.topLeft = topLeft; self.topRight = topRight
     }
 }
 
@@ -289,6 +325,13 @@ public struct Attachment: Codable, Sendable, Hashable {
     public var filePath: String?     // resolved on-disk media path, nil if not downloaded
     public var title: String?
     public var url: String?          // for link previews
+    public var synapseDataBytes: Int?
+    public var linkPreviewMetadataBytes: Int?
+    public var hasMapLocation: Bool?
+    public var mapLatitude: Double?
+    public var mapLongitude: Double?
+    public var mapAddress: String?
+    public var mapPlaceUpdated: Date?
     public var ocrText: String?      // text Notes already recognized (scans, images)
     public var handwritingText: String?
     public var additionalIndexableText: String?
@@ -298,6 +341,7 @@ public struct Attachment: Codable, Sendable, Hashable {
     public var transcriptText: String?
     public var transcriptWords: [TranscriptWord]?
     public var recording: RecordingMetadata?
+    public var recordingFragments: [RecordingFragmentMetadata]?
     public var duration: Double?
     public var childAttachmentIDs: [String]?
     public var childAttachments: [Attachment]?
@@ -309,37 +353,68 @@ public struct Attachment: Codable, Sendable, Hashable {
     public var participantEmail: String?
     public var participantUserID: String?
     public var targetNoteID: String?
+    public var targetParagraphID: String?
+    public var targetParagraphName: String?
     public var mathExpression: String?
     public var mathResult: String?
     public var graphExpression: String?
     public var isDivider: Bool?
     public var drawingSVG: String?
+    public var markupDataBytes: Int?
+    public var hasEmbeddedMarkup: Bool?
+    public var scanFilter: Int?
+    public var scanOrientation: Int?
+    public var scanCrop: ScanCrop?
+    public var scanHasMarkup: Bool?
+    public var scanHasEmbeddedMarkup: Bool?
+    public var tableRightToLeft: Bool?
     public init(id: String, typeUTI: String, filename: String? = nil, filePath: String? = nil,
-                title: String? = nil, url: String? = nil, ocrText: String? = nil,
+                title: String? = nil, url: String? = nil, synapseDataBytes: Int? = nil,
+                linkPreviewMetadataBytes: Int? = nil, hasMapLocation: Bool? = nil,
+                mapLatitude: Double? = nil, mapLongitude: Double? = nil, mapAddress: String? = nil,
+                mapPlaceUpdated: Date? = nil, ocrText: String? = nil,
                 handwritingText: String? = nil, additionalIndexableText: String? = nil,
                 imageClassification: String? = nil, imageSummary: String? = nil, pdfText: String? = nil,
                 transcriptText: String? = nil, transcriptWords: [TranscriptWord]? = nil,
-                recording: RecordingMetadata? = nil, duration: Double? = nil,
+                recording: RecordingMetadata? = nil, recordingFragments: [RecordingFragmentMetadata]? = nil,
+                duration: Double? = nil,
                 childAttachmentIDs: [String]? = nil, childAttachments: [Attachment]? = nil,
                 pageImagePaths: [String]? = nil,
                 fallbackRasterPath: String? = nil, displayText: String? = nil,
                 participantID: String? = nil, participantName: String? = nil,
                 participantEmail: String? = nil, participantUserID: String? = nil, targetNoteID: String? = nil,
+                targetParagraphID: String? = nil, targetParagraphName: String? = nil,
                 mathExpression: String? = nil, mathResult: String? = nil,
-                graphExpression: String? = nil, isDivider: Bool? = nil, drawingSVG: String? = nil) {
+                graphExpression: String? = nil, isDivider: Bool? = nil, drawingSVG: String? = nil,
+                markupDataBytes: Int? = nil, hasEmbeddedMarkup: Bool? = nil,
+                scanFilter: Int? = nil, scanOrientation: Int? = nil, scanCrop: ScanCrop? = nil,
+                scanHasMarkup: Bool? = nil, scanHasEmbeddedMarkup: Bool? = nil,
+                tableRightToLeft: Bool? = nil) {
         self.id = id; self.typeUTI = typeUTI; self.filename = filename; self.filePath = filePath
-        self.title = title; self.url = url; self.ocrText = ocrText
+        self.title = title; self.url = url
+        self.synapseDataBytes = synapseDataBytes; self.linkPreviewMetadataBytes = linkPreviewMetadataBytes
+        self.hasMapLocation = hasMapLocation
+        self.mapLatitude = mapLatitude; self.mapLongitude = mapLongitude
+        self.mapAddress = mapAddress; self.mapPlaceUpdated = mapPlaceUpdated
+        self.ocrText = ocrText
         self.handwritingText = handwritingText; self.additionalIndexableText = additionalIndexableText
         self.imageClassification = imageClassification; self.imageSummary = imageSummary; self.pdfText = pdfText
         self.transcriptText = transcriptText; self.transcriptWords = transcriptWords; self.recording = recording
+        self.recordingFragments = recordingFragments
         self.duration = duration; self.childAttachmentIDs = childAttachmentIDs; self.childAttachments = childAttachments
         self.pageImagePaths = pageImagePaths
         self.fallbackRasterPath = fallbackRasterPath; self.displayText = displayText
         self.participantID = participantID; self.participantName = participantName
         self.participantEmail = participantEmail; self.participantUserID = participantUserID
         self.targetNoteID = targetNoteID
+        self.targetParagraphID = targetParagraphID; self.targetParagraphName = targetParagraphName
         self.mathExpression = mathExpression; self.mathResult = mathResult
         self.graphExpression = graphExpression; self.isDivider = isDivider; self.drawingSVG = drawingSVG
+        self.markupDataBytes = markupDataBytes; self.hasEmbeddedMarkup = hasEmbeddedMarkup
+        self.scanFilter = scanFilter; self.scanOrientation = scanOrientation
+        self.scanCrop = scanCrop; self.scanHasMarkup = scanHasMarkup
+        self.scanHasEmbeddedMarkup = scanHasEmbeddedMarkup
+        self.tableRightToLeft = tableRightToLeft
     }
 
     public var kind: String {
@@ -347,14 +422,14 @@ public struct Attachment: Codable, Sendable, Hashable {
         if value.contains("audio") || value.contains("mpeg-4-audio") || value == "public.mp3" { return "audio" }
         if value.contains("pdf") { return "pdf" }
         if value.contains("gallery") || value.contains("scan") { return "scan" }
-        if value.contains("drawing") || value.contains("paper") { return "drawing" }
+        if value.contains("drawing") || value.contains("paper") || value.contains("sketch") { return "drawing" }
         if value.contains("image") || value.contains("jpeg") || value.contains("png") || value.contains("heic") { return "image" }
         if value.contains("url") || url != nil { return "link" }
         if value.contains("table") { return "table" }
         if value.contains("hashtag") { return "hashtag" }
         if value.contains("mention") { return "mention" }
         if value.contains("link") { return "note-link" }
-        if value.contains("divider") { return "divider" }
+        if value.contains("divider") || value.contains("horizontalrule") { return "divider" }
         if value.contains("math") || value.contains("calculate") || value.contains("graph") || mathResult != nil { return "math" }
         return "file"
     }

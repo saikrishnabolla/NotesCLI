@@ -1,51 +1,110 @@
 name: Release
 
-# Releases are built, signed, and notarized locally with scripts/build-release.sh
-# and scripts/notarize.sh. Run this workflow manually only when CI signing secrets exist.
+# Run manually with Developer ID and notarization secrets configured.
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (X.Y.Z, matching the checked-out source)'
+        required: true
+        type: string
+      notary_profile:
+        description: 'Keychain profile to create from NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD secrets'
+        required: true
+        type: string
+        default: notescli-notary
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: macos-26
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
     env:
-      DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
-      DEVELOPER_ID_PASSWORD: ${{ secrets.DEVELOPER_ID_PASSWORD }}
+      NOTESCLI_VERSION: ${{ inputs.version }}
+      NOTESCLI_NOTARY_PROFILE: ${{ inputs.notary_profile }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate release inputs
+        run: |
+          [[ "$NOTESCLI_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo 'version must be X.Y.Z without a v prefix or leading zeroes.' >&2
+            exit 1
+          }
+          [[ "$NOTESCLI_NOTARY_PROFILE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+            echo 'notary_profile must contain only letters, digits, dots, underscores, or hyphens and start with a letter or digit.' >&2
+            exit 1
+          }
       - name: Show toolchain
         run: xcodebuild -version && swift --version
-      - name: Import Developer ID certificate
-        if: ${{ env.DEVELOPER_ID_P12 != '' }}
+      - name: Configure Developer ID signing and notarization
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_PASSWORD: ${{ secrets.DEVELOPER_ID_PASSWORD }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: |
+          for NAME in DEVELOPER_ID_P12 DEVELOPER_ID_PASSWORD NOTARY_APPLE_ID NOTARY_TEAM_ID NOTARY_PASSWORD; do
+            [[ -n "${!NAME}" ]] || { echo "Required secret $NAME is missing." >&2; exit 1; }
+          done
+          umask 077
           KEYCHAIN="$RUNNER_TEMP/notescli.keychain-db"
           CERTIFICATE="$RUNNER_TEMP/notescli.p12"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          ORIGINAL_DEFAULT_KEYCHAIN="$(security default-keychain -d user | sed -E 's/^[[:space:]]*"//; s/"[[:space:]]*$//')"
+          echo "ORIGINAL_DEFAULT_KEYCHAIN=$ORIGINAL_DEFAULT_KEYCHAIN" >> "$GITHUB_ENV"
           printf '%s' "$DEVELOPER_ID_P12" | base64 --decode > "$CERTIFICATE"
-          security create-keychain -p notescli "$KEYCHAIN"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
-          security unlock-keychain -p notescli "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$CERTIFICATE" -k "$KEYCHAIN" -P "$DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign
+          rm -f -- "$CERTIFICATE"
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k notescli "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
-          test -n "$IDENTITY"
+          [[ -n "$IDENTITY" && "$IDENTITY" != '-' ]] || { echo 'No Developer ID Application identity found.' >&2; exit 1; }
           echo "NOTESCLI_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
-      - name: Use ad hoc signing when no certificate is configured
-        if: ${{ env.DEVELOPER_ID_P12 == '' }}
-        run: echo 'NOTESCLI_SIGNING_IDENTITY=-' >> "$GITHUB_ENV"
+          security default-keychain -d user -s "$KEYCHAIN"
+          xcrun notarytool store-credentials "$NOTESCLI_NOTARY_PROFILE" \
+            --apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD" \
+            --keychain "$KEYCHAIN"
       - name: Build release archives
-        env:
-          NOTESCLI_VERSION: ${{ github.ref_name }}
         run: |
-          export NOTESCLI_VERSION="${NOTESCLI_VERSION#v}"
+          [[ -n "$NOTESCLI_SIGNING_IDENTITY" && "$NOTESCLI_SIGNING_IDENTITY" != '-' ]] || {
+            echo 'A Developer ID signing identity is required for release uploads.' >&2
+            exit 1
+          }
           scripts/build-release.sh
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ inputs.version }}
+          target_commitish: ${{ github.sha }}
+          fail_on_unmatched_files: true
           files: |
-            dist/*.zip
-            dist/*.tar.gz
-            dist/*.sha256
+            dist/notescli-${{ inputs.version }}-macos-universal.zip
+            dist/notescli-${{ inputs.version }}-macos-universal.tar.gz
+            dist/notescli-${{ inputs.version }}-macos-universal.sha256
+      - name: Remove signing credentials
+        if: ${{ always() }}
+        run: |
+          if [[ -n "${ORIGINAL_DEFAULT_KEYCHAIN:-}" ]]; then
+            security default-keychain -d user -s "$ORIGINAL_DEFAULT_KEYCHAIN"
+          fi
+          if [[ -f "$RUNNER_TEMP/notescli.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/notescli.keychain-db"
+          fi
+          rm -f -- "$RUNNER_TEMP/notescli.p12"

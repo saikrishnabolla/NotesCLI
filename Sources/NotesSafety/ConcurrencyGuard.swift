@@ -1,14 +1,9 @@
-import CryptoKit
 import Foundation
 import NotesCore
 
 public enum ConcurrencyGuard {
     public static func revision(_ note: Note) -> String {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .millisecondsSince1970
-        encoder.outputFormatting = .sortedKeys
-        let data = (try? encoder.encode(note)) ?? Data()
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        NoteRevision.value(note)
     }
 
     public static func require(_ note: Note, ifModified: String?, expectRevision: String?) throws {

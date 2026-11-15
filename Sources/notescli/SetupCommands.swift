@@ -155,11 +155,26 @@ private struct MCPDrawingExportValue: Codable {
     var attachments: [MCPDrawingExportAttachment]
 }
 
+private struct MCPFolderDateGroupingValue: Codable {
+    var enabled: Bool
+    var type: Int
+}
+
 private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: any NotesReading) throws -> MCPNativeResult {
     func string(_ key: String) -> String? { arguments[key] as? String }
     func integer(_ key: String) -> Int? { (arguments[key] as? NSNumber)?.intValue }
     func boolean(_ key: String) -> Bool? { arguments[key] as? Bool }
     func number(_ key: String) -> Double? { (arguments[key] as? NSNumber)?.doubleValue }
+    func crop(_ key: String) -> ScanCrop? {
+        guard let value = string(key) else { return nil }
+        let points = value.split(separator: ";", omittingEmptySubsequences: false).compactMap { pair -> ScanPoint? in
+            let values = pair.split(separator: ",", omittingEmptySubsequences: false)
+            guard values.count == 2, let x = Double(values[0]), let y = Double(values[1]) else { return nil }
+            return ScanPoint(x: x, y: y)
+        }
+        guard points.count == 4 else { return nil }
+        return ScanCrop(bottomLeft: points[0], bottomRight: points[1], topLeft: points[2], topRight: points[3])
+    }
     func ref() throws -> String {
         guard let value = string("ref") else { throw NotesError("invalid_arguments", "ref is required.") }
         return value
@@ -168,6 +183,9 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         try MCPNativeResult(result: value.writeResult, operationID: value.operationID, value: value)
     }
     func result(_ value: NativeRecordingResult) throws -> MCPNativeResult {
+        try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    }
+    func result(_ value: NativeScanResult) throws -> MCPNativeResult {
         try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
     }
     func enumValue<T: RawRepresentable>(_ key: String, as type: T.Type, choices: String) throws -> T? where T.RawValue == String {
@@ -229,6 +247,134 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: writer.checklistAutoSortEnabled())
     case "journal_get_default_account": return try MCPNativeResult(value: writer.defaultAccountIdentifier())
     case "journal_get_smart_folder_query": return try MCPNativeResult(value: writer.smartFolderQuery(ref()))
+    case "get_folder_date_grouping":
+        let folderID = try ref()
+        return try MCPNativeResult(value: MCPFolderDateGroupingValue(
+            enabled: writer.folderSort(folderID).groupsByDate,
+            type: SQLiteNotesStore(refresh: true).folderDateHeadersType(folderID)
+        ))
+    case "get_default_paragraph_style":
+        let style = try writer.defaultParagraphStyle()
+        return try MCPNativeResult(value: ["style": style.rawValue, "value": String(style.value)])
+    case "get_notes_settings":
+        return try MCPNativeResult(value: writer.notesSettings())
+    case "set_global_note_sort":
+        guard let sort = NativeGlobalNoteSort(rawValue: string("sort") ?? "") else {
+            throw NotesError("invalid_global_sort", "Use modified, created, or title.")
+        }
+        let expected = try string("expected_sort").map { value -> NativeGlobalNoteSort in
+            guard let parsed = NativeGlobalNoteSort(rawValue: value) else {
+                throw NotesError("invalid_journal", "The recorded global-sort result is invalid.")
+            }
+            return parsed
+        }
+        return try result(writer.setGlobalNoteSort(sort, expectedCurrent: expected))
+    case "set_global_date_grouping":
+        return try result(writer.setGlobalDateGrouping(boolean("enabled")!, expectedCurrent: boolean("expected_enabled")))
+    case "set_default_text_size":
+        return try result(writer.setDefaultTextSize(integer("points")!, expectedCurrent: integer("expected_points")))
+    case "set_resume_last_quick_note":
+        return try result(writer.setResumeLastQuickNote(boolean("enabled")!, expectedCurrent: boolean("expected_enabled")))
+    case "set_auto_convert_tags":
+        return try result(writer.setAutoConvertToTags(boolean("enabled")!, expectedCurrent: boolean("expected_enabled")))
+    case "create_quick_note":
+        let value = try writer.createQuickNote(title: string("title")!, markdown: string("body")!,
+                                               folder: string("folder"), allowShared: allowShared)
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "set_quick_note":
+        return try result(writer.setQuickNote(try ref(), enabled: boolean("enabled")!,
+                                              expectedCurrent: boolean("expected_enabled"), allowShared: allowShared))
+    case "ocr_attachment":
+        let note = try reader.note(try ref())
+        let attachment = try OCRAttachmentResolver.resolve(note.attachments, attachmentID: string("attachment_id"))
+        guard let path = attachment.filePath else { throw NotesError("attachment_unavailable", "The image attachment is not downloaded.") }
+        return try MCPNativeResult(value: OCRRecognition.recognize(fileURL: URL(fileURLWithPath: path),
+                                                                    languages: arguments["languages"] as? [String],
+                                                                    title: string("title") ?? attachment.title))
+    case "handwriting_recognize":
+        return try MCPNativeResult(value: writer.recognizeHandwriting(
+            try ref(), attachmentID: string("attachment_id")!, locale: string("locale") ?? "en-US"
+        ))
+    case "handwriting_persist":
+        let value = try writer.recognizeAndPersistHandwriting(
+            try ref(), attachmentID: string("attachment_id")!, locale: string("locale") ?? "en-US",
+            allowShared: allowShared
+        )
+        guard let write = value.write else { throw NotesError("invalid_native_result", "The handwriting write returned no result.") }
+        return try MCPNativeResult(result: write.writeResult, operationID: write.operationID, value: value)
+    case "handwriting_set":
+        let clear = boolean("clear") ?? false
+        guard clear != (string("text") != nil) else {
+            throw NotesError("invalid_handwriting_text", "Provide exactly one of text or clear=true.")
+        }
+        return try result(writer.setHandwritingSummary(
+            try ref(), attachmentID: string("attachment_id")!, summary: clear ? nil : string("text"),
+            allowShared: allowShared
+        ))
+    case "paper_add":
+        guard let encoded = string("pdf"), let data = Data(base64Encoded: encoded) else {
+            throw NotesError("invalid_paper_pdf", "pdf must be valid base64.")
+        }
+        let frozen = try FrozenAttachmentInput(data: data, suggestedName: string("filename") ?? "paper.pdf")
+        let value = try writer.insertPaperDocument(
+            try ref(), frozen: frozen, subtype: string("subtype") ?? "pdf",
+            position: integer("position"), allowShared: allowShared
+        )
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "paper_regenerate_fallback":
+        let value = try writer.regenerateFallbackPDF(
+            try ref(), attachmentID: string("attachment_id")!, allowShared: allowShared
+        )
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "map_add":
+        guard let url = URL(string: string("url") ?? "") else { throw NotesError("invalid_map_url", "The Apple Maps URL is invalid.") }
+        try NativeMapURL.validate(url)
+        return try result(writer.insertMap(try ref(), url: url, position: integer("position"), allowShared: allowShared))
+    case "scan_add":
+        guard let encoded = arguments["pages"] as? [String], (1...NativeNotesWriter.maximumScanPages).contains(encoded.count) else {
+            throw NotesError("invalid_scan_page_count", "A scanned document requires between 1 and 100 image pages.")
+        }
+        let encodedLimit = NativeNotesWriter.maximumScanBytes * 4 / 3 + encoded.count * 4
+        guard encoded.reduce(0, { $0 + $1.utf8.count }) <= encodedLimit else {
+            throw NotesError("scan_too_large", "Scanned documents are limited to 200 MB across all pages.")
+        }
+        let names = arguments["page_names"] as? [String] ?? encoded.indices.map { "page-\($0 + 1).png" }
+        guard names.count == encoded.count else { throw NotesError("invalid_scan_page_names", "page_names must match pages.") }
+        let pages = try zip(encoded, names).map { value, name -> FrozenAttachmentInput in
+            guard let data = Data(base64Encoded: value) else { throw NotesError("invalid_scan_page", "Every scan page must be valid base64.") }
+            return try FrozenAttachmentInput(data: data, suggestedName: name)
+        }
+        return try result(writer.insertScan(try ref(), pages: pages, position: integer("position"), allowShared: allowShared))
+    case "scan_append":
+        guard let encoded = arguments["pages"] as? [String], (1...NativeNotesWriter.maximumScanPages).contains(encoded.count) else {
+            throw NotesError("invalid_scan_page_count", "A scanned document requires between 1 and 100 image pages.")
+        }
+        let names = arguments["page_names"] as? [String] ?? encoded.indices.map { "page-\($0 + 1).png" }
+        guard names.count == encoded.count else { throw NotesError("invalid_scan_page_names", "page_names must match pages.") }
+        let pages = try zip(encoded, names).map { value, name -> FrozenAttachmentInput in
+            guard let data = Data(base64Encoded: value) else { throw NotesError("invalid_scan_page", "Every scan page must be valid base64.") }
+            return try FrozenAttachmentInput(data: data, suggestedName: name)
+        }
+        return try result(writer.appendScanPages(
+            try ref(), attachmentID: string("attachment_id")!, pages: pages,
+            expectedPageIDs: arguments["expected_page_ids"] as? [String], allowShared: allowShared))
+    case "set_folder_date_grouping":
+        return try result(writer.setFolderDateGrouping(try ref(), type: boolean("enabled")! ? 2 : 1,
+                                                       expectedCurrentType: integer("expected_type"), allowShared: allowShared))
+    case "_journal_set_folder_date_grouping_type":
+        return try result(writer.setFolderDateGrouping(try ref(), type: integer("type")!,
+                                                       expectedCurrentType: integer("expected_type"), allowShared: allowShared))
+    case "set_default_paragraph_style":
+        guard let style = NativeDefaultParagraphStyle(rawValue: string("style") ?? "") else {
+            throw NotesError("invalid_style", "Use title, heading, subheading, body, or monospaced.")
+        }
+        let expected = try string("expected_style").map { value -> NativeDefaultParagraphStyle in
+            guard let parsed = NativeDefaultParagraphStyle(rawValue: value) else {
+                throw NotesError("invalid_journal", "The recorded default-style result is invalid.")
+            }
+            return parsed
+        }
+        return try result(writer.setDefaultParagraphStyle(style, expectedCurrent: expected))
     case "recording_add":
         guard !(boolean("transcribe") == true && string("transcript_path") != nil) else {
             throw NotesError("invalid_transcript_file", "Choose transcribe or transcript_path, not both.")
@@ -269,6 +415,48 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         let frozen = try paths.map { try FrozenAttachmentInput(file: URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)) }
         let value = try writer.createNote(title: string("title")!, markdown: string("body")!, folder: string("folder"), attachments: frozen, allowShared: allowShared)
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
+    case "scan_page_state":
+        return try MCPNativeResult(value: writer.scanPageState(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!))
+    case "scan_filter":
+        guard let filter = NativeScanFilter(rawValue: string("filter") ?? "") else { throw NotesError("invalid_scan_filter", "Unknown scan filter.") }
+        let expected = string("expected_filter").flatMap(NativeScanFilter.init(rawValue:))
+        return try result(writer.setScanFilter(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
+                                               filter: filter, expectedCurrent: expected, allowShared: allowShared))
+    case "scan_rotate":
+        guard let orientation = NativeScanOrientation(rawValue: string("orientation") ?? "") else { throw NotesError("invalid_scan_orientation", "Unknown scan orientation.") }
+        let expected = string("expected_orientation").flatMap(NativeScanOrientation.init(rawValue:))
+        return try result(writer.setScanOrientation(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
+                                                    orientation: orientation, expectedCurrent: expected, allowShared: allowShared))
+    case "scan_crop":
+        guard let blx = number("bottom_left_x"), let bly = number("bottom_left_y"),
+              let brx = number("bottom_right_x"), let bry = number("bottom_right_y"),
+              let tlx = number("top_left_x"), let tly = number("top_left_y"),
+              let trx = number("top_right_x"), let tryValue = number("top_right_y") else {
+            throw NotesError("invalid_scan_crop", "All eight scan crop coordinates are required.")
+        }
+        let value = ScanCrop(bottomLeft: ScanPoint(x: blx, y: bly), bottomRight: ScanPoint(x: brx, y: bry),
+                             topLeft: ScanPoint(x: tlx, y: tly), topRight: ScanPoint(x: trx, y: tryValue))
+        return try result(writer.setScanCrop(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
+                                             crop: value, expectedCurrent: crop("expected_crop"), allowShared: allowShared))
+    case "scan_move":
+        return try result(writer.moveScanPage(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
+                                              toIndex: integer("to_index")!, expectedPageIDs: arguments["expected_page_ids"] as? [String],
+                                              allowShared: allowShared))
+    case "scan_delete":
+        return try result(writer.deleteScanPage(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
+                                                expectedPageIDs: arguments["expected_page_ids"] as? [String],
+                                                allowShared: allowShared))
+    case "_journal_restore_scan_page":
+        return try result(writer.restoreScanPage(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
+                                                 toIndex: integer("to_index")!, expectedPageIDs: arguments["expected_page_ids"] as? [String],
+                                                 allowShared: allowShared))
+    case "_journal_delete_scan_pages":
+        guard let pageIDs = arguments["page_ids"] as? [String] else {
+            throw NotesError("invalid_arguments", "page_ids must be an array of strings.")
+        }
+        return try result(writer.deleteScanPages(ref(), attachmentID: string("attachment_id")!, pageIDs: pageIDs,
+                                                expectedPageIDs: arguments["expected_page_ids"] as? [String],
+                                                allowShared: allowShared))
     case "update_note", "write_markdown":
         return try result(writer.writeMarkdown(ref(), markdown: string("body")!, dryRun: false, backup: false, allowShared: allowShared))
     case "append_to_note":
@@ -287,12 +475,18 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "add_url":
         guard let url = URL(string: string("url") ?? "") else { throw NotesError("invalid_url", "The URL is invalid.") }
         return try result(writer.insertURL(ref(), url: url, card: boolean("card") ?? false, position: integer("position"), allowShared: allowShared))
+    case "link_capture":
+        guard let url = URL(string: string("url") ?? "") else { throw NotesError("invalid_url", "The URL is invalid.") }
+        let title = string("title") ?? url.host ?? url.absoluteString
+        return try result(writer.insertSynapseLink(ref(), url: url, title: title,
+                                                  position: integer("position"), allowShared: allowShared))
     case "smart_folder_create":
         return try result(writer.createSmartFolder(name: string("name")!, tags: arguments["tags"] as! [String], matchAll: string("match") == "all"))
     case "smart_folder_rename":
         return try result(writer.renameSmartFolder(ref(), name: string("name")!, expectedCount: integer("expected_count")!))
     case "smart_folder_edit_rules":
-        return try result(writer.editSmartFolderRules(ref(), queryJSON: string("query_json")!, expectedCount: integer("expected_count")!))
+        return try result(writer.editSmartFolderRules(ref(), queryJSON: string("query_json")!, expectedCount: integer("expected_count")!,
+                                                      expectedCurrentQuery: string("expected_query_json")))
     case "smart_folder_edit_typed":
         func date(_ key: String) throws -> Date? { try string(key).map { try NotePresentation.date($0) } }
         func match(_ key: String, default fallback: SmartFolderRuleMatch) throws -> SmartFolderRuleMatch {
@@ -311,7 +505,8 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
                                      folders: arguments["folders"] as? [String] ?? [], checklists: arguments["checklists"] as? Bool,
                                      attachmentSections: sections, shared: arguments["shared"] as? Bool, locked: arguments["locked"] as? Bool,
                                      mentions: arguments["mentions"] as? Bool, quickNotes: arguments["quick_notes"] as? Bool)
-        return try result(writer.editSmartFolderRules(ref(), queryJSON: rules.json(), expectedCount: integer("expected_count")!))
+        return try result(writer.editSmartFolderRules(ref(), queryJSON: rules.json(), expectedCount: integer("expected_count")!,
+                                                      expectedCurrentQuery: string("expected_query_json")))
     case "smart_folder_delete":
         return try result(writer.deleteSmartFolder(ref(), expectedCount: integer("expected_count")!))
     case "checklist_list": return try MCPNativeResult(value: writer.checklistItems(ref()))
@@ -325,15 +520,22 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "checklist_check_all": return try result(writer.setAllChecklist(ref(), done: true, allowShared: (boolean("allow_shared") ?? false)))
     case "checklist_uncheck_all": return try result(writer.setAllChecklist(ref(), done: false, allowShared: (boolean("allow_shared") ?? false)))
     case "checklist_clear_done": return try result(writer.deleteCompleted(ref(), allowShared: (boolean("allow_shared") ?? false)))
-    case "checklist_auto_sort": return try result(writer.setChecklistAutoSort(boolean("enabled")!))
+    case "checklist_auto_sort":
+        return try result(writer.setChecklistAutoSort(boolean("enabled")!, expectedCurrent: boolean("expected_enabled")))
     case "pin_note": return try result(writer.setPinned(ref(), pinned: true, allowShared: (boolean("allow_shared") ?? false)))
     case "unpin_note": return try result(writer.setPinned(ref(), pinned: false, allowShared: (boolean("allow_shared") ?? false)))
     case "tag_add": return try result(writer.addTag(ref(), tag: string("tag")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "tag_remove": return try result(writer.removeTag(ref(), tag: string("tag")!, allowShared: (boolean("allow_shared") ?? false)))
     case "tag_rename": return try result(writer.renameTag(string("tag")!, to: string("new_name")!, expectedCount: integer("expected_count")!, allowShared: boolean("allow_shared") ?? false))
     case "tag_delete": return try result(writer.deleteTag(string("tag")!, expectedCount: integer("expected_count")!, allowShared: boolean("allow_shared") ?? false))
-    case "link_add": return try result(writer.insertNoteLink(ref(), target: string("target")!, text: string("text"), position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
+    case "link_add": return try result(writer.insertNoteLink(
+        ref(), target: string("target")!, text: string("text"),
+        paragraphID: string("paragraph_id"), paragraphName: string("paragraph_name"),
+        position: integer("position"), allowShared: (boolean("allow_shared") ?? false)
+    ))
     case "link_list": return try MCPNativeResult(value: writer.links(ref()))
+    case "collaboration_activity":
+        return try MCPNativeResult(value: writer.collaborationActivity(ref(), limits: CollaborationActivityLimits.events(integer("limit"))))
     case "text_find": return try MCPNativeResult(value: writer.searchOffsets(ref(), text: string("text")!, caseInsensitive: boolean("case_insensitive") ?? false))
     case "text_insert": return try result(writer.insertText(ref(), text: string("text")!, position: integer("position")!, allowShared: (boolean("allow_shared") ?? false)))
     case "text_delete": return try result(writer.deleteRange(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), allowShared: (boolean("allow_shared") ?? false)))
@@ -353,9 +555,22 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         return try result(writer.setInlineFormat(ref(), range: UTF16Range(location: integer("start")!, length: integer("length")!), format: format, allowShared: (boolean("allow_shared") ?? false)))
     case "insert_divider": return try result(writer.insertDivider(ref(), position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "insert_math": return try result(writer.insertMathExpression(ref(), expression: string("expression")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
+    case "evaluate_math": return try MCPNativeResult(value: writer.evaluateMath(string("expression")!))
+    case "insert_math_result":
+        let value = try writer.insertMathResult(ref(), expression: string("expression")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false))
+        return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
     case "insert_mention": return try result(writer.insertMention(ref(), text: string("text")!, userRecordName: string("user_record_name")!, position: integer("position"), allowShared: (boolean("allow_shared") ?? false)))
     case "drawing_add":
-        let value = try writer.insertDrawing(ref(), drawing: drawing(), position: integer("position"), allowShared: allowShared)
+        let input = try drawing()
+        let value: NativeAttachmentResult
+        if boolean("legacy") == true {
+            value = try writer.insertLegacyDrawing(
+                ref(), records: PaperStrokeRecord.records([input]).map(LegacyDrawingStrokeRecord.init),
+                position: integer("position"), allowShared: allowShared
+            )
+        } else {
+            value = try writer.insertDrawing(ref(), drawing: input, position: integer("position"), allowShared: allowShared)
+        }
         return try MCPNativeResult(result: value.write.writeResult, operationID: value.write.operationID, value: value)
     case "drawing_create":
         let value = try writer.createDrawingNote(title: string("title")!, folder: string("folder"), drawing: drawing(), allowShared: allowShared)
@@ -423,18 +638,44 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
     case "get_folder_sort": return try MCPNativeResult(value: writer.folderSort(ref()))
     case "set_folder_sort":
         guard let order = NativeFolderSortOrder(rawValue: string("by")!), let direction = NativeFolderSortDirection(rawValue: string("direction")!) else { throw NotesError("invalid_folder_sort", "Unknown folder sort order or direction.") }
-        return try result(writer.setFolderSort(ref(), order: order, direction: direction))
+        let expectedOrder = try string("expected_by").map { value -> NativeFolderSortOrder in
+            guard let parsed = NativeFolderSortOrder(rawValue: value) else {
+                throw NotesError("invalid_journal", "The recorded folder-sort result is invalid.")
+            }
+            return parsed
+        }
+        let expectedDirection = try string("expected_direction").map { value -> NativeFolderSortDirection in
+            guard let parsed = NativeFolderSortDirection(rawValue: value) else {
+                throw NotesError("invalid_journal", "The recorded folder-sort direction is invalid.")
+            }
+            return parsed
+        }
+        return try result(writer.setFolderSort(ref(), order: order, direction: direction,
+                                               expectedOrder: expectedOrder, expectedDirection: expectedDirection))
     case "set_default_account":
         let identifier = string("account_id")!
         guard try reader.accounts().contains(where: { $0.id.caseInsensitiveCompare(identifier) == .orderedSame }) else {
             throw NotesError("account_not_found", "The account was not found.")
         }
-        return try result(writer.setDefaultAccount(identifier))
+        return try result(writer.setDefaultAccount(identifier, expectedCurrent: string("expected_account_id")))
     case "table_add_row", "table_remove_row", "table_add_column", "table_remove_column":
         let axis = tool.contains("row") ? "row" : "column", add = tool.contains("add")
         return try result(writer.resizeTable(ref(), attachmentID: string("attachment_id")!, axis: axis, index: integer("index")!, add: add, allowShared: (boolean("allow_shared") ?? false)))
     case "duplicate_note": return try result(writer.duplicate(ref(), title: string("title"), allowShared: (boolean("allow_shared") ?? false)))
     case "restore_note": return try result(writer.restore(ref(), folder: string("folder"), allowShared: (boolean("allow_shared") ?? false)))
+    case "_journal_restore_snapshot":
+        guard let snapshot = arguments["_snapshot_note"] as? Note,
+              let expectedRevision = arguments["_expected_revision"] as? String else {
+            throw NotesError("invalid_snapshot", "The private snapshot restore payload is incomplete.")
+        }
+        return try result(writer.restoreSnapshot(
+            ref(),
+            snapshot: snapshot,
+            material: arguments["_restore_material"] as? SnapshotRestoreMaterial,
+            expectedRevision: expectedRevision,
+            expectedModified: arguments["_expected_modified"] as? Date,
+            allowShared: allowShared
+        ))
     case "move_folder": return try result(writer.moveFolder(ref(), parent: string("parent"), allowShared: (boolean("allow_shared") ?? false)))
     default: throw NotesError("unknown_tool", "Unknown native MCP tool.")
     }

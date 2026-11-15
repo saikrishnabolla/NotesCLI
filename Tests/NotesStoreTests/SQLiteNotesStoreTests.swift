@@ -23,16 +23,18 @@ private final class SyntheticLibrary {
           ZTITLE TEXT, ZTITLE1 TEXT, ZTITLE2 TEXT, ZSNIPPET TEXT, ZACCOUNT7 INTEGER, ZACCOUNT8 INTEGER, ZOWNER INTEGER,
           ZFOLDER INTEGER, ZPARENT INTEGER, ZFOLDERTYPE INTEGER, ZSMARTFOLDERQUERYJSON TEXT,
           ZNOTEDATA INTEGER, ZISPASSWORDPROTECTED INTEGER, ZMARKEDFORDELETION INTEGER, ZISPINNED INTEGER, ZHASCHECKLIST INTEGER,
+          ZCRYPTOSALT BLOB, ZCRYPTOITERATIONCOUNT INTEGER, ZCRYPTOWRAPPEDKEY BLOB, ZCRYPTOVERIFIER BLOB,
+          ZCRYPTOINITIALIZATIONVECTOR BLOB, ZCRYPTOTAG BLOB, ZENCRYPTEDVALUESJSON BLOB,
           ZCREATIONDATE3 REAL, ZMODIFICATIONDATE1 REAL, ZNOTE INTEGER, ZNOTE1 INTEGER,
           ZTYPEUTI TEXT, ZTYPEUTI1 TEXT, ZALTTEXT TEXT, ZDISPLAYTEXT TEXT, ZTOKENCONTENTIDENTIFIER TEXT,
           ZMEDIA INTEGER, ZFILENAME TEXT, ZGENERATION1 TEXT, ZFALLBACKIMAGEGENERATION TEXT,
           ZURLSTRING TEXT, ZFALLBACKTITLE TEXT, ZOCRSUMMARY TEXT, ZHANDWRITINGSUMMARY TEXT, ZADDITIONALINDEXABLETEXT TEXT,
           ZIMAGECLASSIFICATIONSUMMARY TEXT, ZSUMMARY TEXT, ZDURATION REAL, ZPARENTATTACHMENT INTEGER,
-          ZFALLBACKPDFGENERATION TEXT, ZLASTOPENEDDATE REAL, ZSORTORDER REAL,
+          ZFALLBACKPDFGENERATION TEXT, ZLASTOPENEDDATE REAL, ZSORTORDER REAL, ZCUSTOMNOTESORTTYPEVALUE INTEGER,
           ZNEEDSINITIALFETCHFROMCLOUD INTEGER, ZNEEDSTOBEFETCHEDFROMCLOUD INTEGER, ZNEEDSTOSAVEUSERSPECIFICRECORD INTEGER,
           ZVERSIONOUTOFDATE INTEGER, ZCLOUDSTATE INTEGER, ZLASTSYNCDATE REAL, ZISSHAREDIRTY INTEGER, ZSERVERSHAREDATA BLOB,
-          ZMERGEABLEDATA1 BLOB, ZMERGEABLEDATA BLOB);
-        CREATE TABLE ZICNOTEDATA (Z_PK INTEGER PRIMARY KEY,Z_ENT INTEGER,ZNOTE INTEGER,ZDATA BLOB);
+          ZMERGEABLEDATA1 BLOB, ZMERGEABLEDATA BLOB, ZSYNAPSEDATA BLOB, ZLINKPRESENTATIONARCHIVEDMETADATA BLOB);
+        CREATE TABLE ZICNOTEDATA (Z_PK INTEGER PRIMARY KEY,Z_ENT INTEGER,ZNOTE INTEGER,ZDATA BLOB,ZCRYPTOINITIALIZATIONVECTOR BLOB,ZCRYPTOTAG BLOB);
         CREATE TABLE ZICNOTEPARTICIPANT (Z_PK INTEGER PRIMARY KEY,Z_ENT INTEGER,ZNOTE INTEGER,ZPARTICIPANTID TEXT,ZUSERID TEXT);
         CREATE TABLE ZICCLOUDSTATE (Z_PK INTEGER PRIMARY KEY,ZCURRENTLOCALVERSION INTEGER,ZLATESTVERSIONSYNCEDTOCLOUD INTEGER,ZINCLOUD INTEGER,ZCLOUDSYNCINGOBJECT INTEGER);
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNAME,ZACCOUNTTYPE) VALUES (1,203,'account','Cloud',1),(2,203,'local','On My Mac',2);
@@ -59,13 +61,14 @@ private final class SyntheticLibrary {
         INSERT INTO ZICNOTEPARTICIPANT VALUES (1,0,20,'participant','user');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZFILENAME,ZGENERATION1) VALUES (34,206,'media','image.jpg','v1');
         INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZURLSTRING,ZTITLE) VALUES (35,204,'preview',20,'public.url','https://example.com','Example');
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZSYNAPSEDATA=X'010203', ZLINKPRESENTATIONARCHIVEDMETADATA=X'04050607' WHERE Z_PK=35;
         """)
         let runs = ["tag","mention","link","photo"].map { id in
             Self.int(1,2) + Self.bytes(12,Self.string(1,id) + Self.string(2,"public.data"))
         }
         try body(20, "\u{fffc} \u{fffc} \u{fffc} \u{fffc}\n", runs)
         try body(21, "Second\nBody-only needle 😀")
-        try sql("INSERT INTO ZICNOTEDATA VALUES (122,208,22,X'FFFF');")
+        try sql("INSERT INTO ZICNOTEDATA (Z_PK,Z_ENT,ZNOTE,ZDATA) VALUES (122,208,22,X'FFFF');")
         for pk in [23,24,26,27] { try body(pk,"Synthetic body") }
         if alternateColumns {
             try sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE=ZTITLE1, ZTITLE1=ZTITLE2, ZTITLE2=ZTITLE; ALTER TABLE ZICCLOUDSYNCINGOBJECT RENAME COLUMN ZACCOUNT7 TO ZACCOUNT9;")
@@ -89,12 +92,204 @@ private final class SyntheticLibrary {
     func body(_ pk: Int, _ text: String, _ runs: [Data] = []) throws {
         let note = Self.string(2,text) + runs.reduce(Data()) { $0 + Self.bytes(5,$1) }
         let data = Self.bytes(2,Self.bytes(3,note))
-        try sql("INSERT INTO ZICNOTEDATA VALUES (\(pk+100),208,\(pk),X'\(data.map { String(format:"%02x",$0) }.joined())');")
+        try sql("INSERT INTO ZICNOTEDATA (Z_PK,Z_ENT,ZNOTE,ZDATA) VALUES (\(pk+100),208,\(pk),X'\(data.map { String(format:"%02x",$0) }.joined())');")
     }
-    func store() throws -> SQLiteNotesStore { try SQLiteNotesStore(databaseURL:database) }
+    func store(refresh: Bool = false) throws -> SQLiteNotesStore {
+        try SQLiteNotesStore(databaseURL: database, groupContainerURL: directory, refresh: refresh)
+    }
+
+    func setGlobalNoteSort(_ value: Int) throws {
+        let preferences = directory.appendingPathComponent("Library/Preferences")
+        try FileManager.default.createDirectory(at: preferences, withIntermediateDirectories: true)
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: ["kICSettingsNoteListSortTypeKey": value],
+            format: .binary,
+            options: 0
+        )
+        try data.write(to: preferences.appendingPathComponent("group.com.apple.notes.plist"))
+    }
 }
 
 final class SQLiteNotesStoreTests: XCTestCase {
+    func testPasswordLockedV1BodyDecryptsOnlyWithExplicitPassword() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("""
+        UPDATE ZICCLOUDSYNCINGOBJECT SET
+          ZCRYPTOSALT=X'000102030405060708090a0b0c0d0e0f',
+          ZCRYPTOITERATIONCOUNT=20000,
+          ZCRYPTOWRAPPEDKEY=X'e16d0282d92b1764468de34f30d2005670e4f59505ceaef3'
+        WHERE Z_PK=22;
+        UPDATE ZICNOTEDATA SET
+          ZDATA=X'79cd8f8dd2a5481d7355314db16b7dac8fffa0518ed725221aa41867c18f3a6af5a40b1f3367781236802571995475f0ea9bd50cb2cf357d8d2976bd4820d683131f5896aa82fac16cef7c593b9f59d403feb81dd8073755594907184e133605ae8108401d74ca0896d8fc781bb7ac70fc7a38b8778834c25d6e8f5346ce9d7af8ff3cc6dcb45504f4df6e2123eb957c0aba4bab0f3dffed530852ceaa9c8b097b1a7783ef',
+          ZCRYPTOINITIALIZATIONVECTOR=X'6555f78ff2fe9c5c44511d4db1a900a0',
+          ZCRYPTOTAG=X'4d82c681c75fae683a92153f55a31804'
+        WHERE ZNOTE=22;
+        """)
+        let store = try fixture.store(refresh: true)
+
+        XCTAssertNil(try store.note("LOCKED").document)
+        XCTAssertEqual(try store.note("LOCKED", password: "Bramble-NO1-test").document?.text,
+                       "01 Plain\nHello world")
+        XCTAssertThrowsError(try store.note("LOCKED", password: "wrong")) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "wrong_password")
+        }
+    }
+
+    func testAppleNotesLinkTargetExtractsIdentifierFromNativeToken() {
+        XCTAssertEqual(
+            AppleNotesLinkTarget.identifier(from: "applenotes:note/6fbc3e84-8201-4f4d-967a-c5e46bab9bdd?ownerIdentifier=owner"),
+            "6fbc3e84-8201-4f4d-967a-c5e46bab9bdd"
+        )
+        XCTAssertEqual(AppleNotesLinkTarget.identifier(from: "N2"), "N2")
+        XCTAssertNil(AppleNotesLinkTarget.identifier(from: "  "))
+        XCTAssertEqual(
+            AppleNotesLinkTarget.parse("applenotes:note/6fbc3e84-8201-4f4d-967a-c5e46bab9bdd?paragraphID=11111111-2222-3333-4444-555555555555"),
+            AppleNotesLinkTarget(identifier: "6fbc3e84-8201-4f4d-967a-c5e46bab9bdd",
+                                 paragraphID: "11111111-2222-3333-4444-555555555555")
+        )
+        XCTAssertEqual(
+            AppleNotesLinkTarget.parse("applenotes://showNote?identifier=6fbc3e84-8201-4f4d-967a-c5e46bab9bdd&paragraphID=11111111-2222-3333-4444-555555555555"),
+            AppleNotesLinkTarget(identifier: "6fbc3e84-8201-4f4d-967a-c5e46bab9bdd",
+                                 paragraphID: "11111111-2222-3333-4444-555555555555")
+        )
+    }
+
+    func testExplicitSortsAreDeterministicAndLimitAfterSorting() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("""
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Zulu', ZCREATIONDATE3=10, ZMODIFICATIONDATE1=30 WHERE Z_PK=21;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Éclair', ZCREATIONDATE3=30, ZMODIFICATIONDATE1=10 WHERE Z_PK=22;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Alpha', ZCREATIONDATE3=20, ZMODIFICATIONDATE1=20 WHERE Z_PK=25;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Tie', ZCREATIONDATE3=40, ZMODIFICATIONDATE1=40 WHERE Z_PK IN (26,27);
+        """)
+        let store = try fixture.store()
+        let query = NoteQuery(folder: "Work")
+
+        XCTAssertEqual(try store.notes(query, sort: .modified).map(\.id.uuid), ["DUP1", "DUP2", "N2", "MISSING", "LOCKED"])
+        XCTAssertEqual(try store.notes(query, sort: .created).map(\.id.uuid), ["DUP1", "DUP2", "LOCKED", "MISSING", "N2"])
+        XCTAssertEqual(try store.notes(query, sort: .title).map(\.id.uuid), ["MISSING", "LOCKED", "DUP1", "DUP2", "N2"])
+        XCTAssertEqual(try store.notes(.init(folder: "Work", limit: 2), sort: .modified).map(\.id.uuid), ["DUP1", "DUP2"])
+    }
+
+    func testDisplaySortUsesFolderOrderDirectionPinsAndStableRanks() throws {
+        let cases: [(value: Int, expected: [String])] = [
+            (10, ["LOCKED", "DUP1", "DUP2", "N2", "MISSING"]),
+            (11, ["LOCKED", "MISSING", "N2", "DUP1", "DUP2"]),
+            (20, ["LOCKED", "DUP1", "DUP2", "MISSING", "N2"]),
+            (21, ["LOCKED", "N2", "MISSING", "DUP1", "DUP2"]),
+            (30, ["LOCKED", "MISSING", "DUP1", "DUP2", "N2"]),
+            (31, ["LOCKED", "N2", "DUP1", "DUP2", "MISSING"]),
+        ]
+
+        for item in cases {
+            let fixture = try SyntheticLibrary()
+            try fixture.sql("""
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=\(item.value) WHERE Z_PK=10;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Zulu', ZCREATIONDATE3=10, ZMODIFICATIONDATE1=30 WHERE Z_PK=21;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Éclair', ZCREATIONDATE3=30, ZMODIFICATIONDATE1=10, ZISPINNED=1 WHERE Z_PK=22;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Alpha', ZCREATIONDATE3=20, ZMODIFICATIONDATE1=20 WHERE Z_PK=25;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Tie', ZCREATIONDATE3=40, ZMODIFICATIONDATE1=40 WHERE Z_PK IN (26,27);
+            """)
+
+            let reader: any NotesReading = try fixture.store()
+            let notes = try reader.notes(.init(folder: "Work"), sort: .display)
+            XCTAssertEqual(notes.map(\.id.uuid), item.expected, "folder sort value \(item.value)")
+            XCTAssertEqual(notes.map(\.displayOrder), [0, 1, 2, 3, 4], "folder sort value \(item.value)")
+            XCTAssertEqual(
+                try reader.notes(.init(folder: "Work", limit: 2), sort: .display).map(\.id.uuid),
+                Array(item.expected.prefix(2)),
+                "folder sort value \(item.value)"
+            )
+            let cursorRank = try XCTUnwrap(notes[1].displayOrder)
+            XCTAssertEqual(notes.filter { ($0.displayOrder ?? -.infinity) > cursorRank }.map(\.id.uuid),
+                           Array(item.expected.dropFirst(2)), "folder sort value \(item.value)")
+        }
+    }
+
+    func testDisplaySortUsesGlobalSettingOnlyForInheritedFolderSort() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.setGlobalNoteSort(2)
+        try fixture.sql("""
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=0 WHERE Z_PK=10;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Zulu' WHERE Z_PK=21;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Éclair' WHERE Z_PK=22;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Alpha' WHERE Z_PK=25;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Tie' WHERE Z_PK IN (26,27);
+        """)
+
+        XCTAssertEqual(
+            try fixture.store().notes(.init(folder: "Work"), sort: .display).map(\.id.uuid),
+            ["MISSING", "LOCKED", "DUP1", "DUP2", "N2"]
+        )
+    }
+
+    func testDisplaySortUsesApplesSecondaryKeys() throws {
+        let dateFixture = try SyntheticLibrary()
+        try dateFixture.sql("""
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=10 WHERE Z_PK=10;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Zulu', ZMODIFICATIONDATE1=30 WHERE Z_PK=21;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Alpha', ZMODIFICATIONDATE1=30 WHERE Z_PK=25;
+        """)
+        var notes = try dateFixture.store().notes(.init(folder: "Work"), sort: .display)
+        XCTAssertLessThan(try XCTUnwrap(notes.firstIndex { $0.id.uuid == "MISSING" }),
+                          try XCTUnwrap(notes.firstIndex { $0.id.uuid == "N2" }))
+        try dateFixture.sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=11 WHERE Z_PK=10")
+        notes = try dateFixture.store(refresh: true).notes(.init(folder: "Work"), sort: .display)
+        XCTAssertLessThan(try XCTUnwrap(notes.firstIndex { $0.id.uuid == "N2" }),
+                          try XCTUnwrap(notes.firstIndex { $0.id.uuid == "MISSING" }))
+
+        let titleFixture = try SyntheticLibrary()
+        try titleFixture.sql("""
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=30 WHERE Z_PK=10;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Same', ZMODIFICATIONDATE1=30 WHERE Z_PK=21;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE1='Same', ZMODIFICATIONDATE1=20 WHERE Z_PK=25;
+        """)
+        notes = try titleFixture.store().notes(.init(folder: "Work"), sort: .display)
+        XCTAssertLessThan(try XCTUnwrap(notes.firstIndex { $0.id.uuid == "N2" }),
+                          try XCTUnwrap(notes.firstIndex { $0.id.uuid == "MISSING" }))
+        try titleFixture.sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=31 WHERE Z_PK=10")
+        notes = try titleFixture.store(refresh: true).notes(.init(folder: "Work"), sort: .display)
+        XCTAssertLessThan(try XCTUnwrap(notes.firstIndex { $0.id.uuid == "MISSING" }),
+                          try XCTUnwrap(notes.firstIndex { $0.id.uuid == "N2" }))
+    }
+
+    func testDisplaySortUsesAppleDefaultForMissingGlobalSettingAndRejectsUnknownFolderState() throws {
+        let inherited = try SyntheticLibrary()
+        try inherited.sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=0 WHERE Z_PK=10")
+        XCTAssertTrue(try inherited.store().notes(.init(folder: "Absent"), sort: .display).isEmpty)
+        let inheritedNotes = try inherited.store().notes(.init(folder: "Work"), sort: .display)
+        XCTAssertEqual(inheritedNotes.map(\.id.uuid), ["DUP2", "DUP1", "MISSING", "LOCKED", "N2"])
+
+        let unknown = try SyntheticLibrary()
+        try unknown.sql("UPDATE ZICCLOUDSYNCINGOBJECT SET ZCUSTOMNOTESORTTYPEVALUE=99 WHERE Z_PK=10")
+        XCTAssertThrowsError(try unknown.store().notes(.init(folder: "Work"), sort: .display)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "unsupported_display_order")
+        }
+    }
+
+    func testStoredSortOrderIsNotReportedAsPerNoteDisplayOrder() throws {
+        let fixture = try SyntheticLibrary()
+        XCTAssertNil(try fixture.store().note("N1").summary.displayOrder)
+    }
+
+    func testQuickNoteSmartFolderUsesSystemPaperFlag() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("""
+        ALTER TABLE ZICCLOUDSYNCINGOBJECT ADD COLUMN ZISSYSTEMPAPER INTEGER;
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZISSYSTEMPAPER=1 WHERE Z_PK=20;
+        UPDATE ZICCLOUDSYNCINGOBJECT
+          SET ZSMARTFOLDERQUERYJSON='{"type":{"and":[{"quickNote":true}]}}'
+          WHERE Z_PK=13;
+        """)
+
+        let store = try fixture.store()
+        XCTAssertEqual(try store.note("N1").summary.isSystemPaper, true)
+        XCTAssertNil(try store.note("N2").summary.isSystemPaper)
+        let smartFolder = try XCTUnwrap(store.smartFolders(evaluate: true).first { $0.folder.id == "smart" })
+        XCTAssertEqual(smartFolder.rules, ["quickNote=true"])
+        XCTAssertEqual(smartFolder.matchingNoteIDs, ["N1"])
+    }
+
     func testAttachmentReadbackIncludesNestedIDsTypesAndParents() throws {
         let fixture = try SyntheticLibrary()
         try fixture.sql("""
@@ -111,6 +306,12 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(scan.childAttachments?.map(\.typeUTI), ["public.jpeg"])
         XCTAssertEqual(scan.childAttachments?.first?.childAttachments?.map(\.id), ["cell-image"])
         XCTAssertEqual(scan.childAttachments?.first?.childAttachments?.map(\.typeUTI), ["public.png"])
+
+        let preview = try XCTUnwrap(try fixture.store().note("N1").attachments.first { $0.id == "preview" })
+        XCTAssertEqual(preview.synapseDataBytes, 3)
+        XCTAssertEqual(preview.linkPreviewMetadataBytes, 4)
+        XCTAssertNil(preview.scanCrop)
+        XCTAssertNil(preview.scanFilter)
     }
 
     func testHashTitleCollidingWithNoteNumberIsAmbiguousAndExplicitSyntaxResolves() throws {
@@ -221,7 +422,7 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(image.additionalIndexableText,"extra")
         XCTAssertEqual(image.imageClassification,"document")
         XCTAssertEqual(note.summary.lastOpened,Date(timeIntervalSinceReferenceDate:300))
-        XCTAssertEqual(note.summary.displayOrder,2)
+        XCTAssertNil(note.summary.displayOrder)
         XCTAssertEqual(note.summary.participants?.first?.participantID,"participant")
         XCTAssertEqual(note.summary.syncState?.needsSave,true)
         XCTAssertEqual(note.summary.syncState?.currentLocalVersion,4)
@@ -275,6 +476,37 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(note.document?.markdown(),"| Cell |\n| --- |")
         XCTAssertEqual(note.attachments.first { $0.id == "drawing" }?.filePath,fallback.appendingPathComponent("FallbackImage.jpeg").path)
         XCTAssertTrue(note.attachments.first { $0.id == "drawing" }?.drawingSVG?.contains("<path") == true)
+    }
+    func testGalleryOrderKeepsFullWidthCRDTPositions() throws {
+        let fixture = try SyntheticLibrary()
+        typealias P = SyntheticLibrary
+        func varint(_ value: UInt64) -> Data {
+            var value = value, data = Data()
+            repeat {
+                var byte = UInt8(value & 127); value >>= 7
+                if value != 0 { byte |= 128 }
+                data.append(byte)
+            } while value != 0
+            return data
+        }
+        func identifier(_ value: String) -> Data {
+            P.bytes(13, P.int(1, 1) + P.bytes(3, P.int(1, 0) + P.bytes(2, P.string(4, value))))
+        }
+        func position(_ value: UInt64) -> Data {
+            P.bytes(9, P.bytes(1, P.int(1, 0) + P.varint(2 << 3) + varint(value)))
+        }
+        let entries = P.bytes(3, identifier("page-b")) + P.bytes(3, position(818_398_731_385_979)) +
+            P.bytes(3, identifier("page-a")) + P.bytes(3, position(18_445_776_803_613_804_575))
+        let mergeable = P.bytes(2, P.bytes(3, entries))
+        let hex = mergeable.map { String(format: "%02x", $0) }.joined()
+        try fixture.sql("""
+        INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZMERGEABLEDATA1)
+          VALUES (40,204,'gallery',21,'com.apple.notes.gallery',X'\(hex)');
+        INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZPARENTATTACHMENT,ZTYPEUTI)
+          VALUES (41,204,'page-a',40,'public.jpeg'),(42,204,'page-b',40,'public.jpeg');
+        """)
+        let gallery = try XCTUnwrap(fixture.store(refresh: true).attachments("N2").first { $0.id == "gallery" })
+        XCTAssertEqual(gallery.childAttachmentIDs, ["page-a", "page-b"])
     }
     func testColumnVariantsAndSnapshotReuse() throws {
         let fixture = try SyntheticLibrary(alternateColumns:true)

@@ -1,6 +1,6 @@
 # Command reference
 
-This reference follows `notescli --help` from version 1.1.6.
+This reference follows `notescli --help` from version 1.1.9.
 
 ## Global options
 
@@ -21,7 +21,7 @@ With no command, a terminal shows the NotesCLI home screen and the titles of fiv
 ## Read commands
 
 ```text
-notescli accounts
+notescli accounts [--set-default <account>]
 notescli folders [--account <account>] [--tree]
 notescli list [--folder <folder>] [--account <account>] [--pinned]
               [--tag <tag>] [--since <since>] [--until <until>]
@@ -45,6 +45,7 @@ notescli count [--folder <folder>] [--account <account>] [--include-deleted]
 notescli selection
 notescli deeplink <ref>
 notescli backlinks <ref>
+notescli collaboration activity <ref> [--limit <1-500>]
 notescli attachments <ref> [--save <directory> | --preview <directory>]
 notescli table show <ref> [--attachment <id>] [--format markdown|json|csv]
 notescli anchor add <ref> (--heading <text> | --offset <utf16-offset>)
@@ -55,6 +56,7 @@ notescli wait-sync <ref> [--timeout <seconds>]
 notescli raw <ref>
 notescli deleted
 notescli smart-folders [--evaluate]
+notescli ocr <ref> [--attachment <id>] [--language <language> ...] [--title <title>]
 notescli help [<command>]
 notescli open <ref>
 notescli open <account> --account
@@ -65,6 +67,8 @@ notescli open <note> --attachment <id> [--reveal]
 `recent` defaults to 10 notes. `list` excludes Recently Deleted unless you pass `--include-deleted`. `list` and `search` return an opaque `nextCursor` in JSON when more results exist. Pass it back with `--cursor`; it stores the sort key and note ID instead of an offset.
 
 `show --format outline` returns a heading tree with UTF-16 offsets. Anchors are stored in `~/Library/Application Support/NotesCLI/anchors.sqlite` and relocate from a saved text fingerprint after edits. `wait-sync` succeeds only after the store reports that the latest local version reached iCloud and no save flags remain.
+
+`collaboration activity` is read-only. It returns the stored activity blob and each reachable event with byte counts, SHA-256 hashes, bounded base64, and JSON only when the raw payload parses as JSON. Unknown and future event formats stay raw.
 
 Attachment previews are PNG files: resized images, the first video frame, or the first PDF page. Classic `com.apple.drawing` strokes render as SVG when stroke data is present. If decoding fails, the attachment keeps its raster fallback path. Mention output includes the stored participant name, email, and user ID when available.
 
@@ -95,8 +99,12 @@ notescli folder rename <ref> <name>
 notescli folder move <ref> [<parent>] [--account <account>]
 notescli folder delete <ref> [--yes] [--expect-count <count>]
 notescli folder exists <path>
+notescli folder sort <ref> [--by default|modified|created|title] [--direction newest|oldest|ascending|descending]
+notescli folder group-by-date <ref> [--enabled true|false]
 notescli smart-folder create <name> --tags <a,b> --match any|all
 notescli smart-folder rename <ref> <name> --expected-count <count>
+notescli smart-folder edit-rules <ref> --query-json <json> --expected-count <count>
+notescli smart-folder edit-typed <ref> --expected-count <count> [typed filters]
 notescli smart-folder delete <ref> --expected-count <count>
 ```
 
@@ -108,15 +116,24 @@ These commands require `--engine native` unless a scripting path is listed:
 
 ```text
 notescli checklist add|toggle|check-all|uncheck-all|clear-done|list ...
+notescli checklist auto-sort [--enabled true|false]
 notescli pin <ref>
 notescli unpin <ref>
 notescli tag add|remove|rename|delete ...
-notescli link add|add-url|list ...
+notescli link add <ref> <target> [--text <text>] [--paragraph-id <uuid>] [--paragraph-name <name>]
+notescli link add-url|list ...
 notescli text insert|delete|replace|find ...
-notescli format paragraph|inline ...
+notescli format paragraph|inline|divider|math|mention ...
+notescli math evaluate <expression>
+notescli math insert-result <ref> <expression> [--position <position>]
 notescli attach <ref> <path> [--position <position>] [--view <view>]
 notescli attach <ref> --pasteboard [--position <position>] [--view <view>]
+notescli map add <ref> <https://maps.apple.com/...> [--position <position>]
+notescli scan add <ref> <image> ... [--position <position>]
+notescli settings default-style [--set title|heading|subheading|body|monospaced]
+notescli settings auto-convert-tags [--enabled true|false]
 notescli attachment delete <ref> <attachment-id>
+notescli link capture <ref> <url> [--title <title>] [--position <utf16-offset>]
 notescli recording add <ref> --file <audio> [--transcribe | --transcript-file <json>] [--title <title>] [--locale <locale>]
 notescli recording create --folder <folder> --title <title> --file <audio> [--transcribe | --transcript-file <json>] [--locale <locale>]
 notescli recording transcribe-file --file <audio> --output <json> [--locale <locale>]
@@ -127,13 +144,17 @@ notescli drawing add <ref> --svg <file> [--ink pen|marker|pencil|monoline]
                 [--fit contain|stretch] [--fill outline|hatch]
 notescli drawing create --folder <folder> --title <title> --svg <file> [drawing options]
 notescli drawing export <ref> [--attachment <id>] [--format svg|png] [--output <file>]
-notescli table create|set|add-row|add-column|remove-row|remove-column ...
+notescli handwriting recognize <ref> --attachment <id> [--locale <locale>] [--persist]
+notescli handwriting set <ref> --attachment <id> [--text <text> | --clear]
+notescli paper add <ref> <pdf-or-image> [--subtype pdf|scan] [--position <position>]
+notescli paper regenerate-fallback <ref> --attachment <id>
+notescli table create|set|format-cell|add-row|add-column|remove-row|remove-column|convert-to-text ...
 notescli duplicate <ref> [--title <title>]
 notescli restore <ref> [--folder <folder>]
 notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
-`link add-url --card` creates a native URL preview. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript; each segment's `fragment` index picks the audio fragment it belongs to, and 0 is the default. `recording transcribe` transcribes each fragment of a recording in order. Readback checks each segment's text, timing, speaker, and fragment. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+`link add-url --card` creates a native URL preview. `link capture` creates the native Synapse web attachment used for Share-sheet links. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. `map add` accepts only Apple Maps HTTPS URLs. Scan commands create and edit ordered native scan galleries; crop still lacks visible Mac/iPhone/PDF proof. Local scans accept up to 200 MB. MCP `scan_add` accepts up to 3 MB of decoded image data so requests fit the 4 MiB transport limit. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript; each segment's `fragment` index picks the audio fragment it belongs to, and 0 is the default. `recording transcribe` transcribes each fragment of a recording in order. Readback checks each segment's text, timing, speaker, and fragment. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
 
 ## Diagrams
 
@@ -172,7 +193,7 @@ notescli file diff <path>
 ```
 
 `undo` and `revert` accept a note reference for snapshots or a journal operation ID for a recorded setting or Smart Folder rule preimage.
-Snapshots with native-only features require `--engine native`. Pass `--allow-downgrade` to permit scripting conversion. Native restore verifies the saved structure through a fresh database read.
+Snapshots with native-only features require `--engine native`. Pass `--allow-downgrade` to permit scripting conversion. Native restore recreates missing scans and markup, recordings and fragments, Paper documents, multi-canvas System Paper, modern and classic drawings, rich links, maps, tables, table-cell inline objects, paragraph links, PDFs, images, and files, including types without a canonical extension. It preserves paragraph and checklist UUIDs, restores private payloads, remaps attachment IDs, and verifies structure and archived bytes through fresh native and database reads. Paper verification compares the drawing assets and their semantic contents because Notes rewrites its CRDT and database bytes. A failed Paper restore purges only the newly created files when the guard proves ownership, but still reports an `unknown` result. Unknown future attachment graphs are refused.
 
 ## Export
 
@@ -191,9 +212,13 @@ The default output directory is `notes-export`. `--combine` writes one PDF per f
 
 ```text
 notescli setup
+notescli onboard
 notescli permissions
 notescli doctor
+notescli engine doctor
 notescli capabilities
+notescli host install|status|restart|uninstall
+notescli uninstall [--dry-run] [--keep-config]
 notescli completion [zsh|bash|fish]
 ```
 

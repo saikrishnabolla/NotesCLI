@@ -16,7 +16,7 @@ notescli setup
 From a release archive:
 
 ```bash
-tar -xzf notescli-1.1.6-macos-universal.tar.gz
+tar -xzf notescli-1.1.9-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
 mkdir -p "$HOME/Applications"
 ditto "NotesCLI Capability Host.app" "$HOME/Applications/NotesCLI Capability Host.app"
@@ -44,7 +44,9 @@ notescli permissions
 notescli doctor
 ```
 
-`notescli setup` installs NotesCLI Capability Host.app. Grant Full Disk Access, Automation, and Speech Recognition to that app once. Terminal, Claude, Codex, Cursor, and VS Code send Notes commands through its private socket.
+`notescli setup` installs NotesCLI Capability Host.app. Grant Full Disk Access, Automation, and Speech Recognition to that app once. Terminal, Claude, Codex, Cursor, and VS Code send eligible Notes commands through its private socket.
+
+Commands that open or save local files run in the calling app so the host never receives arbitrary paths. Those commands need that app's own file access.
 
 ## Common commands
 
@@ -69,7 +71,9 @@ notescli delete NOTE_ID --yes
 
 Writes return `verified`, `unverified`, `unknown`, or `rolled_back`, plus the `engine` used. `rolled_back` means a native create failed and its partial note was moved to Recently Deleted. Native results also include `operationID` when available. If a write returns `unknown`, check the note before you retry. Delete moves notes to Recently Deleted.
 
-Rich edits such as native checklists, pins, tags, links, highlights, positioned images, tables, table-cell formatting, paragraph styles, range edits, duplication, restore, and folder moves require `--engine native` or `NOTESCLI_ENGINE=native`. Native undo and revert verify the note ID and title, decoded text and runs, tables and rich cells, and attachment IDs, types, and parent relationships through a fresh database read. They do not compare attachment file bytes. The scripting engine refuses these snapshots unless you pass `--allow-downgrade`. See the [Apple Notes feature inventory](docs/APPLE-NOTES-FEATURES.md) for all 95 rows.
+Rich edits such as native checklists, pins, tags, links, highlights, positioned images, maps, scanned documents, tables, table-cell formatting, paragraph styles, range edits, duplication, restore, folder grouping, default style, and folder moves require `--engine native` or `NOTESCLI_ENGINE=native`. Native undo and revert verify the title, pin state, decoded text and runs, paragraph and checklist identities, tables and rich cells, attachment topology, private link payloads, and archived media through fresh native and database reads. They recreate missing scans and markup, recordings and fragments, Paper documents, multi-canvas System Paper, modern and classic drawings, rich links, maps, tables, table-cell inline objects, paragraph links, PDFs, images, and files. Explicit native UTI creation also preserves file types that have no canonical extension. Unknown future attachment graphs are refused. The scripting engine refuses native-only snapshots unless you pass `--allow-downgrade`. See the [Apple Notes feature inventory](docs/APPLE-NOTES-FEATURES.md) for all 95 rows.
+
+`show --password-stdin --no-attachments` reads V1 and V1 Neo Notes-password-locked bodies. `attachments --password-stdin --save <directory>` exports their decrypted attachments, including V1 Neo cipher-3 sidecars. Cipher-3 support follows Apple's format and passes Apple-generated fixtures; no real cipher-3 note exists on this Mac. Device-key/passcode V2 protection remains unsupported. NotesCLI never stores the password.
 
 `diagram add` renders self-contained SVG or HTML through WebKit, crops it, and inserts a 2x or 3x PNG. The PNG stores the original source for `diagram export`. See the bundled `notescli-diagrams` skill for the agent workflow.
 

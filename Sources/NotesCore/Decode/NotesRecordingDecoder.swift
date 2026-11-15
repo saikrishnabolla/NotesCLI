@@ -2,11 +2,11 @@ import Foundation
 
 /// Decodes the CRDT object graph Notes stores for audio transcripts and summaries.
 public enum NotesRecordingDecoder {
-    private enum ObjectID { case ref(Int), string(String), number(Double), integer(Int) }
-    private enum Value { case string(String), number(Double), integer(Int), map(String, [String: Value]), note(String) }
+    private enum ObjectID { case ref(Int), string(String), number(Double), integer(Int), zigZagInteger(Int) }
+    private enum Value { case string(String), number(Double), integer(Int), zigZagInteger(Int), map(String, [String: Value]), note(String) }
 
     /// `fragments` lists each audio fragment's identity, which is its child attachment ID, in recording order.
-    public static func decode(_ data: Data) throws -> (words: [TranscriptWord], metadata: RecordingMetadata, fragments: [String]) {
+    public static func decode(_ data: Data) throws -> (words: [TranscriptWord], metadata: RecordingMetadata, fragments: [String], fragmentMetadata: [RecordingFragmentMetadata]) {
         var root = try ProtobufMessage(NotesInflate.decompressIfNeeded(data))
         if (root.fields[3] ?? []).isEmpty, let wrapped = try root.message(2)?.message(3) { root = wrapped }
         let entries = try root.messages(3)
@@ -19,7 +19,7 @@ public enum NotesRecordingDecoder {
             if case .fixed64(let bits) = message.fields[3]?.last { return .number(Double(bitPattern: bits)) }
             if let value = message.int(6) { return .ref(value) }
             if let value = message.int(2) { return .integer(value) }
-            if let value = message.int(1) { return .integer(value) }
+            if let value = message.int(1) { return .zigZagInteger(value) }
             return nil
         }
         func customIDs(_ entry: ProtobufMessage) throws -> (type: String, values: [String: ObjectID])? {
@@ -40,8 +40,15 @@ public enum NotesRecordingDecoder {
                 if let value = try resolve(id, depth + 1, visited) { values[key] = value }
             }
             if map.type == "com.apple.CRDT.NSString" || map.type == "com.apple.CRDT.NSUUID" { return values["self"] }
-            if map.type == "com.apple.CRDT.NSNumber" || map.type == "com.apple.CRDT.NSDate" {
-                return values["doubleValue"] ?? values["integerValue"]
+            if map.type == "com.apple.CRDT.NSNumber" {
+                if case .zigZagInteger(let raw) = values["integerValue"] { return .integer((raw >> 1) ^ -(raw & 1)) }
+                if case .integer = values["integerValue"] { return values["integerValue"] }
+                return values["doubleValue"]
+            }
+            if map.type == "com.apple.CRDT.NSDate" {
+                if let value = values["doubleValue"] { return value }
+                if case .zigZagInteger(let raw) = values["integerValue"] { return .integer((raw >> 1) ^ -(raw & 1)) }
+                return values["integerValue"]
             }
             return .map(map.type, values)
         }
@@ -50,6 +57,7 @@ public enum NotesRecordingDecoder {
             case .string(let value): return .string(value)
             case .number(let value): return .number(value)
             case .integer(let value): return .integer(value)
+            case .zigZagInteger(let value): return .zigZagInteger(value)
             case .ref(let index):
                 guard entries.indices.contains(index), !visited.contains(index), depth <= 16 else { return nil }
                 let entry = entries[index], seen = visited.union([index])
@@ -71,10 +79,20 @@ public enum NotesRecordingDecoder {
             switch value { case .string(let value), .note(let value): return value; default: return nil }
         }
         func number(_ value: Value?) -> Double? {
-            switch value { case .number(let value): return value; case .integer(let value): return Double(value); default: return nil }
+            switch value {
+            case .number(let value): return value
+            case .integer(let value): return Double(value)
+            case .zigZagInteger(let raw): return Double((raw >> 1) ^ -(raw & 1))
+            default: return nil
+            }
         }
         func integer(_ value: Value?) -> Int? {
-            switch value { case .integer(let value): return value; case .number(let value): return Int(value); default: return nil }
+            switch value {
+            case .integer(let value): return value
+            case .zigZagInteger(let raw): return (raw >> 1) ^ -(raw & 1)
+            case .number(let value): return Int(value)
+            default: return nil
+            }
         }
         func reference(_ id: ObjectID?) -> Int? { if case .ref(let index) = id { return index }; return nil }
         func primitive(_ id: ObjectID?) throws -> Value? { guard let id else { return nil }; return try resolve(id, 0, []) }
@@ -85,15 +103,21 @@ public enum NotesRecordingDecoder {
         }.sorted { ($0.start ?? .greatestFiniteMagnitude) < ($1.start ?? .greatestFiniteMagnitude) }
         let recordingEntry = try entries.first { try customIDs($0)?.type == "com.apple.notes.ICTTAudioRecording" }
         let recordingIDs = try recordingEntry.flatMap(customIDs)?.values ?? [:]
-        var orderedSegments: [TranscriptWord] = [], fragmentIDs: [String] = []
+        var decodedFragments: [(id: String, created: Date?, transcriptVersion: Int?, storedIndex: Int, segments: [TranscriptWord])] = []
         if let fragmentsIndex = reference(recordingIDs["fragments"]), entries.indices.contains(fragmentsIndex),
            let list = try entries[fragmentsIndex].message(5) {
-            for (fragmentNumber, item) in try list.messages(1).enumerated() {
+            for (storedIndex, item) in try list.messages(1).enumerated() {
                 guard let fragmentIndex = try item.message(2).flatMap(objectID).flatMap(reference), entries.indices.contains(fragmentIndex),
                       let fragment = try customIDs(entries[fragmentIndex]), fragment.type == "com.apple.notes.ICTTAudioRecording.Fragment" else { continue }
-                if let identity = string(try primitive(fragment.values["identity"])) { fragmentIDs.append(identity) }
+                guard let identity = string(try primitive(fragment.values["identity"])) else { continue }
+                let created = number(try primitive(fragment.values["createdDate"])).map(Date.init(timeIntervalSince1970:))
+                let transcriptVersion = integer(try primitive(fragment.values["transcriptVersion"]))
+                var fragmentSegments: [TranscriptWord] = []
                 guard let transcriptIndex = reference(fragment.values["transcript"]), entries.indices.contains(transcriptIndex),
-                      let set = try entries[transcriptIndex].message(15) else { continue }
+                      let set = try entries[transcriptIndex].message(15) else {
+                    decodedFragments.append((identity, created, transcriptVersion, storedIndex, []))
+                    continue
+                }
                 var bySlot: [Int: Int] = [:]
                 if let dictionary = try set.message(2) {
                     for element in try dictionary.messages(1) {
@@ -115,21 +139,39 @@ public enum NotesRecordingDecoder {
                 for (_, segmentIndex) in order.sorted(by: { $0.0 < $1.0 }) where entries.indices.contains(segmentIndex) {
                     guard let segment = try customIDs(entries[segmentIndex]), segment.type == "com.apple.notes.ICTTTranscriptSegment",
                           let text = string(try primitive(segment.values["text"])) else { continue }
-                    orderedSegments.append(TranscriptWord(text: text, start: number(try primitive(segment.values["timestamp"])),
-                                                          duration: number(try primitive(segment.values["duration"])),
-                                                          speaker: string(try primitive(segment.values["speaker"])), fragment: fragmentNumber))
+                    fragmentSegments.append(TranscriptWord(text: text, start: number(try primitive(segment.values["timestamp"])),
+                                                           duration: number(try primitive(segment.values["duration"])),
+                                                           speaker: string(try primitive(segment.values["speaker"]))))
                 }
+                decodedFragments.append((identity, created, transcriptVersion, storedIndex, fragmentSegments))
             }
         }
-        let segments = orderedSegments.isEmpty ? fallbackSegments : orderedSegments
+        let allFragmentsAreDated = decodedFragments.allSatisfy { $0.created != nil }
+        let orderedFragments = allFragmentsAreDated ? decodedFragments.sorted {
+            if $0.created! != $1.created! { return $0.created! < $1.created! }
+            return $0.storedIndex < $1.storedIndex
+        } : decodedFragments.sorted { $0.storedIndex < $1.storedIndex }
+        let orderedSegments = orderedFragments.enumerated().flatMap { fragmentNumber, fragment in
+            fragment.segments.map {
+                TranscriptWord(text: $0.text, start: $0.start, duration: $0.duration,
+                               speaker: $0.speaker, fragment: fragmentNumber)
+            }
+        }
+        let segments = decodedFragments.isEmpty ? fallbackSegments : orderedSegments
+        let fragmentIDs = orderedFragments.map(\.id)
+        let fragmentMetadata = orderedFragments
+            .map { RecordingFragmentMetadata(id: $0.id, createdDate: $0.created, transcriptVersion: $0.transcriptVersion) }
         let recording = try maps("com.apple.notes.ICTTAudioRecording").first ?? [:]
         let start = number(recording["callRecordingStartTime"]).map(Date.init(timeIntervalSince1970:))
         let metadata = RecordingMetadata(summary: string(recording["summary"]), topLineSummary: string(recording["topLineSummary"]),
+                                         summaryVersion: integer(recording["summaryVersion"]),
+                                         externalModelAttributionProviderName: string(recording["externalModelAttributionProviderName"]),
+                                         externalModelAttributionSymbolName: string(recording["externalModelAttributionSymbolName"]),
                                          localSpeakerHandle: string(recording["callLocalSpeakerHandle"]),
                                          remoteSpeakerHandle: string(recording["callRemoteSpeakerHandle"]),
                                          callType: integer(recording["callType"]),
                                          isCallRecording: integer(recording["callRecording"]).map { $0 != 0 }, startTime: start)
-        return (segments, metadata, fragmentIDs)
+        return (segments, metadata, fragmentIDs, fragmentMetadata)
     }
 
     public static func joined(_ words: [TranscriptWord]) -> String {

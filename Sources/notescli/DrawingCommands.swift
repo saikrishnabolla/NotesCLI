@@ -54,24 +54,37 @@ struct DrawingInputOptions: ParsableArguments {
 }
 
 struct DrawingAdd: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "add", abstract: "Add an editable Paper drawing to a note.")
+    static let configuration = CommandConfiguration(commandName: "add", abstract: "Add an editable Paper drawing or legacy Notes sketch.")
     @OptionGroup var options: GlobalOptions
     @OptionGroup var write: WriteOptions
     @Argument var note: String
     @OptionGroup var input: DrawingInputOptions
+    @Flag(help: "Create a legacy Notes sketch instead of a modern Paper drawing.") var legacy = false
 
     func run() throws {
         let backend = try options.writable()
         guard UnifiedNative.nativeAvailable() else { throw NotesError("native_unavailable", "The native Notes framework check failed. Run notescli engine doctor --json.") }
         let target = try backend.reader.note(note), drawing = try input.load()
-        let arguments = input.journalArguments.merging(["ref": target.summary.id.uuid, "engine": "native"]) { $1 }
+        let arguments = input.journalArguments.merging([
+            "ref": target.summary.id.uuid, "engine": "native", "legacy": String(legacy),
+        ]) { $1 }
         let plan = DryRunPlan(operation: "drawingAdd", target: target.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(target), engine: "native")
         var captured: NativeAttachmentResult?
         let result = try SafetyExecutor.run(options: write, operation: "drawingAdd", arguments: arguments,
             note: target, allowedPaths: [target.summary.folderPath], plan: plan) {
-                let value = try NativeNotesWriter().insertDrawing(target.summary.id.uuid, drawing: drawing,
+                let value: NativeAttachmentResult
+                if legacy {
+                    value = try NativeNotesWriter().insertLegacyDrawing(
+                        target.summary.id.uuid,
+                        records: PaperStrokeRecord.records([drawing]).map(LegacyDrawingStrokeRecord.init),
+                        position: nil,
+                        allowShared: write.allowShared
+                    )
+                } else {
+                    value = try NativeNotesWriter().insertDrawing(target.summary.id.uuid, drawing: drawing,
                                                                   position: nil, allowShared: write.allowShared)
+                }
                 captured = value
                 return value.write.writeResult
             }

@@ -296,8 +296,35 @@ struct AttachmentsCommand: ParsableCommand {
     @Argument var ref: String
     @Option var save: String?
     @Option var preview: String?
+    @Flag(help: "Unlock a legacy password-protected note using one password from stdin. Requires --save.")
+    var passwordStdin = false
+
+    func validate() throws {
+        if passwordStdin, save == nil {
+            throw ValidationError("--password-stdin requires --save so decrypted files are copied before cleanup.")
+        }
+        if passwordStdin, preview != nil {
+            throw ValidationError("--password-stdin cannot be used with --preview.")
+        }
+    }
+
     func run() throws {
-        var attachments = try options.backends().reader.attachments(ref)
+        let backend = try options.backends()
+        if passwordStdin {
+            guard let reader = backend.reader as? SQLiteNotesStore else {
+                throw NotesError("locked_note_full_access_required", "Locked attachment export requires the full read backend.")
+            }
+            let password = try inputPassword()
+            try reader.withPasswordUnlockedNote(ref, password: password) { note in
+                try output(note.attachments)
+            }
+            return
+        }
+        try output(backend.reader.attachments(ref))
+    }
+
+    private func output(_ input: [Attachment]) throws {
+        var attachments = input
         if let preview {
             let root = URL(fileURLWithPath: NSString(string: preview).expandingTildeInPath, isDirectory: true).standardizedFileURL
             let values = try AttachmentPreviewer.write(attachments, to: root)
@@ -325,23 +352,34 @@ struct AttachmentsCommand: ParsableCommand {
                 copied[source.path] = target.path
                 return target.path
             }
-            for index in attachments.indices {
-                let id = attachments[index].id.replacingOccurrences(of: "/", with: "_")
-                if let path = attachments[index].filePath {
+
+            func exporting(_ original: Attachment) throws -> Attachment {
+                var attachment = original
+                let id = attachment.id.replacingOccurrences(of: "/", with: "_")
+                if let path = attachment.filePath {
                     let source = URL(fileURLWithPath: path)
-                    attachments[index].filePath = try copy(path, name: id + "-" + (attachments[index].filename ?? source.lastPathComponent))
+                    attachment.filePath = try copy(
+                        path,
+                        name: id + "-" + (attachment.filename ?? source.lastPathComponent))
                 }
-                if let pages = attachments[index].pageImagePaths {
-                    attachments[index].pageImagePaths = try pages.enumerated().map { page, path in
+                if let pages = attachment.pageImagePaths {
+                    attachment.pageImagePaths = try pages.enumerated().map { page, path in
                         let ext = URL(fileURLWithPath: path).pathExtension
                         return try copy(path, name: "\(id)-page-\(page + 1)" + (ext.isEmpty ? "" : ".\(ext)"))
                     }
                 }
-                if let raster = attachments[index].fallbackRasterPath {
+                if let raster = attachment.fallbackRasterPath {
                     let ext = URL(fileURLWithPath: raster).pathExtension
-                    attachments[index].fallbackRasterPath = try copy(raster, name: id + "-fallback" + (ext.isEmpty ? "" : ".\(ext)"))
+                    attachment.fallbackRasterPath = try copy(
+                        raster,
+                        name: id + "-fallback" + (ext.isEmpty ? "" : ".\(ext)"))
                 }
+                if let children = attachment.childAttachments {
+                    attachment.childAttachments = try children.map(exporting)
+                }
+                return attachment
             }
+            attachments = try attachments.map(exporting)
         }
         if options.json { try Output.json(attachments) }
         else { Output.table(["ID", "KIND", "FILE", "PATH"], attachments.map { [$0.id, $0.kind, $0.filename ?? "", $0.filePath ?? "not downloaded"] }) }

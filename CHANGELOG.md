@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.1.9
+
+### Added
+
+- Password-backed V1 Neo reads can decrypt cipher-3 sidecar attachments with Apple's stored sidecar key or verified main-key fallback. This follows Apple's format and passes Apple-generated fixtures; no real cipher-3 note exists on this Mac.
+- `collaboration activity` and MCP `collaboration_activity` export stored collaboration events as bounded raw data and hashes without changing Notes.
+- Handwriting recognition results can be saved, replaced, and cleared with native and database readback.
+
+### Fixed
+
+- Native MCP note and paragraph links no longer deadlock during post-write verification.
+- Release archives can be built from a clean checkout. Manual GitHub releases now require Developer ID signing and notarization credentials.
+
+## 1.1.8
+
+### Fixed
+
+- Fake and dry-run native commands no longer depend on private Notes selectors from the current macOS version.
+- Missing scan-edit selectors now disable only the affected scan operation instead of the whole native engine.
+
+## 1.1.7
+
+### Added
+
+- History, undo, and revert can recreate scans and markup, recordings, Paper documents, modern and classic drawings, rich links, maps, tables, paragraph links, inline objects, and generic files.
+- Native note links can target a paragraph, and history preserves paragraph and checklist identities.
+- Password-supplied reads support V1 and V1 Neo locked-note bodies and attachments.
+
+### Changed
+
+- Snapshot restoration now checks object structure, private payloads, and archived media through fresh native and database reads.
+- Body replacement uses Notes' atomic range operation, and changed bodies are checked before Core Data saves them.
+- Automatic routing skips an outdated capability host. Forced routing explains how to update it with `notescli onboard`.
+
 ## 1.1.6
 
 ### Fixed

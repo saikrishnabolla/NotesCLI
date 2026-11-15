@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import NotesCore
 
 public enum CapabilityHostRoute: String, Sendable {
     case auto
@@ -25,22 +26,44 @@ public enum CapabilityHostPaths {
 }
 
 public struct CapabilityHostRequest: Codable, Sendable {
-    public static let currentProtocol = 1
+    public static let currentProtocol = 2
     public static let maximumEncodedBytes = 1_048_576
     public static let allowedEnvironmentKeys: Set<String> = [
         "TERM", "NO_COLOR", "LANG", "LC_ALL", "TZ", "NOTESCLI_BACKEND", "NOTESCLI_ENGINE", "NOTESCLI_WRITE_FOLDERS",
     ]
     public var protocolVersion: Int
+    public var clientVersion: String
     public var arguments: [String]
     public var workingDirectory: String
     public var environment: [String: String]
 
     public init(arguments: [String], workingDirectory: String) {
         protocolVersion = Self.currentProtocol
+        clientVersion = notesCLIVersion
         self.arguments = arguments
         self.workingDirectory = workingDirectory
         environment = Self.allowedEnvironmentKeys.reduce(into: [:]) { values, key in
             if let value = ProcessInfo.processInfo.environment[key], value.utf8.count <= 4_096 { values[key] = value }
+        }
+    }
+
+    func validate(forHostVersion hostVersion: String = notesCLIVersion) throws {
+        guard protocolVersion == Self.currentProtocol else {
+            throw CapabilityHostError.protocolFailure(
+                "The capability host does not match this NotesCLI version. Run 'notescli onboard' to update it."
+            )
+        }
+        guard clientVersion == hostVersion else {
+            throw CapabilityHostError.protocolFailure(
+                "The capability host is NotesCLI \(hostVersion), but the client is \(clientVersion). Run 'notescli onboard' to update it."
+            )
+        }
+        guard arguments.count <= 512,
+              arguments.allSatisfy({ $0.utf8.count <= 512 * 1024 }),
+              environment.count <= 16,
+              Set(environment.keys).isSubset(of: Self.allowedEnvironmentKeys),
+              environment.allSatisfy({ $0.key.utf8.count <= 128 && $0.value.utf8.count <= 4_096 }) else {
+            throw CapabilityHostError.protocolFailure("The capability-host request is not supported.")
         }
     }
 }
@@ -48,8 +71,8 @@ public struct CapabilityHostRequest: Codable, Sendable {
 public enum CapabilityHostPolicy {
     private static let allowedCommands: Set<String> = [
         "accounts", "folders", "list", "show", "search", "tags", "recent", "pinned", "capabilities", "help",
-        "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "checklist", "pin",
-        "unpin", "tag", "link", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
+        "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "ocr", "map", "scan", "quick-note", "settings", "checklist", "pin",
+        "unpin", "tag", "link", "collaboration", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
         "write", "fetch", "index", "stats", "count", "show-many", "selection", "backlinks", "raw", "deleted",
         "smart-folders", "prepend", "insert-under-heading", "replace-section", "replace-text", "exists", "history",
         "diff", "undo", "revert", "journal", "smart-folder", "permissions", "mcp", "anchor", "wait-sync",
@@ -66,8 +89,19 @@ public enum CapabilityHostPolicy {
         guard let index = commandIndex(arguments) else { return allowsHome(arguments) }
         let command = arguments[index]
         if command == "doctor" { return arguments == ["doctor", "--for-agent", "--json"] }
-        guard allowedCommands.contains(command), !containsPathOption(arguments) else { return false }
+        guard allowedCommands.contains(command) else { return false }
+        if containsPathOption(arguments) {
+            let lockedAttachmentExport = command == "attachments" &&
+                containsOption("--password-stdin", in: arguments) &&
+                containsOption("--save", in: arguments) &&
+                !containsOption("--preview", in: arguments)
+            guard lockedAttachmentExport else { return false }
+        }
         if command == "add", !containsOption("--body", in: arguments), !arguments.contains("--stdin") { return false }
+        if command == "scan" {
+            guard index + 1 < arguments.count,
+                  ["state", "filter", "rotate", "crop", "move", "delete"].contains(arguments[index + 1]) else { return false }
+        }
         if arguments[index] == "mcp", index + 1 < arguments.count,
            localMCPActions.contains(arguments[index + 1]) { return false }
         return true
@@ -205,7 +239,9 @@ public enum CapabilityHostClient {
         try sendRequest(data, descriptors: descriptors, socket: descriptor)
         let response = try readReply(socket: descriptor)
         guard response.protocolVersion == CapabilityHostRequest.currentProtocol else {
-            throw CapabilityHostError.protocolFailure("The capability-host protocol does not match this NotesCLI version.")
+            throw CapabilityHostError.protocolFailure(
+                "The capability host does not match this NotesCLI version. Run 'notescli onboard' to update it."
+            )
         }
         if let error = response.error { throw CapabilityHostError.protocolFailure(error) }
         guard let exitCode = response.exitCode else {
@@ -430,14 +466,7 @@ public final class CapabilityHostServer: @unchecked Sendable {
                 throw CapabilityHostError.protocolFailure("The capability-host request is too large.")
             }
             let request = try JSONDecoder().decode(CapabilityHostRequest.self, from: Data(data[..<newline]))
-            guard request.protocolVersion == CapabilityHostRequest.currentProtocol,
-                  request.arguments.count <= 512,
-                  request.arguments.allSatisfy({ $0.utf8.count <= 512 * 1024 }),
-                  request.environment.count <= 16,
-                  Set(request.environment.keys).isSubset(of: CapabilityHostRequest.allowedEnvironmentKeys),
-                  request.environment.allSatisfy({ $0.key.utf8.count <= 128 && $0.value.utf8.count <= 4_096 }) else {
-                throw CapabilityHostError.protocolFailure("The capability-host request is not supported.")
-            }
+            try request.validate()
             return (request, descriptors)
         } catch {
             closeDescriptors(descriptors)

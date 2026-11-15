@@ -82,11 +82,11 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Videos", read: "Done", write: "Done"),
         FeatureDefinition(feature: "PDFs", read: "Done", write: "Done"),
         FeatureDefinition(feature: "General file attachments", read: "Done", write: "Done"),
-        FeatureDefinition(feature: "Maps and location cards", read: "Done", write: "Not possible"),
+        FeatureDefinition(feature: "Maps and location cards", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Contact cards", read: "Done", write: "Not possible"),
-        FeatureDefinition(feature: "Scanned documents", read: "Done", write: "Not possible"),
+        FeatureDefinition(feature: "Scanned documents", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Image and PDF markup", read: "Partial", write: "Not possible"),
-        FeatureDefinition(feature: "Classic drawings and sketches", read: "Done", write: "Not possible"),
+        FeatureDefinition(feature: "Classic drawings and sketches", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Modern Paper drawings", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Audio file attachments", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Native audio recordings", read: "Done", write: "Done"),
@@ -106,12 +106,12 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Quick Notes", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Folder list and gallery views", read: "Not possible", write: "Not possible"),
         FeatureDefinition(feature: "Folder sort options", read: "Done", write: "Done"),
-        FeatureDefinition(feature: "Folder grouping by date", read: "Done", write: "Not possible"),
+        FeatureDefinition(feature: "Folder grouping by date", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Note display order", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Search by title and body", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Search filters and Boolean queries", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "OCR and image labels", read: "Done", write: "Not possible"),
-        FeatureDefinition(feature: "Handwriting recognition", read: "Done", write: "Not possible"),
+        FeatureDefinition(feature: "Handwriting recognition", read: "Done", write: "Done"),
         FeatureDefinition(feature: "PDF text search", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Audio transcript search", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Import plain text, HTML, and Markdown", read: "Done", write: "Done"),
@@ -124,8 +124,8 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Note notifications", read: "Partial", write: "Not possible"),
         FeatureDefinition(feature: "Notes settings", read: "Partial", write: "Partial"),
         FeatureDefinition(feature: "Default account", read: "Done", write: "Done"),
-        FeatureDefinition(feature: "Default paragraph style", read: "Not possible", write: "Not possible"),
-        FeatureDefinition(feature: "Note links and Share-sheet capture", read: "Done", write: "Partial"),
+        FeatureDefinition(feature: "Default paragraph style", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Note links and Share-sheet capture", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Open notes, folders, accounts, and attachments", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Sync and upload state", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Version history, diff, undo, and revert", read: "Partial", write: "Partial"),
@@ -141,15 +141,19 @@ public enum CapabilityCatalog {
         "Clear inline formatting", "Collapsible headings and subheadings", "Bulleted lists", "Dashed lists",
         "Numbered lists and starting number", "Nested lists", "Checklists", "Checklist sorting preference",
         "Native tables", "Add or remove table rows and columns", "Table cell text", "Table cell rich formatting",
-        "Convert table to text", "Native note-to-note links", "URL preview cards", "Native tags", "Mentions",
-        "Photos and images", "Editorial SVG and HTML diagrams", "Videos", "PDFs", "General file attachments", "Modern Paper drawings",
+        "Convert table to text", "Native note-to-note links", "Paragraph links and persistent anchors",
+        "URL preview cards", "Native tags", "Mentions",
+        "Photos and images", "Editorial SVG and HTML diagrams", "Videos", "PDFs", "General file attachments",
+        "Classic drawings and sketches", "Modern Paper drawings",
         "Audio file attachments", "Native audio recordings", "Stored audio transcripts",
         "Math expressions, results, and graphs", "Divider lines", "Pin and unpin", "Edit an existing shared note",
-        "Smart Folders and rules", "Folder sort options", "Notes settings", "Default account"
+        "Smart Folders and rules", "Folder sort options", "Folder grouping by date", "Notes settings", "Default account",
+        "Default paragraph style", "Maps and location cards", "Scanned documents",
+        "Note links and Share-sheet capture"
     ]
 
     private static let filesystemWrites: Set<String> = [
-        "Paragraph links and persistent anchors", "Export Markdown and HTML", "Export JSON, NDJSON, and SQLite",
+        "Export Markdown and HTML", "Export JSON, NDJSON, and SQLite",
         "Export PDF, DOCX, RTF, and EPUB", "Export Bear, Joplin, Quiver, TextBundle, and ZIP",
         "Version history, diff, undo, and revert"
     ]
@@ -169,15 +173,22 @@ public enum CapabilityCatalog {
 
 extension CapabilityCatalog {
     /// Features that depend on one optional Notes selector. If that selector is missing, only the feature is unavailable.
-    static let optionalSelectorFeatures: [String: String] = [
-        "Divider lines": "newDividerLineAttachmentWithIdentifier:",
-        "Math expressions, results, and graphs": "newCalculateGraphExpressionAttachmentWithIdentifier:",
-        "Mentions": "newMentionAttachmentWithIdentifier:",
-        "Collapsible headings and subheadings": "ICOutlineState",
+    static let optionalSelectorFeatures: [String: [String]] = [
+        "Divider lines": ["newDividerLineAttachmentWithIdentifier:"],
+        "Math expressions, results, and graphs": ["newCalculateGraphExpressionAttachmentWithIdentifier:", "evaluate:options:error:", "formattedResult"],
+        "Mentions": ["newMentionAttachmentWithIdentifier:"],
+        "Paragraph links and persistent anchors": ["newParagraphLinkAttachmentWithIdentifier:"],
+        "Collapsible headings and subheadings": ["ICOutlineState"],
+        "Maps and location cards": ["addLocationIfNeeded"],
+        "Scanned documents": ["addGalleryAttachmentWithIdentifier:", "ICDocCam", "createAndAddSubAttachmentsToGalleryAttachment:"],
+        "Folder grouping by date": ["applyDateHeadersType:", "isShowingDateHeaders"],
+        "Default paragraph style": ["noteDefaultNamedStyle", "setNoteDefaultNamedStyle:"],
+        "Note links and Share-sheet capture": ["SYContentItem", "addSynapseLinkAttachmentWithContentItem:",
+                                                 "hasSynapseLink", "synapseData"],
     ]
     static func optionalSelectorsPresent(for feature: String, missing: [String]) -> Bool {
-        guard let marker = optionalSelectorFeatures[feature] else { return true }
-        return !missing.contains { $0.contains(marker) }
+        guard let markers = optionalSelectorFeatures[feature] else { return true }
+        return !missing.contains { item in markers.contains { item.contains($0) } }
     }
 }
 

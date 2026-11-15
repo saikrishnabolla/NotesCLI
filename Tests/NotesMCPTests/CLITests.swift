@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import NotesSafety
 
 final class CLITests: XCTestCase {
     private var root: URL { URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() }
@@ -22,6 +23,65 @@ final class CLITests: XCTestCase {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-cli-home-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
         return home
+    }
+
+    func testAppendRecordsSnapshotAndJournalPreimage() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+
+        let append = try run(["--backend", "fake", "--json", "append", "welcome", "--body", "More"],
+                             environment: environment)
+        XCTAssertEqual(append.0, 0, append.2)
+
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI")
+        let entry = try XCTUnwrap(WriteJournal(url: support.appendingPathComponent("journal.sqlite")).list(limit: 1).first)
+        XCTAssertEqual(entry.operation, "appendToNote")
+        let snapshotID = try XCTUnwrap(entry.snapshotID)
+
+        let history = try run(["--backend", "fake", "--json", "history", "welcome"], environment: environment)
+        XCTAssertEqual(history.0, 0, history.2)
+        let snapshots = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(history.1.utf8)) as? [[String: Any]])
+        XCTAssertEqual(snapshots.map { $0["id"] as? String }, [snapshotID])
+    }
+
+    func testScanCommandIsRegisteredAndRequiresImagePages() throws {
+        let help = try run(["scan", "add", "--help"])
+        XCTAssertEqual(help.0, 0, help.2)
+        XCTAssertTrue(help.1.contains("Create a native scanned document"))
+        XCTAssertTrue(help.1.contains("<images>"))
+
+        let missing = try run(["--backend", "fake", "scan", "add", "welcome"])
+        XCTAssertNotEqual(missing.0, 0)
+        XCTAssertTrue(missing.2.contains("Provide between 1 and 100 image pages"), missing.2)
+    }
+
+    func testLockedAttachmentExportRequiresStdinPasswordAndSaveDirectory() throws {
+        let help = try run(["attachments", "--help"])
+        XCTAssertEqual(help.0, 0, help.2)
+        XCTAssertTrue(help.1.contains("--password-stdin"), help.1)
+        XCTAssertTrue(help.1.contains("--save"), help.1)
+
+        let secret = "cli-password-must-not-appear"
+        let missingSave = try run(
+            ["--backend", "fake", "attachments", "welcome", "--password-stdin"],
+            input: secret + "\n")
+        XCTAssertNotEqual(missingSave.0, 0)
+        XCTAssertTrue(missingSave.2.contains("--password-stdin requires --save"), missingSave.2)
+        XCTAssertFalse((missingSave.1 + missingSave.2).contains(secret))
+
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notescli-locked-cli-export-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: output) }
+        let unavailable = try run(
+            ["--backend", "fake", "attachments", "welcome", "--password-stdin", "--save", output.path],
+            input: secret + "\n")
+        XCTAssertNotEqual(unavailable.0, 0)
+        XCTAssertTrue(unavailable.2.contains("Locked attachment export requires the full read backend"), unavailable.2)
+        XCTAssertFalse((unavailable.1 + unavailable.2).contains(secret))
+
+        let unlocked = try run(["--backend", "fake", "--json", "attachments", "welcome"])
+        XCTAssertEqual(unlocked.0, 0, unlocked.2)
     }
 
     func testCapabilityHostStdioMCPUsesRemoteSafeToolExposure() throws {
@@ -48,6 +108,9 @@ final class CLITests: XCTestCase {
             "recording_add", "recording_create", "attach_file", "diagram_add", "drawing_add", "drawing_create",
         ]
         XCTAssertTrue(pathTools.isDisjoint(with: names))
+        XCTAssertTrue(names.contains("scan_add"))
+        XCTAssertTrue(names.contains("ocr_attachment"))
+        XCTAssertTrue(names.contains("map_add"))
         for tool in tools {
             let properties = ((tool["inputSchema"] as? [String: Any])?["properties"] as? [String: Any]) ?? [:]
             XCTAssertTrue(Set(["path", "file", "output", "directory", "transcript_path"])
@@ -503,6 +566,12 @@ final class CLITests: XCTestCase {
         let missing = try run(["--backend", "fake", "show", "absent", "--json"])
         XCTAssertEqual(missing.0, 3)
         XCTAssertTrue(missing.2.contains("note_not_found"))
+        let locked = try run(["--backend", "fake", "show", "welcome", "--password-stdin", "--no-attachments", "--json"],
+                             input: "never-print-this-password\n")
+        XCTAssertNotEqual(locked.0, 0)
+        XCTAssertTrue(locked.2.contains("locked_note_full_access_required"), locked.2)
+        XCTAssertFalse(locked.1.contains("never-print-this-password"))
+        XCTAssertFalse(locked.2.contains("never-print-this-password"))
         let confirmation = try run(["--backend", "fake", "delete", "welcome"])
         XCTAssertEqual(confirmation.0, 1)
         XCTAssertTrue(confirmation.2.contains("confirmation_required"))
@@ -533,7 +602,7 @@ final class CLITests: XCTestCase {
         let json = try run(["--backend", "fake", "--json"])
         XCTAssertEqual(json.0, 0, json.2)
         let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
-        XCTAssertEqual(home["version"] as? String, "1.1.6")
+        XCTAssertEqual(home["version"] as? String, "1.1.9")
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },
@@ -656,6 +725,213 @@ final class CLITests: XCTestCase {
             XCTAssertFalse(result.2.contains("native_unavailable"), result.2)
         }
     }
+
+    func testParityCommandsValidateBeforeNativeDispatch() throws {
+        let map = try run(["--backend", "fake", "map", "add", "welcome", "https://example.com/map"])
+        XCTAssertEqual(map.0, 2, map.2)
+        XCTAssertTrue(map.2.contains("invalid_map_url"), map.2)
+        XCTAssertFalse(map.2.contains("native_unavailable"), map.2)
+
+        let style = try run(["--backend", "fake", "settings", "default-style", "--set", "caption"])
+        XCTAssertEqual(style.0, 2, style.2)
+        XCTAssertTrue(style.2.contains("caption"), style.2)
+
+        let grouping = try run(["--backend", "fake", "folder", "group-by-date", "Notes", "--enabled", "maybe"])
+        XCTAssertEqual(grouping.0, 2, grouping.2)
+        XCTAssertTrue(grouping.2.contains("maybe"), grouping.2)
+    }
+
+    func testNativeSettingsCLIValidatesAndSerializesValues() throws {
+        let show = try run(["--backend", "fake", "--engine=native", "--json", "settings", "show"])
+        XCTAssertEqual(show.0, 0, show.2)
+        let settings = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(show.1.utf8)) as? [String: Any])
+        XCTAssertEqual(settings["sort"] as? String, "modified")
+        XCTAssertEqual(settings["groupsByDate"] as? Bool, true)
+        XCTAssertEqual(settings["defaultTextSize"] as? Int, 12)
+        XCTAssertEqual(settings["resumesLastQuickNote"] as? Bool, true)
+        XCTAssertEqual(settings["autoConvertsToTags"] as? Bool, true)
+
+        let cases: [([String], String, [String: String])] = [
+            (["sort", "--set", "title"], "globalNoteSort",
+             ["sort": "title", "previous_sort": "modified", "engine": "native"]),
+            (["group-by-date", "--enabled", "false"], "globalDateGrouping",
+             ["enabled": "false", "previous_enabled": "true", "engine": "native"]),
+            (["default-text-size", "--points", "24"], "defaultTextSize",
+             ["points": "24", "previous_points": "12", "engine": "native"]),
+            (["resume-quick-note", "--enabled", "false"], "resumeLastQuickNote",
+             ["enabled": "false", "previous_enabled": "true", "engine": "native"]),
+            (["auto-convert-tags", "--enabled", "false"], "autoConvertToTags",
+             ["enabled": "false", "previous_enabled": "true", "engine": "native"]),
+        ]
+        for (arguments, operation, expectedArguments) in cases {
+            let result = try run(["--backend", "fake", "--engine=native", "--json", "settings"]
+                                 + arguments + ["--dry-run"])
+            XCTAssertEqual(result.0, 0, result.2)
+            let plan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any])
+            XCTAssertEqual(plan["dryRun"] as? Bool, true)
+            XCTAssertEqual(plan["operation"] as? String, operation)
+            XCTAssertEqual(plan["target"] as? String, "Notes settings")
+            XCTAssertEqual(plan["engine"] as? String, "native")
+            XCTAssertEqual(plan["arguments"] as? [String: String], expectedArguments)
+        }
+
+        let invalidSort = try run(["--backend", "fake", "settings", "sort", "--set", "alphabetical"])
+        XCTAssertEqual(invalidSort.0, 2, invalidSort.2)
+        XCTAssertTrue(invalidSort.2.contains("alphabetical"), invalidSort.2)
+
+        let invalidSize = try run(["--backend", "fake", "settings", "default-text-size", "--points", "16"])
+        XCTAssertEqual(invalidSize.0, 2, invalidSize.2)
+        XCTAssertTrue(invalidSize.2.contains("Use 10, 12, 14, 18, or 24 points."), invalidSize.2)
+
+        let invalidAutoConvert = try run(["--backend", "fake", "settings", "auto-convert-tags", "--enabled", "maybe"])
+        XCTAssertEqual(invalidAutoConvert.0, 2, invalidAutoConvert.2)
+        XCTAssertTrue(invalidAutoConvert.2.contains("maybe"), invalidAutoConvert.2)
+    }
+
+    func testQuickNoteCLIProducesExactCreateAndSetPlans() throws {
+        let create = try run(["--backend", "fake", "--engine=native", "--json", "quick-note", "create",
+                              "Research", "--body", "# Findings", "--folder", "Notes", "--dry-run"])
+        XCTAssertEqual(create.0, 0, create.2)
+        let createPlan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(create.1.utf8)) as? [String: Any])
+        XCTAssertEqual(createPlan["operation"] as? String, "createQuickNote")
+        XCTAssertEqual(createPlan["target"] as? String, "Research")
+        XCTAssertEqual(createPlan["engine"] as? String, "native")
+        XCTAssertEqual(createPlan["arguments"] as? [String: String], [
+            "title": "Research", "body": "# Findings", "folder": "Notes", "engine": "native",
+        ])
+        XCTAssertEqual(createPlan["resultingHTML"] as? String, "<h1>Research</h1><h1>Findings</h1>")
+
+        let set = try run(["--backend", "fake", "--engine=native", "--json", "quick-note", "set",
+                           "welcome", "--enabled", "true", "--dry-run"])
+        XCTAssertEqual(set.0, 0, set.2)
+        let setPlan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(set.1.utf8)) as? [String: Any])
+        XCTAssertEqual(setPlan["operation"] as? String, "setQuickNote")
+        XCTAssertEqual(setPlan["target"] as? String, "welcome")
+        XCTAssertEqual(setPlan["engine"] as? String, "native")
+        XCTAssertEqual(setPlan["arguments"] as? [String: String], [
+            "ref": "welcome", "enabled": "true", "previous_enabled": "false", "engine": "native",
+        ])
+
+        let missingEnabled = try run(["--backend", "fake", "--engine=native", "quick-note", "set", "welcome"])
+        XCTAssertEqual(missingEnabled.0, 2, missingEnabled.2)
+        XCTAssertTrue(missingEnabled.2.contains("--enabled"), missingEnabled.2)
+
+        let conflictingBody = try run(["--backend", "fake", "--engine=native", "quick-note", "create",
+                                       "Research", "--body", "body", "--stdin"])
+        XCTAssertEqual(conflictingBody.0, 2, conflictingBody.2)
+        XCTAssertTrue(conflictingBody.2.contains("Choose only one of --body, --stdin, or --file."), conflictingBody.2)
+    }
+
+    func testFakeBackendScanAndMapNeverReachNativeWriterAndJournalHashesImages() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["CFFIXED_USER_HOME": home.path]
+        let images = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-scan-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: images, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: images) }
+        let first = images.appendingPathComponent("page,one.png"), second = images.appendingPathComponent("page two.png")
+        try Data("first page".utf8).write(to: first)
+        try Data("second page".utf8).write(to: second)
+
+        // "welcome" exists only in the fake store, so a native write could not succeed.
+        let scan = try run(["--backend", "fake", "--engine=native", "--json", "scan", "add", "welcome", first.path, second.path],
+                           environment: environment)
+        XCTAssertEqual(scan.0, 0, scan.2)
+        let scanResult = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(scan.1.utf8)) as? [String: Any])?["result"] as? [String: Any])
+        XCTAssertEqual(scanResult["outcome"] as? String, "unverified")
+        XCTAssertTrue((scanResult["message"] as? String ?? "").contains("fake backend"), scan.1)
+
+        for arguments in [
+            ["scan", "filter", "welcome", "gallery", "page", "color"],
+            ["scan", "rotate", "welcome", "gallery", "page", "right"],
+            ["scan", "move", "welcome", "gallery", "page", "0"],
+        ] {
+            let edited = try run(["--backend", "fake", "--engine=native", "--json"] + arguments,
+                                 environment: environment)
+            XCTAssertEqual(edited.0, 0, "\(arguments): \(edited.2)")
+            let result = try XCTUnwrap(
+                (try JSONSerialization.jsonObject(with: Data(edited.1.utf8)) as? [String: Any])?["result"] as? [String: Any]
+            )
+            XCTAssertEqual(result["outcome"] as? String, "unverified")
+            XCTAssertTrue((result["message"] as? String ?? "").contains("Apple Notes was not changed"))
+        }
+        let invalidMove = try run(["--backend", "fake", "--engine=native", "--json", "scan", "move",
+                                   "welcome", "gallery", "page", "1"], environment: environment)
+        XCTAssertNotEqual(invalidMove.0, 0)
+        XCTAssertTrue(invalidMove.2.contains("invalid_scan_page_index"), invalidMove.2)
+
+        let map = try run(["--backend", "fake", "--engine=native", "--json", "map", "add", "welcome", "https://maps.apple.com/?q=Cupertino"],
+                          environment: environment)
+        XCTAssertEqual(map.0, 0, map.2)
+        let mapResult = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(map.1.utf8)) as? [String: Any])?["result"] as? [String: Any])
+        XCTAssertEqual(mapResult["outcome"] as? String, "unverified")
+
+        let list = try run(["--backend", "fake", "--json", "journal", "list"], environment: environment)
+        XCTAssertEqual(list.0, 0, list.2)
+        let entries = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(list.1.utf8)) as? [[String: Any]])
+        let entry = try XCTUnwrap(entries.first { $0["operation"] as? String == "scanAdd" })
+        let encoded = try XCTUnwrap(entry["arguments"] as? String)
+        let rawArguments = try XCTUnwrap(Data(base64Encoded: encoded))
+        let arguments = try XCTUnwrap(try JSONSerialization.jsonObject(with: rawArguments) as? [String: String])
+        XCTAssertNil(arguments["images"])
+        XCTAssertEqual(arguments["page_count"], "2")
+        XCTAssertEqual(arguments["image_sha256"]?.split(separator: ",").map(String.init), [
+            "845bb60fe5c91b77a0b634e351b296a9222c94d686371b0ad741dff73c95edbb",
+            "9500210b0cfd2a6521c015c59c7ad9bc8578f6d363741b6df73821b29672a343"
+        ])
+        XCTAssertFalse(String(decoding: rawArguments, as: UTF8.self).contains(images.lastPathComponent))
+    }
+
+    func testFakeBackendParitySettingsNeverReachNativePreferencesOrFolders() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let preferences = home.appendingPathComponent(
+            "Library/Group Containers/group.com.apple.notes/Library/Preferences/group.com.apple.notes.plist"
+        )
+        try FileManager.default.createDirectory(at: preferences.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let sentinel = Data("fake-backend-sentinel".utf8)
+        try sentinel.write(to: preferences)
+        let environment = ["CFFIXED_USER_HOME": home.path]
+
+        let style = try run(["--backend", "fake", "--engine=native", "--json", "settings", "default-style",
+                             "--set", "body"], environment: environment)
+        XCTAssertEqual(style.0, 0, style.2)
+        let styleResult = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(style.1.utf8)) as? [String: Any])?["result"] as? [String: Any]
+        )
+        XCTAssertEqual(styleResult["outcome"] as? String, "unverified")
+        XCTAssertTrue((styleResult["message"] as? String ?? "").contains("Apple Notes was not changed"))
+
+        let grouping = try run(["--backend", "fake", "--engine=native", "--json", "folder", "group-by-date",
+                                "Notes", "--enabled", "true"], environment: environment)
+        XCTAssertEqual(grouping.0, 0, grouping.2)
+        let groupingResult = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(grouping.1.utf8)) as? [String: Any])?["result"] as? [String: Any]
+        )
+        XCTAssertEqual(groupingResult["outcome"] as? String, "unverified")
+        XCTAssertEqual(groupingResult["folderID"] as? String, "fake-folder")
+        XCTAssertEqual(try Data(contentsOf: preferences), sentinel)
+    }
+
+    func testParitySettingWritesHonorReadOnlyWhileReadsRemainAvailable() throws {
+        for arguments in [
+            ["settings", "default-style", "--set", "body"],
+            ["folder", "group-by-date", "Notes", "--enabled", "true"],
+        ] {
+            let result = try run(["--backend", "fake", "--engine=native", "--read-only"] + arguments)
+            XCTAssertEqual(result.0, 4, result.2)
+            XCTAssertTrue(result.2.contains("read_only"), result.2)
+        }
+
+        for arguments in [
+            ["settings", "default-style"],
+            ["folder", "group-by-date", "Notes"],
+        ] {
+            let result = try run(["--backend", "fake", "--engine=native", "--read-only", "--json"] + arguments)
+            XCTAssertEqual(result.0, 0, result.2)
+        }
+    }
     func testDiagramCLIRejectsInvalidRenderOptionsBeforeNativeDispatch() throws {
         let invalid = [
             (["diagram", "add", "welcome", "--file", "/tmp/diagram.svg", "--scale", "4"], "Diagram scale must be 2 or 3."),
@@ -767,13 +1043,13 @@ final class CLITests: XCTestCase {
     func testUnifiedCommandTreeRoutesAndHidesLegacyNames() throws {
         let help = try run(["--help"])
         XCTAssertEqual(help.0, 0, help.2)
-        for command in ["checklist", "pin", "unpin", "tag", "link", "deeplink", "text", "format", "attach", "attachment", "table", "duplicate", "restore", "write"] {
+        for command in ["ocr", "map", "settings", "checklist", "pin", "unpin", "tag", "link", "deeplink", "text", "format", "attach", "attachment", "table", "duplicate", "restore", "write"] {
             XCTAssertTrue(help.1.contains("  \(command)"), command)
         }
         for legacy in ["native-checklist", "native-tag", "native-link", "native-text", "native-format", "native-attachment", "native-table", "native-duplicate", "native-restore", "native-move-folder", "write-markdown"] {
             XCTAssertFalse(help.1.contains("  \(legacy)"), legacy)
         }
-        for route in [["checklist", "--help"], ["tag", "--help"], ["link", "--help"], ["text", "--help"], ["format", "--help"], ["attachment", "--help"], ["table", "--help"], ["folder", "--help"]] {
+        for route in [["ocr", "--help"], ["map", "--help"], ["settings", "--help"], ["checklist", "--help"], ["tag", "--help"], ["link", "--help"], ["text", "--help"], ["format", "--help"], ["attachment", "--help"], ["table", "--help"], ["folder", "--help"]] {
             let value = try run(route)
             XCTAssertEqual(value.0, 0, "\(route): \(value.2)")
         }
@@ -783,6 +1059,7 @@ final class CLITests: XCTestCase {
         let commands = [
             ["checklist", "add", "welcome", "item"], ["pin", "welcome"], ["unpin", "welcome"],
             ["tag", "add", "welcome", "demo"], ["link", "add", "welcome", "shopping"],
+            ["link", "capture", "welcome", "https://example.com"],
             ["text", "insert", "welcome", "x", "--position", "0"],
             ["format", "paragraph", "welcome", "--start", "0", "--length", "1", "--style", "body"],
             ["attach", "welcome", "/tmp/missing"], ["table", "create", "welcome", "--rows", "[[\"x\"]]"],
@@ -824,5 +1101,45 @@ final class CLITests: XCTestCase {
         let explicit = try run(["--backend", "fake", "--engine=native", "--json", "checklist", "add", "welcome", "item", "--dry-run"], environment: ["NOTESCLI_ENGINE": "scripting"])
         XCTAssertEqual(explicit.0, 0, explicit.2)
         XCTAssertTrue(explicit.1.contains(#""engine":"native""#), explicit.1)
+    }
+
+    func testAddWithoutAttachmentsHonorsExplicitAndEnvironmentNativeEngine() throws {
+        let cases: [([String], [String: String])] = [
+            (["--backend", "fake", "--engine=native", "--json", "add", "Native add", "--body", "body"], [:]),
+            (["--backend", "fake", "--json", "add", "Native add", "--body", "body"], ["NOTESCLI_ENGINE": "native"]),
+        ]
+        for (arguments, environment) in cases {
+            let result = try run(arguments, environment: environment)
+            XCTAssertEqual(result.0, 0, result.2)
+            let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any])
+            XCTAssertEqual(response["engine"] as? String, "native")
+            XCTAssertEqual((response["result"] as? [String: Any])?["outcome"] as? String, "verified")
+        }
+    }
+
+    func testDeleteHonorsExplicitAndEnvironmentNativeEngine() throws {
+        let cases: [([String], [String: String])] = [
+            (["--backend", "fake", "--engine=native", "--json", "delete", "welcome", "--yes"], [:]),
+            (["--backend", "fake", "--json", "delete", "welcome", "--yes"], ["NOTESCLI_ENGINE": "native"]),
+        ]
+        for (arguments, environment) in cases {
+            let result = try run(arguments, environment: environment)
+            XCTAssertEqual(result.0, 0, result.2)
+            let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [[String: Any]])
+            XCTAssertEqual(response.first?["engine"] as? String, "native")
+            XCTAssertEqual((response.first?["result"] as? [String: Any])?["outcome"] as? String, "verified")
+        }
+    }
+
+    func testNativeAddAndDeleteDryRunsReportNativeEngine() throws {
+        let add = try run(["--backend", "fake", "--engine=native", "--json", "add", "Native dry run", "--body", "body", "--dry-run"])
+        XCTAssertEqual(add.0, 0, add.2)
+        let addPlan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(add.1.utf8)) as? [String: Any])
+        XCTAssertEqual(addPlan["engine"] as? String, "native")
+
+        let delete = try run(["--backend", "fake", "--engine=native", "--json", "delete", "welcome", "--dry-run"])
+        XCTAssertEqual(delete.0, 0, delete.2)
+        let deletePlans = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(delete.1.utf8)) as? [[String: Any]])
+        XCTAssertEqual(deletePlans.first?["engine"] as? String, "native")
     }
 }

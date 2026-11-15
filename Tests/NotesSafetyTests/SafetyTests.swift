@@ -12,6 +12,20 @@ final class SafetyTests: XCTestCase {
                                   idempotencyKey: nil, started: Date(), outcome: .unknown, noteID: nil, result: nil, message: nil)
         XCTAssertEqual(stable.stableDispatchIdentity, "uuid-1")
     }
+
+    func testJournalBindsGenericUndoToOneSnapshotAndPostWriteRevision() {
+        let entry = JournalEntry(
+            id: "one", operation: "updateNote", argumentsHash: "",
+            arguments: Data(#"{"stable_id":"note-1","snapshot_id":"20261113T010203.000Z","post_revision":"abc123"}"#.utf8),
+            idempotencyKey: nil, started: Date(), outcome: .verified, noteID: "note-1", result: nil, message: nil)
+        XCTAssertEqual(entry.snapshotID, "20261113T010203.000Z")
+        XCTAssertEqual(entry.postRevision, "abc123")
+
+        let legacy = JournalEntry(id: "two", operation: "updateNote", argumentsHash: "", arguments: Data(#"{"stable_id":"note-1"}"#.utf8),
+                                  idempotencyKey: nil, started: Date(), outcome: .verified, noteID: "note-1", result: nil, message: nil)
+        XCTAssertNil(legacy.snapshotID)
+        XCTAssertNil(legacy.postRevision)
+    }
     func testAllowlistMatchesOnlyConfiguredTrees() throws {
         let guardrail = WriteAllowlist("Work, Inbox > Agents")
         XCTAssertTrue(guardrail.allows(["Work"]))
@@ -63,10 +77,99 @@ final class SafetyTests: XCTestCase {
         XCTAssertEqual(try entry("checklistAutoSort", #"{"previous_enabled":"true"}"#).restoreAction(), .checklistAutoSort(enabled: true))
         XCTAssertEqual(try entry("folderSort", #"{"stable_id":"folder-1","previous_by":"created","previous_direction":"oldest"}"#).restoreAction(),
                        .folderSort(folderID: "folder-1", order: "created", direction: "oldest"))
+        XCTAssertEqual(try entry("folderDateGrouping", #"{"stable_id":"folder-1","previous_type":"0"}"#).restoreAction(),
+                       .folderDateGrouping(folderID: "folder-1", type: 0))
+        XCTAssertEqual(try entry("set_folder_date_grouping", #"{"stable_id":"folder-1","previous_enabled":"false"}"#).restoreAction(),
+                       .folderDateGrouping(folderID: "folder-1", type: 1))
+        XCTAssertEqual(try entry("defaultParagraphStyle", #"{"previous_style":"body"}"#).restoreAction(),
+                       .defaultParagraphStyle(style: "body"))
+        XCTAssertEqual(try entry("globalNoteSort", #"{"previous_sort":"created"}"#).restoreAction(),
+                       .globalNoteSort(sort: "created"))
+        XCTAssertEqual(try entry("set_global_note_sort", #"{"previous_sort":"title"}"#).restoreAction(),
+                       .globalNoteSort(sort: "title"))
+        XCTAssertEqual(try entry("globalDateGrouping", #"{"previous_enabled":"false"}"#).restoreAction(),
+                       .globalDateGrouping(enabled: false))
+        XCTAssertEqual(try entry("set_global_date_grouping", #"{"previous_enabled":true}"#).restoreAction(),
+                       .globalDateGrouping(enabled: true))
+        XCTAssertEqual(try entry("defaultTextSize", #"{"previous_points":"18"}"#).restoreAction(),
+                       .defaultTextSize(points: 18))
+        XCTAssertEqual(try entry("set_default_text_size", #"{"previous_points":24}"#).restoreAction(),
+                       .defaultTextSize(points: 24))
+        XCTAssertEqual(try entry("resumeLastQuickNote", #"{"previous_enabled":"true"}"#).restoreAction(),
+                       .resumeLastQuickNote(enabled: true))
+        XCTAssertEqual(try entry("set_resume_last_quick_note", #"{"previous_enabled":false}"#).restoreAction(),
+                       .resumeLastQuickNote(enabled: false))
+        XCTAssertEqual(try entry("autoConvertToTags", #"{"previous_enabled":"false"}"#).restoreAction(),
+                       .autoConvertToTags(enabled: false))
+        XCTAssertEqual(try entry("set_auto_convert_tags", #"{"previous_enabled":true}"#).restoreAction(),
+                       .autoConvertToTags(enabled: true))
+        XCTAssertEqual(try entry("setQuickNote", #"{"ref":"note-1","previous_enabled":"false"}"#).restoreAction(),
+                       .quickNote(noteID: "note-1", enabled: false))
+        XCTAssertEqual(try entry("set_quick_note", #"{"ref":"note-2","previous_enabled":true}"#).restoreAction(),
+                       .quickNote(noteID: "note-2", enabled: true))
         XCTAssertEqual(try entry("setDefaultAccount", #"{"previous_account_id":"account-1"}"#).restoreAction(), .defaultAccount(identifier: "account-1"))
         XCTAssertEqual(try entry("smartFolderEditRules", #"{"stable_id":"smart-1","previous_query_json":"{\"tag\":\"work\"}"}"#).restoreAction(),
                        .smartFolderQuery(folderID: "smart-1", queryJSON: #"{"tag":"work"}"#))
+        XCTAssertEqual(try entry("scanFilter", #"{"stable_id":"note-1","attachment_id":"gallery-1","page_id":"page-1","previous_filter":"photo"}"#).restoreAction(),
+                       .scanFilter(noteID: "note-1", attachmentID: "gallery-1", pageID: "page-1", filter: "photo", expectedCurrent: nil))
+        XCTAssertEqual(try entry("scan_rotate", #"{"stable_id":"note-1","attachment_id":"gallery-1","page_id":"page-1","previous_orientation":"right"}"#).restoreAction(),
+                       .scanOrientation(noteID: "note-1", attachmentID: "gallery-1", pageID: "page-1", orientation: "right", expectedCurrent: nil))
+        XCTAssertEqual(try entry("scanMove", #"{"stable_id":"note-1","attachment_id":"gallery-1","page_id":"page-1","previous_index":"2"}"#).restoreAction(),
+                       .scanMove(noteID: "note-1", attachmentID: "gallery-1", pageID: "page-1", index: 2, expectedPageIDs: nil))
+        XCTAssertEqual(try entry("scanDelete", #"{"stable_id":"note-1","attachment_id":"gallery-1","page_id":"page-1","previous_index":"1","applied_page_order":["page-2"]}"#).restoreAction(),
+                       .scanUndelete(noteID: "note-1", attachmentID: "gallery-1", pageID: "page-1", index: 1,
+                                     expectedPageIDs: ["page-2"]))
+        XCTAssertEqual(try entry("scanAppend", #"{"stable_id":"note-1","attachment_id":"gallery-1","created_page_ids":["page-3"],"applied_page_order":["page-1","page-2","page-3"]}"#).restoreAction(),
+                       .scanDeletePages(noteID: "note-1", attachmentID: "gallery-1", pageIDs: ["page-3"],
+                                        expectedPageIDs: ["page-1", "page-2", "page-3"]))
+        let identityCrop = ScanCrop(bottomLeft: ScanPoint(x: 0, y: 1), bottomRight: ScanPoint(x: 1, y: 1),
+                                    topLeft: ScanPoint(x: 0, y: 0), topRight: ScanPoint(x: 1, y: 0))
+        let insetCrop = ScanCrop(bottomLeft: ScanPoint(x: 0.1, y: 0.9), bottomRight: ScanPoint(x: 0.9, y: 0.9),
+                                 topLeft: ScanPoint(x: 0.1, y: 0.1), topRight: ScanPoint(x: 0.9, y: 0.1))
+        XCTAssertEqual(try entry("scanCrop", #"{"stable_id":"note-1","attachment_id":"gallery-1","page_id":"page-1","previous_crop":"0.0,1.0;1.0,1.0;0.0,0.0;1.0,0.0","crop":"0.1,0.9;0.9,0.9;0.1,0.1;0.9,0.1"}"#).restoreAction(),
+                       .scanCrop(noteID: "note-1", attachmentID: "gallery-1", pageID: "page-1",
+                                 crop: identityCrop, expectedCurrent: insetCrop))
         XCTAssertNil(try entry("renameNote", #"{"stable_id":"note-1"}"#).restoreAction())
+
+        XCTAssertThrowsError(try entry("setQuickNote", #"{"ref":"note-1"}"#).restoreAction()) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "journal_preimage_missing")
+        }
+        XCTAssertThrowsError(try entry("scan_move", #"{"stable_id":"note-1","attachment_id":"gallery-1","page_id":"page-1"}"#).restoreAction()) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "journal_preimage_missing")
+        }
+    }
+
+    func testJournalSettingUndoRequiresAndDecodesExactPostimages() throws {
+        func expectation(_ operation: String, _ json: String) throws -> JournalRestoreExpectation? {
+            let entry = JournalEntry(id: "operation-1", operation: operation, argumentsHash: "",
+                                     arguments: Data(json.utf8), idempotencyKey: nil,
+                                     started: Date(timeIntervalSince1970: 0), outcome: .verified,
+                                     noteID: nil, result: nil, message: nil)
+            return try entry.restoreExpectation()
+        }
+
+        XCTAssertEqual(try expectation("checklistAutoSort", #"{"enabled":true}"#), .checklistAutoSort(true))
+        XCTAssertEqual(try expectation("folderSort", #"{"by":"title","direction":"ascending"}"#),
+                       .folderSort(order: "title", direction: "ascending"))
+        XCTAssertEqual(try expectation("folderDateGrouping", #"{"enabled":false}"#), .folderDateGrouping(type: 1))
+        XCTAssertEqual(try expectation("defaultParagraphStyle", #"{"style":"heading"}"#), .defaultParagraphStyle("heading"))
+        XCTAssertEqual(try expectation("globalNoteSort", #"{"sort":"created"}"#), .globalNoteSort("created"))
+        XCTAssertEqual(try expectation("globalDateGrouping", #"{"enabled":"true"}"#), .globalDateGrouping(true))
+        XCTAssertEqual(try expectation("defaultTextSize", #"{"points":"18"}"#), .defaultTextSize(18))
+        XCTAssertEqual(try expectation("resumeLastQuickNote", #"{"enabled":false}"#), .resumeLastQuickNote(false))
+        XCTAssertEqual(try expectation("autoConvertToTags", #"{"enabled":true}"#), .autoConvertToTags(true))
+        XCTAssertEqual(try expectation("setQuickNote", #"{"enabled":true}"#), .quickNote(true))
+        XCTAssertEqual(try expectation("setDefaultAccount", #"{"account_id":"account-2"}"#), .defaultAccount("account-2"))
+        XCTAssertEqual(try expectation("smartFolderEditRules", #"{"query_json":"{\"tag\":\"new\"}"}"#),
+                       .smartFolderQuery(#"{"tag":"new"}"#))
+        XCTAssertNil(try expectation("scanFilter", #"{"filter":"color"}"#))
+
+        XCTAssertThrowsError(try expectation("globalNoteSort", #"{"previous_sort":"modified"}"#)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "journal_postimage_missing")
+        }
+        XCTAssertThrowsError(try expectation("setQuickNote", #"{"previous_enabled":false}"#)) { error in
+            XCTAssertEqual((error as? NotesError)?.code, "journal_postimage_missing")
+        }
     }
 
     func testSnapshotWritesFullJSONAndMarkdownAndLoadsLatest() throws {
@@ -102,6 +205,22 @@ final class SafetyTests: XCTestCase {
         XCTAssertThrowsError(try ConcurrencyGuard.require(note, ifModified: nil, expectRevision: "old")) { error in
             XCTAssertEqual((error as? NotesError)?.code, "stale_note")
         }
+
+        var enriched = note
+        enriched.attachments = [Attachment(id: "link", typeUTI: "public.url", synapseDataBytes: 321,
+                                           linkPreviewMetadataBytes: 654,
+                                           childAttachments: [Attachment(id: "child", typeUTI: "public.url",
+                                                                          synapseDataBytes: 7,
+                                                                          linkPreviewMetadataBytes: 8)])]
+        var changedCounts = enriched
+        changedCounts.attachments[0].synapseDataBytes = 999
+        changedCounts.attachments[0].linkPreviewMetadataBytes = 1
+        changedCounts.attachments[0].childAttachments?[0].synapseDataBytes = 42
+        XCTAssertEqual(ConcurrencyGuard.revision(enriched), ConcurrencyGuard.revision(changedCounts))
+
+        let legacy = try JSONDecoder().decode(Attachment.self, from: Data(#"{"id":"legacy","typeUTI":"public.url"}"#.utf8))
+        XCTAssertNil(legacy.synapseDataBytes)
+        XCTAssertNil(legacy.linkPreviewMetadataBytes)
     }
 
     func testSnapshotsWithAttachmentsRetainTheRichNoteForNativeRestore() throws {
@@ -220,9 +339,9 @@ final class SafetyTests: XCTestCase {
         let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)
         let commands = try String(contentsOf: root.appendingPathComponent("docs/commands.md"), encoding: .utf8)
         XCTAssertTrue(features.contains("| Version history, diff, undo, and revert | Partial | Partial |"))
-        XCTAssertTrue(features.contains("Native-only snapshots return `native_required` on the scripting engine."))
+        XCTAssertTrue(features.contains("Apple exposes no complete Notes version-history API for earlier edits."))
         XCTAssertTrue(parity.contains("| Version history / diff / revert |"))
-        XCTAssertTrue(parity.contains("| Partial — lossless native snapshot restore"))
+        XCTAssertTrue(parity.contains("| Partial — NotesCLI keeps exact pre-write snapshots for its own writes"))
         XCTAssertTrue(commands.contains("`undo` and `revert` accept a note reference for snapshots or a journal operation ID for a recorded setting or Smart Folder rule preimage."))
         XCTAssertTrue(commands.contains("`--allow-downgrade`"))
     }
@@ -234,12 +353,12 @@ final class SafetyTests: XCTestCase {
             $0.hasPrefix("|") && !$0.hasPrefix("| ---") && !$0.hasPrefix("| Feature")
         }.map { $0.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
         XCTAssertEqual(featureRows.count, 95)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 86)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 87)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 5)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 4)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 66)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 3)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 72)
         XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 8)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 21)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 15)
 
         let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)
         let matrix = parity.components(separatedBy: "## 2. CLI commands")[0]
@@ -249,9 +368,9 @@ final class SafetyTests: XCTestCase {
             line.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }[safe: 6]
         }
         XCTAssertEqual(statuses.count, 139)
-        XCTAssertEqual(statuses.filter { $0.hasPrefix("Done") }.count, 127)
+        XCTAssertEqual(statuses.filter { $0.hasPrefix("Done") }.count, 129)
         XCTAssertEqual(statuses.filter { $0.hasPrefix("Partial") }.count, 2)
-        XCTAssertEqual(statuses.filter { $0.hasPrefix("Not possible") || $0.hasPrefix("Not planned") }.count, 10)
+        XCTAssertEqual(statuses.filter { $0.hasPrefix("Not planned") }.count, 8)
     }
 }
 

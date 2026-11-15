@@ -905,13 +905,27 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
     return applied;
 }
 + (BOOL)deleteRecordingSummaryForAttachment:(NSManagedObject *)attachment error:(NSError **)error {
-    if (!NCRequireObject(attachment, @[@"attachmentModel", @"updateChangeCountWithReason:"],
+    if (!NCRequireObject(attachment, @[@"attachmentModel"],
                          @"deleting recording summary", error)) return NO;
     __block id model = nil;
     if (!NCCatch(@"opening recording summary", error, ^{
         model = [(id<NCSynced>)attachment attachmentModel];
     })) return NO;
-    if (!NCRequireObject(model, @[@"deleteSummaryAndReturnError:"], @"deleting recording summary", error)) return NO;
+    Class audioModelClass = NSClassFromString(@"ICAttachmentAudioModel");
+    if (!audioModelClass || ![model isKindOfClass:audioModelClass]) {
+        if (error) *error = NCError(@"The attachment is not a native recording");
+        return NO;
+    }
+    if (!NCRequireObject(model, @[@"audioDocument", @"deleteSummaryAndReturnError:"],
+                         @"deleting recording summary", error)) return NO;
+    __block id audioDocument = nil;
+    if (!NCCatch(@"opening recording document", error, ^{
+        audioDocument = ((id (*)(id, SEL))objc_msgSend)(model, NSSelectorFromString(@"audioDocument"));
+    })) return NO;
+    if (!audioDocument) {
+        if (error) *error = NCError(@"The recording document is unavailable");
+        return NO;
+    }
     __block BOOL deleted = NO;
     __block NSError *deleteError = nil;
     if (!NCCatch(@"deleting recording summary", error, ^{
@@ -927,7 +941,6 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
         if (error) *error = deleteError;
         return NO;
     }
-    [(id<NCSynced>)attachment updateChangeCountWithReason:@"Deleted recording summary"];
     return YES;
 }
 + (NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {

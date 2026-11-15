@@ -45,6 +45,9 @@ final class CapabilityHostTests: XCTestCase {
         XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "rotate", "note-id", "gallery-id", "page-id", "left"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "move", "note-id", "gallery-id", "page-id", "1"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["scan", "delete", "note-id", "gallery-id", "page-id"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["recording", "clear-summary", "note-id", "recording-id"]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["recording", "add", "note-id", "/tmp/audio.m4a"]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["recording", "create", "--folder", "Notes"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["settings", "default-style", "--json"]))
         XCTAssertTrue(CapabilityHostPolicy.allows([]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["--json", "--no-recent"]))
@@ -69,7 +72,6 @@ final class CapabilityHostTests: XCTestCase {
         XCTAssertFalse(CapabilityHostPolicy.allows(["write-markdown", "note", "--file=/tmp/private.md"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["native-attachment", "file", "note", "--path=/tmp/private"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["mcp", "install", "--client", "codex"]))
-        XCTAssertFalse(CapabilityHostPolicy.allows(["recording", "add", "note", "/tmp/audio.m4a"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["scan", "add", "note", "/tmp/page.png"]))
     }
 

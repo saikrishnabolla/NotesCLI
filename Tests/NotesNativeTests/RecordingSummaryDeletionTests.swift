@@ -28,6 +28,10 @@ final class RecordingSummaryDeletionTests: XCTestCase {
     func testClearVerificationRequiresSummaryRemovalAndPreservedRecordingState() throws {
         let before = state()
         var after = state(summary: nil)
+        after.metadata.topLineSummary = before.metadata.topLineSummary
+        after.metadata.summaryVersion = before.metadata.summaryVersion
+        after.metadata.externalModelAttributionProviderName = nil
+        after.metadata.externalModelAttributionSymbolName = nil
         XCTAssertTrue(after.verifiesClear(from: before))
 
         after.metadata.localSpeakerHandle = "changed"
@@ -35,6 +39,26 @@ final class RecordingSummaryDeletionTests: XCTestCase {
         after = state(summary: nil, words: [])
         XCTAssertFalse(after.verifiesClear(from: before))
         XCTAssertFalse(state().verifiesClear(from: before))
+    }
+
+    func testClearRequiresTheDeletableSummaryAndPreservesTopLineAndVersion() throws {
+        var topLineOnly = state(summary: nil)
+        topLineOnly.metadata.topLineSummary = "Preview"
+        XCTAssertThrowsError(try topLineOnly.requireSummary()) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "recording_summary_not_found")
+        }
+
+        let before = state()
+        var after = state(summary: nil)
+        after.metadata.topLineSummary = before.metadata.topLineSummary
+        after.metadata.summaryVersion = before.metadata.summaryVersion
+        after.metadata.externalModelAttributionProviderName = nil
+        after.metadata.externalModelAttributionSymbolName = nil
+        after.metadata.topLineSummary = "Changed"
+        XCTAssertFalse(after.verifiesClear(from: before))
+        after.metadata.topLineSummary = before.metadata.topLineSummary
+        after.metadata.summaryVersion = 99
+        XCTAssertFalse(after.verifiesClear(from: before))
     }
 
     func testMissingSummaryIsAStableTypedError() {

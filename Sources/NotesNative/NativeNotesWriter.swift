@@ -6773,6 +6773,10 @@ public final class NativeNotesWriter: NotesNativeWriting {
              "attachmentModel", "updateChangeCountWithReason:"],
             of: attachment
         )
+        guard let type = value(attachment, "typeUTI") as? String,
+              type.localizedCaseInsensitiveContains("audio") else {
+            throw NotesError("recording_not_found", "The attachment is not a native recording parent.")
+        }
         guard let children = value(attachment, "subAttachments") as? NSSet, children.count > 0 else {
             throw NotesError("recording_not_found", "The attachment is not an active recording parent.")
         }
@@ -6811,7 +6815,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             operation?.attachmentType = value(attachment, "typeUTI") as? String
             do {
                 try NCNotesRuntime.deleteRecordingSummary(for: attachment)
-                try save(context, notes: [target])
+                operation?.committed = true
             } catch {
                 context.rollback()
                 throw (error as? NotesError) ?? nativeError(error)

@@ -368,9 +368,15 @@ final class SafetyTests: XCTestCase {
             line.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }[safe: 6]
         }
         XCTAssertEqual(statuses.count, 139)
-        XCTAssertEqual(statuses.filter { $0.hasPrefix("Done") }.count, 129)
-        XCTAssertEqual(statuses.filter { $0.hasPrefix("Partial") }.count, 2)
-        XCTAssertEqual(statuses.filter { $0.hasPrefix("Not planned") }.count, 8)
+        let doneCount = statuses.filter { $0.hasPrefix("Done") }.count
+        let partialCount = statuses.filter { $0.hasPrefix("Partial") }.count
+        let notPlannedCount = statuses.filter { $0.hasPrefix("Not planned") }.count
+        XCTAssertEqual(doneCount, 129)
+        XCTAssertEqual(partialCount, 2)
+        XCTAssertEqual(notPlannedCount, 8)
+
+        let summaryLines = parity.split(separator: "\n").filter { $0.hasPrefix("Status summary: ") }.map(String.init)
+        XCTAssertEqual(summaryLines, ["Status summary: \(doneCount) Done, \(partialCount) Partial, and \(notPlannedCount) Not planned."])
     }
 }
 

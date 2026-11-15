@@ -8,7 +8,7 @@ Additional projects with public usage reports include [sirmews (#5)](https://git
 
 Phases: **1** read; **2** scripting write; **3** opt-in private-framework rich write; **4** MCP/agent; **5** sync/advanced. The status column records the current NotesCLI command or MCP tool and names any remaining gap. Baseline: [NotesReading/NotesWriting](../Sources/NotesCore/Backend.swift), [document model](../Sources/NotesCore/Document.swift), [models](../Sources/NotesCore/Model.swift). Combined cells describe a capability family; the limits column distinguishes implementations.
 
-Status summary: 128 Done, 2 Partial, and 9 Not planned.
+Status summary: 129 Done, 2 Partial, and 8 Not planned.
 
 | Capability | Which tools have it (repo names) | How they do it | notescli phase | Notes (limits seen) | Status |
 | --- | --- | --- | --- | --- | --- |

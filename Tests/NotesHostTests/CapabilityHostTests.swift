@@ -49,6 +49,9 @@ final class CapabilityHostTests: XCTestCase {
         XCTAssertFalse(CapabilityHostPolicy.allows(["recording", "add", "note-id", "/tmp/audio.m4a"]))
         XCTAssertFalse(CapabilityHostPolicy.allows(["recording", "create", "--folder", "Notes"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["settings", "default-style", "--json"]))
+        for name in ["show", "view", "query-date-grouping", "auto-format-markdown", "dark-backgrounds", "show-note-count"] {
+            XCTAssertTrue(CapabilityHostPolicy.allows(["settings", name, "--json"]), name)
+        }
         XCTAssertTrue(CapabilityHostPolicy.allows([]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["--json", "--no-recent"]))
         XCTAssertTrue(CapabilityHostPolicy.allows(["doctor", "--for-agent", "--json"]))

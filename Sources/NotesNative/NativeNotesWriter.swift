@@ -3917,11 +3917,22 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    /// Reads `DefaultNotesAccount` from Notes' group container. NotesShared's own default-account API reads and
+    /// writes the unsandboxed shadow domain in this process, which Notes never reads.
     public func defaultAccountIdentifier() throws -> String {
-        try performRead { _ in
-            do { return try NCNotesRuntime.defaultAccountIdentifier() }
-            catch { throw nativeError(error) }
+        try performRead { context in try resolvedDefaultAccountIdentifier(context) }
+    }
+
+    private func resolvedDefaultAccountIdentifier(_ context: NSManagedObjectContext) throws -> String {
+        let stored: String
+        do { stored = try NCNotesRuntime.storedDefaultAccountIdentifier() }
+        catch { throw nativeError(error) }
+        if !stored.isEmpty,
+           try fetch("ICAccount", predicate: NSPredicate(format: "identifier ==[c] %@", stored), in: context, limit: 1).first != nil {
+            return stored
         }
+        do { return try NCNotesRuntime.frameworkDefaultAccountIdentifier() }
+        catch { throw nativeError(error) }
     }
 
     public func setDefaultAccount(_ identifier: String) throws -> NativeWriteResult {
@@ -3929,16 +3940,16 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func setDefaultAccount(_ identifier: String, expectedCurrent: String?) throws -> NativeWriteResult {
-        try performWrite { _ in
-            do {
-                let current = try NCNotesRuntime.defaultAccountIdentifier()
-                try requireUndoIdentifier(current, expected: expectedCurrent, label: "Default Notes account")
-                try NCNotesRuntime.setDefaultAccountIdentifier(identifier); operation?.committed = true
+        try performWrite { context in
+            guard try fetch("ICAccount", predicate: NSPredicate(format: "identifier ==[c] %@", identifier), in: context, limit: 1).first != nil else {
+                throw NotesError("account_not_found", "The account was not found.")
             }
-            catch let error as NotesError { throw error }
+            let current = try resolvedDefaultAccountIdentifier(context)
+            try requireUndoIdentifier(current, expected: expectedCurrent, label: "Default Notes account")
+            do { try NCNotesRuntime.setDefaultAccountIdentifier(identifier); operation?.committed = true }
             catch { throw nativeError(error) }
             let readback: String
-            do { readback = try NCNotesRuntime.defaultAccountIdentifier() }
+            do { readback = try NCNotesRuntime.storedDefaultAccountIdentifier() }
             catch { throw nativeError(error) }
             return globalResult(native: ["accountID": readback], nativeVerified: readback.caseInsensitiveCompare(identifier) == .orderedSame)
         }
@@ -3991,7 +4002,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     private static let noteTextSizes = [10, 12, 14, 18, 24]
 
     public func notesSettings() throws -> NativeNotesSettings {
-        try performRead { _ in
+        try performRead { context in
             do {
                 let sortValue = try NCNotesRuntime.currentNoteListSortType().intValue
                 guard let sort = NativeGlobalNoteSort(value: sortValue) else {
@@ -4005,12 +4016,82 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 guard Self.noteTextSizes.indices.contains(zoom) else {
                     throw NotesError("unsupported_text_size", "Notes returned unknown default text size index \(zoom).")
                 }
+                let styleValue = try NCNotesRuntime.noteDefaultNamedStyle().intValue
+                guard let style = NativeDefaultParagraphStyle(value: styleValue) else {
+                    throw NotesError("unsupported_default_style", "Notes returned unknown default paragraph style \(styleValue).")
+                }
+                let group = try NCNotesRuntime.notesPreferences(inApplicationDomain: false)
+                let app = try NCNotesRuntime.notesPreferences(inApplicationDomain: true)
+                let preferences = try NativeNotesPreference.allCases.map { setting in
+                    NativePreferenceValue(setting: setting,
+                                          state: try setting.state(stored: (setting.inApplicationDomain ? app : group)[setting.key]))
+                }
                 return NativeNotesSettings(sort: sort, groupsByDate: dateHeaders == 2,
                                            defaultTextSize: Self.noteTextSizes[zoom],
                                            resumesLastQuickNote: try NCNotesRuntime.shouldResumeLastQuickNote().boolValue,
-                                           autoConvertsToTags: try NCNotesRuntime.shouldAutoConvertToTag().boolValue)
+                                           autoConvertsToTags: try NCNotesRuntime.shouldAutoConvertToTag().boolValue,
+                                           defaultParagraphStyle: style,
+                                           checklistAutoSort: (app["ICChecklistAutoSortEnabledDefaultsKey"] as? NSNumber)?.boolValue ?? false,
+                                           defaultAccountID: try resolvedDefaultAccountIdentifier(context),
+                                           preferences: preferences,
+                                           noteContainerView: try Self.noteContainerView(app))
             } catch let error as NotesError { throw error }
             catch { throw nativeError(error) }
+        }
+    }
+
+    /// Reads Notes' window-wide list or gallery mode from the window state Notes last saved.
+    /// Notes rewrites this archive from its live window, so it is read-only here.
+    public func noteContainerView() throws -> NativeNoteContainerViewState? {
+        do { return try Self.noteContainerView(NCNotesRuntime.notesPreferences(inApplicationDomain: true)) }
+        catch let error as NotesError { throw error }
+        catch { throw nativeError(error) }
+    }
+
+    static func noteContainerView(_ app: [String: Any]) throws -> NativeNoteContainerViewState? {
+        guard let archive = app["windowStateArchive"] as? [String: Any] else { return nil }
+        guard let raw = archive["currentNoteContainerViewMode"] as? NSNumber else { return nil }
+        guard let mode = NativeNoteContainerViewState.mode(raw.intValue) else {
+            throw NotesError("unsupported_view_mode", "Notes saved unknown list or gallery mode \(raw.intValue).")
+        }
+        let preferred = (archive["kICWindowStatePreferredNoteContainerViewMode"] as? NSNumber)
+            .flatMap { NativeNoteContainerViewState.mode($0.intValue) }
+        return NativeNoteContainerViewState(mode: mode, preferredMode: preferred,
+                                            galleryItemSizeRatio: (archive["gridViewNoteItemSizeRatio"] as? NSNumber)?.doubleValue)
+    }
+
+    public func notesPreference(_ setting: NativeNotesPreference) throws -> NativePreferenceValue {
+        do {
+            let values = try NCNotesRuntime.notesPreferences(inApplicationDomain: setting.inApplicationDomain)
+            return NativePreferenceValue(setting: setting, state: try setting.state(stored: values[setting.key]))
+        } catch let error as NotesError { throw error }
+        catch { throw nativeError(error) }
+    }
+
+    public func setNotesPreference(_ setting: NativeNotesPreference, enabled: Bool) throws -> NativeWriteResult {
+        try setNotesPreference(setting, state: enabled ? .on : .off, expectedCurrent: nil)
+    }
+
+    /// Writes one container preference and verifies the exact stored value. `.default` removes the stored value;
+    /// only undo uses it, to return a preference that had no stored value.
+    public func setNotesPreference(_ setting: NativeNotesPreference, state: NativePreferenceState,
+                                   expectedCurrent: NativePreferenceState?) throws -> NativeWriteResult {
+        try performWrite { _ in
+            let current = try notesPreference(setting).state
+            try requireUndoState(current, expected: expectedCurrent, label: setting.rawValue)
+            do {
+                switch state {
+                case .default: try NCNotesRuntime.removeNotesPreference(setting.key, inApplicationDomain: setting.inApplicationDomain)
+                case .on, .off:
+                    try NCNotesRuntime.setNotesPreference(setting.key, integerValue: setting.storedValue(enabled: state == .on),
+                                                          inApplicationDomain: setting.inApplicationDomain)
+                }
+                operation?.committed = true
+            } catch { throw nativeError(error) }
+            let readback = try notesPreference(setting)
+            return globalResult(native: ["setting": setting.rawValue, "state": readback.state.rawValue,
+                                         "enabled": String(readback.enabled)],
+                                nativeVerified: readback.state == state)
         }
     }
 

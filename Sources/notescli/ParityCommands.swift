@@ -188,7 +188,7 @@ struct QuickNoteSetCommand: ParsableCommand {
     }
 }
 
-private enum FakeParityWrite {
+enum FakeParityWrite {
     static func result(_ note: Note, storing kind: String) -> WriteResult {
         WriteResult(outcome: .unverified, noteID: note.summary.id,
                     message: "The fake backend does not store \(kind); Apple Notes was not changed.")
@@ -198,6 +198,12 @@ private enum FakeParityWrite {
         WriteResult(outcome: .unverified, folderID: folder.id,
                     message: "The fake backend does not store \(kind); Apple Notes was not changed.")
     }
+
+    static let settings = NativeNotesSettings(
+        sort: .modified, groupsByDate: true, defaultTextSize: 12, resumesLastQuickNote: true, autoConvertsToTags: true,
+        defaultParagraphStyle: .title, checklistAutoSort: false, defaultAccountID: "fake-account",
+        preferences: NativeNotesPreference.allCases.map { NativePreferenceValue(setting: $0, state: .default) },
+        noteContainerView: NativeNoteContainerViewState(mode: "list", preferredMode: nil, galleryItemSizeRatio: 1))
 
     static func setting(_ kind: String) -> WriteResult {
         WriteResult(outcome: .unverified,
@@ -411,7 +417,8 @@ struct SettingsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "settings", subcommands: [
         SettingsShowCommand.self, GlobalNoteSortCommand.self, GlobalDateGroupingCommand.self,
         DefaultTextSizeCommand.self, ResumeQuickNoteCommand.self, AutoConvertTagsCommand.self,
-        DefaultParagraphStyleCommand.self
+        DefaultParagraphStyleCommand.self, QueryDateGroupingCommand.self, AutoFormatMarkdownCommand.self,
+        DarkBackgroundsCommand.self, ShowNoteCountCommand.self, NoteContainerViewCommand.self
     ])
 }
 
@@ -441,18 +448,101 @@ struct SettingsShowCommand: ParsableCommand {
     func run() throws {
         let backend = try options.backends()
         _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
-        let settings = backend.isFake ? NativeNotesSettings(sort: .modified, groupsByDate: true,
-                                                              defaultTextSize: 12, resumesLastQuickNote: true,
-                                                              autoConvertsToTags: true)
-                                      : try NativeNotesWriter().notesSettings()
+        let settings = backend.isFake ? FakeParityWrite.settings : try NativeNotesWriter().notesSettings()
         if options.json { try Output.json(settings) }
         else {
-            Output.table(["SETTING", "VALUE"], [
+            var rows = [
                 ["sort", settings.sort.rawValue], ["group-by-date", String(settings.groupsByDate)],
                 ["default-text-size", String(settings.defaultTextSize)],
-                ["resume-last-quick-note", String(settings.resumesLastQuickNote)],
-                ["auto-convert-tags", String(settings.autoConvertsToTags)]
-            ])
+                ["resume-quick-note", String(settings.resumesLastQuickNote)],
+                ["auto-convert-tags", String(settings.autoConvertsToTags)],
+                ["default-style", settings.defaultParagraphStyle?.rawValue ?? ""],
+                ["checklist-auto-sort", settings.checklistAutoSort.map(String.init) ?? ""],
+                ["default-account", settings.defaultAccountID ?? ""],
+            ]
+            for setting in NativeNotesPreference.allCases {
+                rows.append([setting.rawValue, settings[setting].map(preferenceText) ?? ""])
+            }
+            rows.append(["view", settings.noteContainerView?.mode ?? "unknown"])
+            Output.table(["SETTING", "VALUE"], rows)
+        }
+    }
+}
+
+private func preferenceText(_ value: NativePreferenceValue) -> String {
+    value.state == .default ? "\(value.enabled) (Notes default)" : String(value.enabled)
+}
+
+/// Reads or changes one simple Notes preference stored in Notes' real container files.
+private func runPreferenceCommand(_ setting: NativeNotesPreference, enabled: Bool?, options: GlobalOptions,
+                                  write: WriteOptions) throws {
+    let backend = try options.backends()
+    _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+    let current = backend.isFake ? NativePreferenceValue(setting: setting, state: .default)
+                                 : try NativeNotesWriter().notesPreference(setting)
+    guard let enabled else {
+        if options.json { try Output.json(current) }
+        else { Output.table(["SETTING", "VALUE"], [[setting.rawValue, preferenceText(current)]]) }
+        return
+    }
+    let state: NativePreferenceState = enabled ? .on : .off
+    try runSettingWrite(options: options, write: write, operation: "notesPreference",
+                        arguments: ["setting": setting.rawValue, "state": state.rawValue,
+                                    "previous_state": current.state.rawValue],
+                        description: "the \(setting.rawValue) setting") {
+        try NativeNotesWriter().setNotesPreference(setting, state: state, expectedCurrent: nil)
+    }
+}
+
+struct QueryDateGroupingCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "query-date-grouping",
+        abstract: "Read or change date grouping for tag, search, and Smart Folder results.")
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Option(help: "Set true or false.") var enabled: Bool?
+    func run() throws { try runPreferenceCommand(.queryDateGrouping, enabled: enabled, options: options, write: write) }
+}
+
+struct AutoFormatMarkdownCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "auto-format-markdown",
+        abstract: "Read or change whether Notes formats Markdown as you type.")
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Option(help: "Set true or false.") var enabled: Bool?
+    func run() throws { try runPreferenceCommand(.autoFormatMarkdown, enabled: enabled, options: options, write: write) }
+}
+
+struct DarkBackgroundsCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "dark-backgrounds",
+        abstract: "Read or change \"Use dark backgrounds for note content\".")
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Option(help: "Set true or false.") var enabled: Bool?
+    func run() throws { try runPreferenceCommand(.darkBackgrounds, enabled: enabled, options: options, write: write) }
+}
+
+struct ShowNoteCountCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "show-note-count",
+        abstract: "Read or change whether the folder list shows note counts.")
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Option(help: "Set true or false.") var enabled: Bool?
+    func run() throws { try runPreferenceCommand(.showNoteCount, enabled: enabled, options: options, write: write) }
+}
+
+struct NoteContainerViewCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "view",
+        abstract: "Read Notes' window-wide list or gallery mode from its last saved window state.")
+    @OptionGroup var options: GlobalOptions
+    func run() throws {
+        let backend = try options.backends()
+        _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        let value = backend.isFake ? FakeParityWrite.settings.noteContainerView : try NativeNotesWriter().noteContainerView()
+        guard let value else { throw NotesError("view_state_unavailable", "Notes has not saved a main window state yet.") }
+        if options.json { try Output.json(value) }
+        else {
+            Output.table(["MODE", "PREFERRED", "GALLERY ITEM SIZE"],
+                         [[value.mode, value.preferredMode ?? "", value.galleryItemSizeRatio.map { String($0) } ?? ""]])
         }
     }
 }
@@ -574,7 +664,7 @@ struct DefaultParagraphStyleCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "default-style", abstract: "Read or change the style used for new notes.")
     @OptionGroup var options: GlobalOptions
     @OptionGroup var write: WriteOptions
-    @Option(help: "Set title, heading, subheading, body, or monospaced.") var set: NativeDefaultParagraphStyle?
+    @Option(help: "Set title, heading, subheading, or body.") var set: NativeDefaultParagraphStyle?
 
     func run() throws {
         let backend = try set == nil ? options.backends() : options.writable()

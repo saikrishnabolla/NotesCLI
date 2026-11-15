@@ -54,6 +54,8 @@ table_create  table_set  table_add_row  table_add_column
 table_remove_row  table_remove_column  duplicate_note  restore_note  move_folder
 recording_add  recording_create  recording_transcribe
 get_notes_settings  set_auto_convert_tags  evaluate_math  insert_math_result
+get_note_container_view  set_query_date_grouping  set_auto_format_markdown
+set_dark_backgrounds  set_show_note_count
 ```
 
 The recording write tools accept `transcript_path` for timed transcript JSON produced by `notescli recording transcribe-file`. Use it instead of `transcribe`.

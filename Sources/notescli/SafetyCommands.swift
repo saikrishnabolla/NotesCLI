@@ -473,7 +473,7 @@ private func restore(entry: JournalEntry, action: JournalRestoreAction, options:
     let paths: [[String]]
     switch action {
     case .checklistAutoSort, .defaultParagraphStyle, .globalNoteSort, .globalDateGrouping,
-         .defaultTextSize, .resumeLastQuickNote, .autoConvertToTags:
+         .defaultTextSize, .resumeLastQuickNote, .autoConvertToTags, .notesPreference:
         target = "Notes settings"; paths = []
     case .defaultAccount(let identifier):
         target = identifier; paths = []
@@ -541,6 +541,14 @@ private func restore(entry: JournalEntry, action: JournalRestoreAction, options:
         case .autoConvertToTags(let enabled):
             guard case .autoConvertToTags(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
             value = try writer.setAutoConvertToTags(enabled, expectedCurrent: expected)
+        case .notesPreference(let settingName, let stateName):
+            guard let setting = NativeNotesPreference(rawValue: settingName),
+                  let state = NativePreferenceState(rawValue: stateName) else {
+                throw NotesError("invalid_journal", "The recorded Notes preference preimage is invalid.")
+            }
+            guard case .notesPreference(let expectedName)? = expectation,
+                  let expected = NativePreferenceState(rawValue: expectedName) else { throw unsafeJournalExpectation(entry) }
+            value = try writer.setNotesPreference(setting, state: state, expectedCurrent: expected)
         case .quickNote(let noteID, let enabled):
             guard case .quickNote(let expected)? = expectation else { throw unsafeJournalExpectation(entry) }
             value = try writer.setQuickNote(noteID, enabled: enabled, expectedCurrent: expected,

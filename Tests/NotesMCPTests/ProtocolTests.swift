@@ -121,7 +121,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 149)
+        XCTAssertEqual(nativeTools.count, 154)
         for name in ["ocr_set", "image_labels_set", "attachment_markup_inspect", "attachment_markup_export",
                      "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear",
                      "handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
@@ -152,9 +152,14 @@ final class ProtocolTests: XCTestCase {
                      "set_default_paragraph_style", "get_notes_settings", "set_global_note_sort",
                      "set_global_date_grouping", "set_default_text_size", "set_resume_last_quick_note", "set_auto_convert_tags",
                      "create_quick_note", "set_quick_note", "ocr_attachment", "map_add", "scan_add",
-                     "scan_page_state", "scan_filter", "scan_rotate", "scan_crop", "scan_move", "scan_delete", "scan_append"] {
+                     "scan_page_state", "scan_filter", "scan_rotate", "scan_crop", "scan_move", "scan_delete", "scan_append",
+                     "get_note_container_view", "set_query_date_grouping", "set_auto_format_markdown",
+                     "set_dark_backgrounds", "set_show_note_count"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
+        let styleTool = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "set_default_paragraph_style" })
+        let styleProperties = try XCTUnwrap((styleTool["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
+        XCTAssertEqual((styleProperties["style"] as? [String: Any])?["enum"] as? [String], ["title", "heading", "subheading", "body"])
         let scanCrop = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "scan_crop" })
         let scanCropProperties = try XCTUnwrap((scanCrop["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
         XCTAssertEqual((scanCropProperties["detect_edges"] as? [String: Any])?["type"] as? String, "boolean")
@@ -759,6 +764,8 @@ final class ProtocolTests: XCTestCase {
         var cropDispatch: [String: Any]?
         var deleteDispatch: [String: Any]?
         var undoSortDispatch: [String: Any]?
+        var preferenceWrite: [String: Any]?
+        var preferenceUndoDispatch: [String: Any]?
         let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
             switch tool {
             case "journal_get_checklist_auto_sort": return try MCPNativeResult(value: false)
@@ -786,6 +793,14 @@ final class ProtocolTests: XCTestCase {
                 return try MCPNativeResult(
                     result: WriteResult(outcome: .verified, noteID: NoteID(uuid: quickNoteID)),
                     value: ["pageAttachmentIDs": ["page-3"]])
+            case "_journal_get_notes_preference":
+                return try MCPNativeResult(value: NativePreferenceValue(setting: .darkBackgrounds, state: .default))
+            case "set_dark_backgrounds":
+                preferenceWrite = arguments
+                return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+            case "_journal_set_notes_preference":
+                preferenceUndoDispatch = arguments
+                return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
             case "set_global_note_sort":
                 if arguments["expected_sort"] != nil { undoSortDispatch = arguments }
                 return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
@@ -804,6 +819,7 @@ final class ProtocolTests: XCTestCase {
         _ = try call(server, "set_default_text_size", ["points": 18])
         _ = try call(server, "set_resume_last_quick_note", ["enabled": false])
         _ = try call(server, "set_auto_convert_tags", ["enabled": false])
+        _ = try call(server, "set_dark_backgrounds", ["enabled": false])
         let quickNote = try call(server, "set_quick_note", ["ref": quickNoteID, "enabled": true])
         XCTAssertNotEqual(quickNote["isError"] as? Bool, true, "\(quickNote)")
         _ = try call(server, "smart_folder_edit_rules", ["ref": "Smart", "query_json": #"{"tag":"new"}"#, "expected_count": 1])
@@ -859,6 +875,15 @@ final class ProtocolTests: XCTestCase {
             expectedPageIDs: ["page-2", "page-1", "page-3"])), "\(actions)")
 
         let sortEntry = try XCTUnwrap(entries.first { $0.operation == "set_global_note_sort" })
+        XCTAssertTrue(actions.contains(.notesPreference(setting: "dark-backgrounds", state: "default")), "\(actions)")
+        let preferenceEntry = try XCTUnwrap(entries.first { $0.operation == "set_dark_backgrounds" })
+        XCTAssertEqual(try preferenceEntry.restoreExpectation(), .notesPreference("off"))
+        XCTAssertEqual(preferenceWrite?["enabled"] as? Bool, false)
+        let preferenceUndo = try call(server, "undo", ["operation_id": preferenceEntry.id])
+        XCTAssertNotEqual(preferenceUndo["isError"] as? Bool, true, "\(preferenceUndo)")
+        XCTAssertEqual(preferenceUndoDispatch?["setting"] as? String, "dark-backgrounds")
+        XCTAssertEqual(preferenceUndoDispatch?["state"] as? String, "default")
+        XCTAssertEqual(preferenceUndoDispatch?["expected_state"] as? String, "off")
         let undo = try call(server, "undo", ["operation_id": sortEntry.id])
         XCTAssertNotEqual(undo["isError"] as? Bool, true, "\(undo)")
         XCTAssertEqual(undoSortDispatch?["sort"] as? String, "modified")

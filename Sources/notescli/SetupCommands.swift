@@ -266,6 +266,39 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         return try MCPNativeResult(value: ["style": style.rawValue, "value": String(style.value)])
     case "get_notes_settings":
         return try MCPNativeResult(value: writer.notesSettings())
+    case "get_note_container_view":
+        guard let view = try writer.noteContainerView() else {
+            throw NotesError("view_state_unavailable", "Notes has not saved a main window state yet.")
+        }
+        return try MCPNativeResult(value: view)
+    case "_journal_get_notes_preference":
+        guard let setting = NativeNotesPreference(rawValue: string("setting") ?? "") else {
+            throw NotesError("invalid_setting", "Unknown Notes preference.")
+        }
+        return try MCPNativeResult(value: writer.notesPreference(setting))
+    case "set_query_date_grouping", "set_auto_format_markdown", "set_dark_backgrounds", "set_show_note_count",
+         "_journal_set_notes_preference":
+        let name = tool == "_journal_set_notes_preference" ? string("setting") : MCPServer.notesPreferenceTools[tool]
+        guard let setting = NativeNotesPreference(rawValue: name ?? "") else {
+            throw NotesError("invalid_setting", "Unknown Notes preference.")
+        }
+        let state: NativePreferenceState
+        if tool == "_journal_set_notes_preference" {
+            guard let parsed = NativePreferenceState(rawValue: string("state") ?? "") else {
+                throw NotesError("invalid_journal", "The recorded Notes preference state is invalid.")
+            }
+            state = parsed
+        } else {
+            guard let enabled = boolean("enabled") else { throw NotesError("invalid_arguments", "enabled must be true or false.") }
+            state = enabled ? .on : .off
+        }
+        let expected = try string("expected_state").map { value -> NativePreferenceState in
+            guard let parsed = NativePreferenceState(rawValue: value) else {
+                throw NotesError("invalid_journal", "The recorded Notes preference result is invalid.")
+            }
+            return parsed
+        }
+        return try result(writer.setNotesPreference(setting, state: state, expectedCurrent: expected))
     case "set_global_note_sort":
         guard let sort = NativeGlobalNoteSort(rawValue: string("sort") ?? "") else {
             throw NotesError("invalid_global_sort", "Use modified, created, or title.")
@@ -400,7 +433,7 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
                                                        expectedCurrentType: integer("expected_type"), allowShared: allowShared))
     case "set_default_paragraph_style":
         guard let style = NativeDefaultParagraphStyle(rawValue: string("style") ?? "") else {
-            throw NotesError("invalid_style", "Use title, heading, subheading, body, or monospaced.")
+            throw NotesError("invalid_style", "Use title, heading, subheading, or body.")
         }
         let expected = try string("expected_style").map { value -> NativeDefaultParagraphStyle in
             guard let parsed = NativeDefaultParagraphStyle(rawValue: value) else {

@@ -478,7 +478,54 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(format.highlight?.notesValue, 4)
         XCTAssertEqual(NativeDefaultParagraphStyle.title.value, 0)
         XCTAssertEqual(NativeDefaultParagraphStyle.body.value, 3)
-        XCTAssertEqual(NativeDefaultParagraphStyle(value: 4), .monospaced)
+        XCTAssertNil(NativeDefaultParagraphStyle(value: 4))
+        XCTAssertEqual(NativeDefaultParagraphStyle.allCases.map(\.rawValue), ["title", "heading", "subheading", "body"])
+    }
+
+    func testNotesPreferencesMapStoredValuesToSettingStates() throws {
+        XCTAssertEqual(NativeNotesPreference.allCases.map(\.key),
+                       ["kICQueryDateHeadersTypeKey", "ICShouldAutoFormatMarkdownDefaultsKey",
+                        "alwaysShowLightContent", "showsNoteCount"])
+        XCTAssertEqual(NativeNotesPreference.allCases.map(\.inApplicationDomain), [false, false, true, true])
+        let stored: [(NativeNotesPreference, Bool, Int)] = [
+            (.queryDateGrouping, true, 2), (.queryDateGrouping, false, 1),
+            (.autoFormatMarkdown, true, 1), (.autoFormatMarkdown, false, 0),
+            (.darkBackgrounds, true, 0), (.darkBackgrounds, false, 1),
+            (.showNoteCount, true, 1), (.showNoteCount, false, 0),
+        ]
+        for (setting, enabled, value) in stored {
+            XCTAssertEqual(setting.storedValue(enabled: enabled), value, setting.rawValue)
+            XCTAssertEqual(try setting.state(stored: NSNumber(value: value)), enabled ? .on : .off, setting.rawValue)
+            XCTAssertEqual(try setting.state(stored: nil), .default)
+        }
+        XCTAssertEqual(try NativeNotesPreference.queryDateGrouping.state(stored: NSNumber(value: 0)), .default)
+        XCTAssertEqual(NativePreferenceValue(setting: .darkBackgrounds, state: .default).enabled, true)
+        XCTAssertEqual(NativePreferenceValue(setting: .showNoteCount, state: .off).enabled, false)
+        XCTAssertThrowsError(try NativeNotesPreference.queryDateGrouping.state(stored: NSNumber(value: 3))) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "unsupported_preference")
+        }
+        XCTAssertThrowsError(try NativeNotesPreference.showNoteCount.state(stored: "yes")) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "unsupported_preference")
+        }
+    }
+
+    func testNoteContainerViewReadsTheSavedWindowState() throws {
+        let saved: [String: Any] = ["windowStateArchive": [
+            "currentNoteContainerViewMode": NSNumber(value: 1),
+            "kICWindowStatePreferredNoteContainerViewMode": NSNumber(value: -1),
+            "gridViewNoteItemSizeRatio": NSNumber(value: 1.5),
+        ]]
+        XCTAssertEqual(try NativeNotesWriter.noteContainerView(saved),
+                       NativeNoteContainerViewState(mode: "gallery", preferredMode: nil, galleryItemSizeRatio: 1.5))
+        XCTAssertNil(try NativeNotesWriter.noteContainerView([:]))
+        let list: [String: Any] = ["windowStateArchive": ["currentNoteContainerViewMode": NSNumber(value: 0),
+                                                          "kICWindowStatePreferredNoteContainerViewMode": NSNumber(value: 1)]]
+        XCTAssertEqual(try NativeNotesWriter.noteContainerView(list),
+                       NativeNoteContainerViewState(mode: "list", preferredMode: "gallery", galleryItemSizeRatio: nil))
+        let unknown: [String: Any] = ["windowStateArchive": ["currentNoteContainerViewMode": NSNumber(value: 7)]]
+        XCTAssertThrowsError(try NativeNotesWriter.noteContainerView(unknown)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "unsupported_view_mode")
+        }
     }
 
     func testGlobalNoteSortParsesNamesAndNotesValues() throws {

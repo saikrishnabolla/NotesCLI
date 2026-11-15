@@ -1274,6 +1274,58 @@ static BOOL NCSetPreferenceAtURL(NSURL *url, NSString *name, NSString *key, id v
     return YES;
 }
 
+static NSURL *NCNotesShadowGroupPreferencesURL(void) {
+    return [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:
+        @"Library/Preferences/group.com.apple.notes.plist"]];
+}
+
+static BOOL NCRemovePreferenceAtURL(NSURL *url, NSString *name, NSString *key, NSError **error) {
+    NSError *readError = nil;
+    NSDictionary *before = NCPreferencesAtURL(url, name, &readError);
+    if (!before) { if (error) *error = readError; return NO; }
+    if (before[key] == nil) return YES;
+    NSTask *task = [NSTask new];
+    NSPipe *errors = [NSPipe pipe];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/defaults"];
+    task.arguments = @[@"delete", url.URLByDeletingPathExtension.path, key];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = errors;
+    @try { [task launch]; [task waitUntilExit]; }
+    @catch (NSException *exception) {
+        if (error) *error = NCError([NSString stringWithFormat:@"Could not remove the %@ preference %@: %@", name, key, exception.reason ?: exception.name]);
+        return NO;
+    }
+    if (task.terminationStatus != 0) {
+        NSData *data = [errors.fileHandleForReading readDataToEndOfFile];
+        NSString *message = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"defaults failed";
+        if (error) *error = NCError([NSString stringWithFormat:@"Could not remove the %@ preference %@: %@", name, key, message]);
+        return NO;
+    }
+    NSDictionary *after = NCPreferencesAtURL(url, name, &readError);
+    if (!after) { if (error) *error = readError; return NO; }
+    if (after[key] != nil) {
+        if (error) *error = NCError([NSString stringWithFormat:@"%@ preference %@ was still present after removal", name, key]);
+        return NO;
+    }
+    return YES;
+}
+
++ (NSDictionary<NSString *, id> *)notesPreferencesInApplicationDomain:(BOOL)application error:(NSError **)error {
+    return application ? NCNotesApplicationPreferences(error) : NCNotesGroupPreferences(error);
+}
++ (NSDictionary<NSString *, id> *)shadowNotesGroupPreferences:(NSError **)error {
+    if (![NSFileManager.defaultManager fileExistsAtPath:NCNotesShadowGroupPreferencesURL().path]) return @{};
+    return NCPreferencesAtURL(NCNotesShadowGroupPreferencesURL(), @"shadow Notes group", error);
+}
++ (BOOL)setNotesPreference:(NSString *)key integerValue:(NSInteger)value inApplicationDomain:(BOOL)application error:(NSError **)error {
+    return NCSetPreferenceAtURL(application ? NCNotesApplicationPreferencesURL() : NCNotesGroupPreferencesURL(),
+                                application ? @"Notes application" : @"Notes group", key, @(value), error);
+}
++ (BOOL)removeNotesPreference:(NSString *)key inApplicationDomain:(BOOL)application error:(NSError **)error {
+    return NCRemovePreferenceAtURL(application ? NCNotesApplicationPreferencesURL() : NCNotesGroupPreferencesURL(),
+                                   application ? @"Notes application" : @"Notes group", key, error);
+}
+
 static BOOL NCSetNotesGroupPreference(NSString *key, id value, NSError **error) {
     return NCSetPreferenceAtURL(NCNotesGroupPreferencesURL(), @"Notes group", key, value, error);
 }
@@ -1293,8 +1345,9 @@ static BOOL NCSetNotesApplicationPreference(NSString *key, id value, NSError **e
     if (!NCLoad(error)) return nil;
     Class cls = NSClassFromString(@"ICHashtagController");
     if (!NCRequireClass(cls, @[@"shouldAutoConvertToTag"], @"reading automatic tag conversion", error)) return nil;
-    id stored = NCNotesGroupPreference(@"EnableSmartTags", error);
-    if (error && *error) return nil;
+    NSError *readError = nil;
+    id stored = NCNotesGroupPreference(@"EnableSmartTags", &readError);
+    if (readError) { if (error) *error = readError; return nil; }
     return [stored respondsToSelector:@selector(boolValue)] ? @([stored boolValue]) : @YES;
 }
 + (BOOL)setShouldAutoConvertToTag:(BOOL)enabled error:(NSError **)error {
@@ -1353,7 +1406,21 @@ static BOOL NCSetNotesApplicationPreference(NSString *key, id value, NSError **e
               @"renderedText": [NSString stringWithFormat:@"%@=%@", value, formattedResult] };
 }
 
-+ (NSString *)defaultAccountIdentifier:(NSError **)error {
++ (NSString *)storedDefaultAccountIdentifier:(NSError **)error {
+    NSError *readError = nil;
+    NSDictionary *preferences = NCNotesGroupPreferences(&readError);
+    if (!preferences) { if (error) *error = readError; return nil; }
+    id stored = preferences[@"DefaultNotesAccount"];
+    return [stored isKindOfClass:NSString.class] && [stored length] ? stored : @"";
+}
++ (NSString *)frameworkDefaultAccountIdentifier:(NSError **)error {
+    NSError *shadowError = nil;
+    NSDictionary *shadow = [self shadowNotesGroupPreferences:&shadowError];
+    if (!shadow) { if (error) *error = shadowError; return nil; }
+    if (shadow[@"DefaultNotesAccount"] != nil) {
+        if (error) *error = NCError(@"A shadow DefaultNotesAccount exists in ~/Library/Preferences/group.com.apple.notes.plist; refusing to report a default account Notes does not read");
+        return nil;
+    }
     Class cls = NSClassFromString(@"ICDefaultAccountUtilities");
     if (!NCRequireClass(cls, @[@"defaultAccount"], @"reading default account", error)) return nil;
     __block id account = nil;
@@ -1370,19 +1437,7 @@ static BOOL NCSetNotesApplicationPreference(NSString *key, id value, NSError **e
 }
 + (BOOL)setDefaultAccountIdentifier:(NSString *)identifier error:(NSError **)error {
     if (!identifier.length) { if (error) *error = NCError(@"The default account identifier is empty"); return NO; }
-    Class cls = NSClassFromString(@"ICDefaultAccountUtilities");
-    if (!NCRequireClass(cls, @[@"setDefaultAccountIdentifier:", @"defaultAccount"], @"setting default account", error)) return NO;
-    if (!NCCatch(@"setting default account", error, ^{
-        ((void (*)(id, SEL, id))objc_msgSend)(cls, NSSelectorFromString(@"setDefaultAccountIdentifier:"), identifier);
-    })) return NO;
-    NSError *readError = nil;
-    NSString *stored = [self defaultAccountIdentifier:&readError];
-    if (readError) { if (error) *error = readError; return NO; }
-    if ([stored caseInsensitiveCompare:identifier] != NSOrderedSame) {
-        if (error) *error = NCError(@"Notes did not select the requested default account");
-        return NO;
-    }
-    return YES;
+    return NCSetNotesGroupPreference(@"DefaultNotesAccount", identifier, error);
 }
 + (nullable NSNumber *)noteDefaultNamedStyle:(NSError **)error {
     NSError *readError = nil;
@@ -1396,7 +1451,9 @@ static BOOL NCSetNotesApplicationPreference(NSString *key, id value, NSError **e
     return NCSetNotesGroupPreference(@"TTTextControllerNoteDefaultNamedStyleKey", @((unsigned int)style), error);
 }
 + (NSNumber *)currentNoteListSortType:(NSError **)error {
-    id stored = NCNotesGroupPreference(@"kICSettingsNoteListSortTypeKey", error);
+    NSError *readError = nil;
+    id stored = NCNotesGroupPreference(@"kICSettingsNoteListSortTypeKey", &readError);
+    if (readError) { if (error) *error = readError; return nil; }
     return [stored isKindOfClass:NSNumber.class] ? stored : @0;
 }
 + (BOOL)setCurrentNoteListSortType:(NSInteger)type error:(NSError **)error {
@@ -1404,7 +1461,9 @@ static BOOL NCSetNotesApplicationPreference(NSString *key, id value, NSError **e
     return NCSetNotesGroupPreference(@"kICSettingsNoteListSortTypeKey", @(type), error);
 }
 + (NSNumber *)defaultDateHeadersType:(NSError **)error {
-    id stored = NCNotesGroupPreference(@"kICSettingsNoteDateHeadersTypeKey", error);
+    NSError *readError = nil;
+    id stored = NCNotesGroupPreference(@"kICSettingsNoteDateHeadersTypeKey", &readError);
+    if (readError) { if (error) *error = readError; return nil; }
     return [stored isKindOfClass:NSNumber.class] ? stored : @2;
 }
 + (BOOL)setDefaultDateHeadersType:(NSInteger)type error:(NSError **)error {
@@ -1412,7 +1471,9 @@ static BOOL NCSetNotesApplicationPreference(NSString *key, id value, NSError **e
     return NCSetNotesGroupPreference(@"kICSettingsNoteDateHeadersTypeKey", @(type), error);
 }
 + (NSNumber *)globalZoomFactorIndex:(NSError **)error {
-    id stored = NCNotesApplicationPreference(@"ICMGlobalZoomFactorIndexKey", error);
+    NSError *readError = nil;
+    id stored = NCNotesApplicationPreference(@"ICMGlobalZoomFactorIndexKey", &readError);
+    if (readError) { if (error) *error = readError; return nil; }
     return [stored isKindOfClass:NSNumber.class] ? stored : @1;
 }
 + (BOOL)setGlobalZoomFactorIndex:(NSInteger)index error:(NSError **)error {
@@ -1420,7 +1481,9 @@ static BOOL NCSetNotesApplicationPreference(NSString *key, id value, NSError **e
     return NCSetNotesApplicationPreference(@"ICMGlobalZoomFactorIndexKey", @(index), error);
 }
 + (NSNumber *)shouldResumeLastQuickNote:(NSError **)error {
-    id stored = NCNotesGroupPreference(@"ICShouldResumeLastQuickNoteDefaultsKey", error);
+    NSError *readError = nil;
+    id stored = NCNotesGroupPreference(@"ICShouldResumeLastQuickNoteDefaultsKey", &readError);
+    if (readError) { if (error) *error = readError; return nil; }
     return [stored isKindOfClass:NSNumber.class] ? stored : @YES;
 }
 + (BOOL)setShouldResumeLastQuickNote:(BOOL)enabled error:(NSError **)error {

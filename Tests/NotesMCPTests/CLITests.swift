@@ -970,6 +970,42 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: preferences), sentinel)
     }
 
+    func testSettingsShowListsEverySupportedSettingAndPreferenceWritesPlanTheirPreimage() throws {
+        let show = try run(["--backend", "fake", "--engine=native", "--json", "settings", "show"])
+        XCTAssertEqual(show.0, 0, show.2)
+        let settings = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(show.1.utf8)) as? [String: Any])
+        for key in ["sort", "groupsByDate", "defaultTextSize", "resumesLastQuickNote", "autoConvertsToTags",
+                    "defaultParagraphStyle", "checklistAutoSort", "defaultAccountID", "queryDateGrouping",
+                    "autoFormatMarkdown", "darkBackgrounds", "showNoteCount", "noteContainerView"] {
+            XCTAssertNotNil(settings[key], key)
+        }
+        XCTAssertEqual((settings["darkBackgrounds"] as? [String: Any])?["state"] as? String, "default")
+        let table = try run(["--backend", "fake", "--engine=native", "settings", "show"])
+        for name in ["default-style", "checklist-auto-sort", "default-account", "query-date-grouping",
+                     "auto-format-markdown", "dark-backgrounds", "show-note-count", "view"] {
+            XCTAssertTrue(table.1.contains(name), name)
+        }
+
+        let view = try run(["--backend", "fake", "--engine=native", "--json", "settings", "view"])
+        XCTAssertEqual(view.0, 0, view.2)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(view.1.utf8)) as? [String: Any])?["mode"] as? String, "list")
+        XCTAssertNotEqual(try run(["--backend", "fake", "--engine=native", "settings", "view", "--set", "gallery"]).0, 0)
+
+        for name in ["query-date-grouping", "auto-format-markdown", "dark-backgrounds", "show-note-count"] {
+            let read = try run(["--backend", "fake", "--engine=native", "--json", "settings", name])
+            XCTAssertEqual(read.0, 0, read.2)
+            let dry = try run(["--backend", "fake", "--engine=native", "--json", "settings", name, "--enabled", "false", "--dry-run"])
+            XCTAssertEqual(dry.0, 0, dry.2)
+            XCTAssertTrue(dry.1.contains("notesPreference"), dry.1)
+            XCTAssertTrue(dry.1.contains("previous_state"), dry.1)
+            XCTAssertTrue(dry.1.contains(name), dry.1)
+            let readOnly = try run(["--backend", "fake", "--engine=native", "--read-only", "settings", name, "--enabled", "true"])
+            XCTAssertEqual(readOnly.0, 4, readOnly.2)
+        }
+        let monospaced = try run(["--backend", "fake", "--engine=native", "settings", "default-style", "--set", "monospaced"])
+        XCTAssertNotEqual(monospaced.0, 0)
+    }
+
     func testParitySettingWritesHonorReadOnlyWhileReadsRemainAvailable() throws {
         for arguments in [
             ["settings", "default-style", "--set", "body"],

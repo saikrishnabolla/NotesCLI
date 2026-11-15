@@ -252,8 +252,17 @@ public final class MCPServer: @unchecked Sendable {
                 t("set_folder_date_grouping", "Set whether a folder groups notes by date.", ["ref", "enabled"], ["ref": string, "enabled": bool], write: true, native: true),
                 t("get_default_paragraph_style", "Read the paragraph style used for new notes.", native: true),
                 t("set_default_paragraph_style", "Set the paragraph style used for new notes.", ["style"],
-                  ["style": ["type": "string", "enum": ["title", "heading", "subheading", "body", "monospaced"]]], write: true, native: true),
-                t("get_notes_settings", "Read Notes' global sort, date grouping, default text size, Quick Note resume, and automatic tag conversion settings.", native: true),
+                  ["style": ["type": "string", "enum": ["title", "heading", "subheading", "body"]]], write: true, native: true),
+                t("get_notes_settings", "Read every supported Notes setting: global sort, date grouping, default text size, Quick Note resume, automatic tag conversion, default style, checklist auto-sort, default account, query date grouping, Markdown auto-format, dark backgrounds, note counts, and the saved list or gallery mode.", native: true),
+                t("get_note_container_view", "Read Notes' window-wide list or gallery mode from its last saved window state. Read-only.", native: true),
+                t("set_query_date_grouping", "Set whether tag, search, and Smart Folder results group notes by date.", ["enabled"],
+                  ["enabled": bool], write: true, native: true),
+                t("set_auto_format_markdown", "Set whether Notes formats Markdown as you type.", ["enabled"],
+                  ["enabled": bool], write: true, native: true),
+                t("set_dark_backgrounds", "Set Notes' \"Use dark backgrounds for note content\" setting.", ["enabled"],
+                  ["enabled": bool], write: true, native: true),
+                t("set_show_note_count", "Set whether the Notes folder list shows note counts.", ["enabled"],
+                  ["enabled": bool], write: true, native: true),
                 t("set_global_note_sort", "Set the global note sort.", ["sort"],
                   ["sort": ["type": "string", "enum": ["modified", "created", "title"]]], write: true, native: true),
                 t("set_global_date_grouping", "Set whether Notes groups notes by date globally.", ["enabled"],
@@ -1319,6 +1328,11 @@ public final class MCPServer: @unchecked Sendable {
         var arguments: [String: Any]
     }
 
+    public static let notesPreferenceTools: [String: String] = [
+        "set_query_date_grouping": "query-date-grouping", "set_auto_format_markdown": "auto-format-markdown",
+        "set_dark_backgrounds": "dark-backgrounds", "set_show_note_count": "show-note-count",
+    ]
+
     private func nativeUndoDispatch(_ action: JournalRestoreAction, allowShared: Bool) throws -> NativeUndoDispatch {
         var arguments: [String: Any] = ["allow_shared": allowShared]
         func noteDispatch(_ noteID: String, tool: String, values: [String: Any]) throws -> NativeUndoDispatch {
@@ -1359,6 +1373,9 @@ public final class MCPServer: @unchecked Sendable {
         case .autoConvertToTags(let enabled):
             arguments["enabled"] = enabled
             return NativeUndoDispatch(note: nil, paths: [], tool: "set_auto_convert_tags", arguments: arguments)
+        case .notesPreference(let setting, let state):
+            arguments.merge(["setting": setting, "state": state]) { _, new in new }
+            return NativeUndoDispatch(note: nil, paths: [], tool: "_journal_set_notes_preference", arguments: arguments)
         case .quickNote(let noteID, let enabled):
             return try noteDispatch(noteID, tool: "set_quick_note", values: ["enabled": enabled])
         case .defaultAccount(let identifier):
@@ -1432,6 +1449,8 @@ public final class MCPServer: @unchecked Sendable {
                     dispatch.arguments["expected_account_id"] = value
                 case .smartFolderQuery(let value):
                     dispatch.arguments["expected_query_json"] = value
+                case .notesPreference(let value):
+                    dispatch.arguments["expected_state"] = value
                 }
             }
             return try safeWrite(tool: tool, arguments: arguments, note: dispatch.note, paths: dispatch.paths,
@@ -1580,6 +1599,25 @@ public final class MCPServer: @unchecked Sendable {
             }
             var recorded = arguments
             recorded["previous_account_id"] = previous
+            return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
+                let value = try nativeHandler(tool.name, arguments)
+                guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
+                return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
+            }
+        }
+        if let setting = Self.notesPreferenceTools[tool.name] {
+            let current = try nativeHandler("_journal_get_notes_preference", ["setting": setting])
+            guard let value = try JSONSerialization.jsonObject(with: current.value) as? [String: Any],
+                  let previous = value["state"] as? String else {
+                throw NotesError("invalid_native_result", "The native engine did not return the \(setting) preimage.")
+            }
+            guard let enabled = arguments["enabled"] as? Bool else {
+                throw NotesError("invalid_arguments", "enabled must be true or false.")
+            }
+            var recorded = arguments
+            recorded["setting"] = setting
+            recorded["state"] = enabled ? "on" : "off"
+            recorded["previous_state"] = previous
             return try safeWrite(tool: tool, arguments: recorded, note: nil, paths: [], engine: "native") {
                 let value = try nativeHandler(tool.name, arguments)
                 guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }

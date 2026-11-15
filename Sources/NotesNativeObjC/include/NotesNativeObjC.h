@@ -137,7 +137,15 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)setChecklistAutoSortEnabled:(BOOL)enabled error:(NSError **)error NS_SWIFT_NAME(setChecklistAutoSort(_:));
 + (nullable id)folderSortTypeWithOrder:(NSInteger)order direction:(NSInteger)direction error:(NSError **)error
     NS_SWIFT_NAME(folderSortType(order:direction:));
-+ (nullable NSString *)defaultAccountIdentifier:(NSError **)error NS_SWIFT_NAME(defaultAccountIdentifier());
++ (nullable NSString *)storedDefaultAccountIdentifier:(NSError **)error NS_SWIFT_NAME(storedDefaultAccountIdentifier());
++ (nullable NSString *)frameworkDefaultAccountIdentifier:(NSError **)error NS_SWIFT_NAME(frameworkDefaultAccountIdentifier());
++ (nullable NSDictionary<NSString *, id> *)notesPreferencesInApplicationDomain:(BOOL)application error:(NSError **)error
+    NS_SWIFT_NAME(notesPreferences(inApplicationDomain:));
++ (nullable NSDictionary<NSString *, id> *)shadowNotesGroupPreferences:(NSError **)error NS_SWIFT_NAME(shadowNotesGroupPreferences());
++ (BOOL)setNotesPreference:(NSString *)key integerValue:(NSInteger)value inApplicationDomain:(BOOL)application error:(NSError **)error
+    NS_SWIFT_NAME(setNotesPreference(_:integerValue:inApplicationDomain:));
++ (BOOL)removeNotesPreference:(NSString *)key inApplicationDomain:(BOOL)application error:(NSError **)error
+    NS_SWIFT_NAME(removeNotesPreference(_:inApplicationDomain:));
 + (BOOL)setDefaultAccountIdentifier:(NSString *)identifier error:(NSError **)error NS_SWIFT_NAME(setDefaultAccountIdentifier(_:));
 + (nullable NSNumber *)noteDefaultNamedStyle:(NSError **)error NS_SWIFT_NAME(noteDefaultNamedStyle());
 + (BOOL)setNoteDefaultNamedStyle:(NSUInteger)style error:(NSError **)error NS_SWIFT_NAME(setNoteDefaultNamedStyle(_:));

@@ -15,6 +15,7 @@ public enum JournalRestoreAction: Sendable, Equatable {
     case defaultTextSize(points: Int)
     case resumeLastQuickNote(enabled: Bool)
     case autoConvertToTags(enabled: Bool)
+    case notesPreference(setting: String, state: String)
     case quickNote(noteID: String, enabled: Bool)
     case defaultAccount(identifier: String)
     case smartFolderQuery(folderID: String, queryJSON: String)
@@ -36,10 +37,17 @@ public enum JournalRestoreExpectation: Sendable, Equatable {
     case defaultTextSize(Int)
     case resumeLastQuickNote(Bool)
     case autoConvertToTags(Bool)
+    case notesPreference(String)
     case quickNote(Bool)
     case defaultAccount(String)
     case smartFolderQuery(String)
 }
+
+/// Journal operation names that record one simple Notes preference: the CLI name and the MCP tool names.
+public let notesPreferenceJournalOperations: Set<String> = [
+    "notesPreference", "set_query_date_grouping", "set_auto_format_markdown", "set_dark_backgrounds",
+    "set_show_note_count", "_journal_set_notes_preference",
+]
 
 public struct JournalEntry: Codable, Sendable {
     public var id: String
@@ -92,6 +100,9 @@ public struct JournalEntry: Codable, Sendable {
                 throw NotesError("journal_preimage_missing", "Journal operation \(id) has no \(key) preimage.")
             }
             return value
+        }
+        if notesPreferenceJournalOperations.contains(operation) {
+            return .notesPreference(setting: try required("setting"), state: try required("previous_state"))
         }
         switch operation {
         case "checklistAutoSort", "checklist_auto_sort":
@@ -212,6 +223,7 @@ public struct JournalEntry: Codable, Sendable {
             if let value = string(key).flatMap(Int.init) { return value }
             throw NotesError("journal_postimage_missing", "Journal operation \(id) has no \(key) result state; refusing an unsafe undo.")
         }
+        if notesPreferenceJournalOperations.contains(operation) { return .notesPreference(try required("state")) }
         switch operation {
         case "checklistAutoSort", "checklist_auto_sort":
             return .checklistAutoSort(try boolean("enabled"))

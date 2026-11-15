@@ -125,14 +125,98 @@ public enum NativeParagraphStyle: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// The "New notes start with" choices in Notes settings. Notes offers no monospaced choice there.
 public enum NativeDefaultParagraphStyle: String, Codable, Sendable, CaseIterable {
-    case title, heading, subheading, body, monospaced
+    case title, heading, subheading, body
     public var value: Int {
-        switch self { case .title: 0; case .heading: 1; case .subheading: 2; case .body: 3; case .monospaced: 4 }
+        switch self { case .title: 0; case .heading: 1; case .subheading: 2; case .body: 3 }
     }
     public init?(value: Int) {
         guard let style = Self.allCases.first(where: { $0.value == value }) else { return nil }
         self = style
+    }
+}
+
+/// A stored Notes preference: an explicit on or off value, or no stored value (Notes uses its default).
+public enum NativePreferenceState: String, Codable, Sendable, CaseIterable {
+    case on, off, `default`
+}
+
+/// Simple Notes preferences that live in Notes' real container preference files.
+public enum NativeNotesPreference: String, Codable, Sendable, CaseIterable {
+    /// Date grouping for tag, search, and Smart Folder lists (`kICQueryDateHeadersTypeKey`: 0 default, 1 off, 2 on).
+    case queryDateGrouping = "query-date-grouping"
+    /// Automatic Markdown formatting while typing (`ICShouldAutoFormatMarkdownDefaultsKey`).
+    case autoFormatMarkdown = "auto-format-markdown"
+    /// "Use dark backgrounds for note content". Notes stores the inverse in `alwaysShowLightContent`.
+    case darkBackgrounds = "dark-backgrounds"
+    /// Note counts in the folder list (`showsNoteCount`).
+    case showNoteCount = "show-note-count"
+
+    public var key: String {
+        switch self {
+        case .queryDateGrouping: "kICQueryDateHeadersTypeKey"
+        case .autoFormatMarkdown: "ICShouldAutoFormatMarkdownDefaultsKey"
+        case .darkBackgrounds: "alwaysShowLightContent"
+        case .showNoteCount: "showsNoteCount"
+        }
+    }
+    public var inApplicationDomain: Bool { self == .darkBackgrounds || self == .showNoteCount }
+    /// The value Notes uses when no value is stored. Each default was read from Notes 4.13 on macOS 27.2.1.
+    public var defaultEnabled: Bool { true }
+
+    public func storedValue(enabled: Bool) -> Int {
+        switch self {
+        case .queryDateGrouping: enabled ? 2 : 1
+        case .darkBackgrounds: enabled ? 0 : 1
+        case .autoFormatMarkdown, .showNoteCount: enabled ? 1 : 0
+        }
+    }
+
+    public func state(stored: Any?) throws -> NativePreferenceState {
+        guard let stored else { return .default }
+        guard let number = stored as? NSNumber else {
+            throw NotesError("unsupported_preference", "Notes stores an unexpected \(key) value.")
+        }
+        let value = number.intValue
+        switch self {
+        case .queryDateGrouping:
+            switch value { case 0: return .default; case 1: return .off; case 2: return .on
+            default: throw NotesError("unsupported_preference", "Notes stores unknown \(key) value \(value).") }
+        case .darkBackgrounds:
+            guard [0, 1].contains(value) else { throw NotesError("unsupported_preference", "Notes stores unknown \(key) value \(value).") }
+            return value == 0 ? .on : .off
+        case .autoFormatMarkdown, .showNoteCount:
+            guard [0, 1].contains(value) else { throw NotesError("unsupported_preference", "Notes stores unknown \(key) value \(value).") }
+            return value == 1 ? .on : .off
+        }
+    }
+}
+
+public struct NativePreferenceValue: Codable, Sendable, Equatable {
+    public var setting: NativeNotesPreference
+    public var state: NativePreferenceState
+    /// The effective value: the stored value, or Notes' default when nothing is stored.
+    public var enabled: Bool
+    public init(setting: NativeNotesPreference, state: NativePreferenceState) {
+        self.setting = setting
+        self.state = state
+        enabled = state == .default ? setting.defaultEnabled : state == .on
+    }
+}
+
+/// Notes' list or gallery mode, read from the main window state Notes last saved.
+public struct NativeNoteContainerViewState: Codable, Sendable, Equatable {
+    public var mode: String
+    public var preferredMode: String?
+    public var galleryItemSizeRatio: Double?
+    public init(mode: String, preferredMode: String?, galleryItemSizeRatio: Double?) {
+        self.mode = mode
+        self.preferredMode = preferredMode
+        self.galleryItemSizeRatio = galleryItemSizeRatio
+    }
+    public static func mode(_ value: Int) -> String? {
+        switch value { case 0: "list"; case 1: "gallery"; default: nil }
     }
 }
 
@@ -151,13 +235,46 @@ public struct NativeNotesSettings: Codable, Sendable, Equatable {
     public var defaultTextSize: Int
     public var resumesLastQuickNote: Bool
     public var autoConvertsToTags: Bool
+    public var defaultParagraphStyle: NativeDefaultParagraphStyle?
+    public var checklistAutoSort: Bool?
+    public var defaultAccountID: String?
+    public var queryDateGrouping: NativePreferenceValue?
+    public var autoFormatMarkdown: NativePreferenceValue?
+    public var darkBackgrounds: NativePreferenceValue?
+    public var showNoteCount: NativePreferenceValue?
+    public var noteContainerView: NativeNoteContainerViewState?
     public init(sort: NativeGlobalNoteSort, groupsByDate: Bool, defaultTextSize: Int, resumesLastQuickNote: Bool,
-                autoConvertsToTags: Bool) {
+                autoConvertsToTags: Bool, defaultParagraphStyle: NativeDefaultParagraphStyle? = nil,
+                checklistAutoSort: Bool? = nil, defaultAccountID: String? = nil,
+                preferences: [NativePreferenceValue] = [], noteContainerView: NativeNoteContainerViewState? = nil) {
         self.sort = sort
         self.groupsByDate = groupsByDate
         self.defaultTextSize = defaultTextSize
         self.resumesLastQuickNote = resumesLastQuickNote
         self.autoConvertsToTags = autoConvertsToTags
+        self.defaultParagraphStyle = defaultParagraphStyle
+        self.checklistAutoSort = checklistAutoSort
+        self.defaultAccountID = defaultAccountID
+        self.noteContainerView = noteContainerView
+        for preference in preferences { self[preference.setting] = preference }
+    }
+    public subscript(_ setting: NativeNotesPreference) -> NativePreferenceValue? {
+        get {
+            switch setting {
+            case .queryDateGrouping: queryDateGrouping
+            case .autoFormatMarkdown: autoFormatMarkdown
+            case .darkBackgrounds: darkBackgrounds
+            case .showNoteCount: showNoteCount
+            }
+        }
+        set {
+            switch setting {
+            case .queryDateGrouping: queryDateGrouping = newValue
+            case .autoFormatMarkdown: autoFormatMarkdown = newValue
+            case .darkBackgrounds: darkBackgrounds = newValue
+            case .showNoteCount: showNoteCount = newValue
+            }
+        }
     }
 }
 

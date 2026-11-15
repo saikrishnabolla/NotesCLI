@@ -104,7 +104,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Recently Deleted", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Smart Folders and rules", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Quick Notes", read: "Done", write: "Partial"),
-        FeatureDefinition(feature: "Folder list and gallery views", read: "Not possible", write: "Not possible"),
+        FeatureDefinition(feature: "Folder list and gallery views", read: "Partial", write: "Not possible"),
         FeatureDefinition(feature: "Folder sort options", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Folder grouping by date", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Note display order", read: "Done", write: "Partial"),

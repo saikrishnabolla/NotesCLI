@@ -130,8 +130,18 @@ notescli attach <ref> <path> [--position <position>] [--view <view>]
 notescli attach <ref> --pasteboard [--position <position>] [--view <view>]
 notescli map add <ref> <https://maps.apple.com/...> [--position <position>]
 notescli scan add <ref> <image> ... [--position <position>]
-notescli settings default-style [--set title|heading|subheading|body|monospaced]
+notescli settings show
+notescli settings sort [--set modified|created|title]
+notescli settings group-by-date [--enabled true|false]
+notescli settings default-text-size [--points 10|12|14|18|24]
+notescli settings resume-quick-note [--enabled true|false]
 notescli settings auto-convert-tags [--enabled true|false]
+notescli settings default-style [--set title|heading|subheading|body]
+notescli settings query-date-grouping [--enabled true|false]
+notescli settings auto-format-markdown [--enabled true|false]
+notescli settings dark-backgrounds [--enabled true|false]
+notescli settings show-note-count [--enabled true|false]
+notescli settings view
 notescli attachment delete <ref> <attachment-id>
 notescli link capture <ref> <url> [--title <title>] [--position <utf16-offset>]
 notescli recording add <ref> --file <audio> [--transcribe | --transcript-file <json>] [--title <title>] [--locale <locale>]
@@ -155,6 +165,8 @@ notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 ```
 
 `link add-url --card` creates a native URL preview. `link capture` creates the native Synapse web attachment used for Share-sheet links. File and pasteboard attachments are copied to private temporary storage, hashed, and checked against the stored media. `map add` accepts only Apple Maps HTTPS URLs. Scan commands create and edit ordered native scan galleries; crop still lacks visible Mac/iPhone/PDF proof. Local scans accept up to 200 MB. MCP `scan_add` accepts up to 3 MB of decoded image data so requests fit the 4 MiB transport limit. Recording input is converted to M4A with AVFoundation. `recording transcribe-file` writes timed JSON without opening Notes. `--transcript-file` imports that JSON into a native Notes transcript; each segment's `fragment` index picks the audio fragment it belongs to, and 0 is the default. `recording transcribe` transcribes each fragment of a recording in order. Readback checks each segment's text, timing, speaker, and fragment. On-device transcription stays on the Mac. Drawing commands convert SVG paths and shapes to editable `com.apple.paper` PencilKit strokes. PNG export requires `--output`; SVG prints to standard output when no output path is set. `write` uses scripting by default. Restore, Smart Folder changes, and folder moves require native opt-in. Write results include `engine` and `operationID`.
+
+Settings commands read and write Notes' container preference files and verify the stored value. `settings view` reads the list or gallery mode Notes last saved for its main window; it cannot change it.
 
 ## Diagrams
 

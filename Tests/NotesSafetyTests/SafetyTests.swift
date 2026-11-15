@@ -4,6 +4,22 @@ import NotesCore
 @testable import NotesSafety
 
 final class SafetyTests: XCTestCase {
+    func testNotesPreferenceJournalRecordsThePreimageAndRefusesMissingState() throws {
+        func entry(_ operation: String, _ json: String) -> JournalEntry {
+            JournalEntry(id: "pref", operation: operation, argumentsHash: "", arguments: Data(json.utf8),
+                         idempotencyKey: nil, started: Date(), outcome: .verified, noteID: nil, result: nil, message: nil)
+        }
+        let cli = entry("notesPreference", #"{"setting":"show-note-count","state":"off","previous_state":"default","engine":"native"}"#)
+        XCTAssertEqual(try cli.restoreAction(), .notesPreference(setting: "show-note-count", state: "default"))
+        XCTAssertEqual(try cli.restoreExpectation(), .notesPreference("off"))
+        let mcp = entry("set_query_date_grouping", #"{"enabled":true,"setting":"query-date-grouping","state":"on","previous_state":"off"}"#)
+        XCTAssertEqual(try mcp.restoreAction(), .notesPreference(setting: "query-date-grouping", state: "off"))
+        XCTAssertEqual(try mcp.restoreExpectation(), .notesPreference("on"))
+        XCTAssertThrowsError(try entry("notesPreference", #"{"setting":"show-note-count","state":"on"}"#).restoreAction()) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "journal_preimage_missing")
+        }
+    }
+
     func testJournalResolutionIdentityDoesNotInferFromNamesOrTitles() throws {
         let titleOnly = JournalEntry(id: "one", operation: "createNote", argumentsHash: "", arguments: Data(#"{"title":"Unique"}"#.utf8),
                                      idempotencyKey: nil, started: Date(), outcome: .unknown, noteID: nil, result: nil, message: nil)
@@ -354,11 +370,11 @@ final class SafetyTests: XCTestCase {
         }.map { $0.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
         XCTAssertEqual(featureRows.count, 95)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 87)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 5)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 3)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 72)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 8)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 15)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 6)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 2)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 73)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 9)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 13)
 
         let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)
         let matrix = parity.components(separatedBy: "## 2. CLI commands")[0]

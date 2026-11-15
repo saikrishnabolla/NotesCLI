@@ -97,7 +97,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Pin and unpin", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Locked-note state", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Share state and participants", read: "Done", write: "Not possible"),
-        FeatureDefinition(feature: "Edit an existing shared note", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Edit an existing shared note", read: "Partial", write: "Partial"),
         FeatureDefinition(feature: "Collaboration activity and changes", read: "Partial", write: "Not possible"),
         FeatureDefinition(feature: "Accounts and default location", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Folders and subfolders", read: "Done", write: "Done"),
@@ -129,7 +129,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Open notes, folders, accounts, and attachments", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Sync and upload state", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Version history, diff, undo, and revert", read: "Partial", write: "Partial"),
-        FeatureDefinition(feature: "Multiple iCloud, local, and IMAP accounts", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Multiple iCloud, local, and IMAP accounts", read: "Partial", write: "Partial"),
     ]
 
     private static let nativeWrites: Set<String> = [

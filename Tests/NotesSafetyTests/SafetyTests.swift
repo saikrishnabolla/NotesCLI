@@ -387,11 +387,11 @@ final class SafetyTests: XCTestCase {
             $0.hasPrefix("|") && !$0.hasPrefix("| ---") && !$0.hasPrefix("| Feature")
         }.map { $0.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
         XCTAssertEqual(featureRows.count, 95)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 87)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 6)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 85)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 8)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 2)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 73)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 10)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 71)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 12)
         XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 12)
 
         let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)
@@ -405,8 +405,8 @@ final class SafetyTests: XCTestCase {
         let doneCount = statuses.filter { $0.hasPrefix("Done") }.count
         let partialCount = statuses.filter { $0.hasPrefix("Partial") }.count
         let notPlannedCount = statuses.filter { $0.hasPrefix("Not planned") }.count
-        XCTAssertEqual(doneCount, 129)
-        XCTAssertEqual(partialCount, 2)
+        XCTAssertEqual(doneCount, 127)
+        XCTAssertEqual(partialCount, 4)
         XCTAssertEqual(notPlannedCount, 8)
 
         let summaryLines = parity.split(separator: "\n").filter { $0.hasPrefix("Status summary: ") }.map(String.init)

@@ -25,6 +25,7 @@ struct SnapshotRestoreExistingEvidence: Equatable, Sendable {
     var scanMarkup: SnapshotRestoreDigestEvidence = .notCollected
     /// Stored child order (gallery pages or recording fragments). `nil` means not collected.
     var orderedChildIDs: [String]?
+    var readback: Attachment? = nil
 }
 
 struct SnapshotRestoreExistingAttachment: Equatable, Sendable {
@@ -68,10 +69,14 @@ enum SnapshotRestoreRefusalReason: String, Equatable, Sendable {
 enum SnapshotRestoreAction: Equatable, Sendable {
     case keep
     case unmark
+    case restoreExistingMarkup(SnapshotExistingMarkupRestore)
+    case restoreExistingRecordingMetadata(SnapshotExistingRecordingMetadataRestore)
+    case restoreExistingScan(SnapshotExistingScanRestore)
     case recreateFile(SnapshotAttachmentMaterial)
     case recreateScan(SnapshotScanRecreation)
     case recreateRecording(SnapshotRecordingRecreation)
     case recreatedByParent(String)
+    case restoredByParent(String)
     case recreateTable
     case recreateRichLink
     case recreateMap
@@ -79,6 +84,36 @@ enum SnapshotRestoreAction: Equatable, Sendable {
     case recreateDrawing(SnapshotAttachmentMaterial?)
     case recreateInline(SnapshotInlineRecreation)
     case refuse(SnapshotRestoreRefusalReason)
+}
+
+struct SnapshotExistingMarkupRestore: Equatable, Sendable {
+    var sha256: String?
+    var byteCount: Int?
+    var embedded: Bool
+    var unmark: Bool
+}
+
+struct SnapshotExistingRecordingMetadataRestore: Equatable, Sendable {
+    var metadata: RecordingMetadata
+    var unmark: Bool
+}
+
+struct SnapshotExistingScanPageRestore: Equatable, Sendable {
+    var id: String
+    var filter: Int
+    var orientation: Int
+    var crop: ScanCrop?
+    var markupSHA256: String?
+    var markupByteCount: Int?
+    var hasEmbeddedMarkup: Bool
+    var unmark: Bool
+}
+
+struct SnapshotExistingScanRestore: Equatable, Sendable {
+    var parentID: String
+    var orderedPageIDs: [String]
+    var pages: [SnapshotExistingScanPageRestore]
+    var unmarkParent: Bool
 }
 
 struct SnapshotScanPageRecreation: Equatable, Sendable {
@@ -205,6 +240,13 @@ enum SnapshotRestorePlanner {
                 }
                 return id == recordingID ? .recreateRecording(recreation) : .recreatedByParent(recordingID)
             }
+            if id == recordingID {
+                switch existingRecordingMetadataDecision(recordingID, index: index, archive: archive) {
+                case .restore(let restore): return .restoreExistingRecordingMetadata(restore)
+                case .refuse(let reason): return .refuse(reason)
+                case .none: break
+                }
+            }
         }
 
         if let scanID = scanRootID(for: id, index: index),
@@ -221,6 +263,12 @@ enum SnapshotRestorePlanner {
                 }
                 return id == scanID ? .recreateScan(recreation) : .recreatedByParent(scanID)
             }
+            switch existingScanDecision(scanID, index: index, archive: archive) {
+            case .restore(let restore):
+                return id == scanID ? .restoreExistingScan(restore) : .restoredByParent(scanID)
+            case .refuse(let reason): return .refuse(reason)
+            case .none: break
+            }
         }
 
         let rows = index.existing[id] ?? []
@@ -235,6 +283,11 @@ enum SnapshotRestorePlanner {
                 }
             } else {
                 guard row.parentID == index.parentIDs[id]?.first else { return .refuse(.parentChildTopology) }
+            }
+            switch existingMarkupDecision(id: id, row: row, index: index, archive: archive) {
+            case .restore(let restore): return .restoreExistingMarkup(restore)
+            case .refuse(let reason): return .refuse(reason)
+            case .none: break
             }
             if let refusal = existingEvidenceRefusal(id: id, row: row, index: index, archive: archive) {
                 return .refuse(refusal)
@@ -362,6 +415,203 @@ enum SnapshotRestorePlanner {
         return .recreateFile(material)
     }
 
+    private enum ExistingMarkupDecision {
+        case none
+        case restore(SnapshotExistingMarkupRestore)
+        case refuse(SnapshotRestoreRefusalReason)
+    }
+
+    private enum ExistingRecordingMetadataDecision {
+        case none
+        case restore(SnapshotExistingRecordingMetadataRestore)
+        case refuse(SnapshotRestoreRefusalReason)
+    }
+
+    private enum ExistingScanDecision {
+        case none
+        case restore(SnapshotExistingScanRestore)
+        case refuse(SnapshotRestoreRefusalReason)
+    }
+
+    private static func existingScanDecision(
+        _ parentID: String,
+        index: SnapshotIndex,
+        archive: SnapshotAttachmentArchive?
+    ) -> ExistingScanDecision {
+        guard let recreation = scanRecreation(parentID, index: index, archive: archive),
+              let parentRows = index.existing[parentID], parentRows.count == 1,
+              let parentRow = parentRows.first,
+              let currentParent = parentRow.evidence.readback else { return .none }
+        let expectedIDs = recreation.pages.map(\.id)
+        guard Set(currentParent.childAttachmentIDs ?? []) == Set(expectedIDs),
+              Set(currentParent.childAttachments?.map(\.id) ?? []) == Set(expectedIDs),
+              let actualOrder = parentRow.evidence.orderedChildIDs,
+              Set(actualOrder) == Set(expectedIDs) else { return .refuse(.parentChildTopology) }
+        var changed = actualOrder != expectedIDs || parentRow.isMarkedForDeletion
+        var pages: [SnapshotExistingScanPageRestore] = []
+        for page in recreation.pages {
+            guard let rows = index.existing[page.id], rows.count == 1,
+                  let row = rows.first,
+                  row.parentID == parentID,
+                  row.typeUTI == page.material.typeUTI,
+                  let current = row.evidence.readback,
+                  current.id == page.id,
+                  current.typeUTI == page.material.typeUTI,
+                  case .present(let actualBlob) = row.evidence.blob,
+                  actualBlob == SnapshotRestoreDigest(
+                    sha256: page.material.blobSHA256 ?? "",
+                    byteCount: page.material.byteCount ?? 0
+                  ) else { return .refuse(.contentMismatch) }
+            guard let currentFilter = current.scanFilter, (0...4).contains(currentFilter),
+                  let currentOrientation = current.scanOrientation, (0...3).contains(currentOrientation) else {
+                return .refuse(.unsupportedScan)
+            }
+            if page.crop == nil, current.scanCrop != nil { return .refuse(.unsupportedScan) }
+            let expectedMarkup = page.markupSHA256.map {
+                SnapshotRestoreDigest(sha256: $0, byteCount: page.markupByteCount ?? 0)
+            }
+            let markupDiffers: Bool
+            switch row.evidence.scanMarkup {
+            case .notCollected: return .refuse(.contentMismatch)
+            case .absent: markupDiffers = expectedMarkup != nil
+            case .present(let actual):
+                if expectedMarkup == nil { return .refuse(.unsupportedScan) }
+                markupDiffers = actual != expectedMarkup
+            }
+            let stateDiffers = currentFilter != page.filter || currentOrientation != page.orientation ||
+                !NativeVerificationRules.sameScanCrop(current.scanCrop, page.crop, tolerance: 0.000_1) ||
+                current.scanHasEmbeddedMarkup != page.hasEmbeddedMarkup || markupDiffers || row.isMarkedForDeletion
+            changed = changed || stateDiffers
+            pages.append(SnapshotExistingScanPageRestore(
+                id: page.id, filter: page.filter, orientation: page.orientation, crop: page.crop,
+                markupSHA256: page.markupSHA256, markupByteCount: page.markupByteCount,
+                hasEmbeddedMarkup: page.hasEmbeddedMarkup, unmark: row.isMarkedForDeletion
+            ))
+        }
+        guard changed else { return .none }
+        return .restore(SnapshotExistingScanRestore(
+            parentID: parentID, orderedPageIDs: expectedIDs, pages: pages,
+            unmarkParent: parentRow.isMarkedForDeletion
+        ))
+    }
+
+    private static func existingRecordingMetadataDecision(
+        _ parentID: String,
+        index: SnapshotIndex,
+        archive: SnapshotAttachmentArchive?
+    ) -> ExistingRecordingMetadataDecision {
+        guard let recreation = recordingRecreation(parentID, index: index, archive: archive),
+              let expected = index.attachments[parentID],
+              let parentRows = index.existing[parentID], parentRows.count == 1,
+              let parentRow = parentRows.first,
+              let current = parentRow.evidence.readback else { return .none }
+        guard current.id == parentID,
+              current.typeUTI == expected.typeUTI,
+              current.childAttachmentIDs == recreation.fragments.map(\.id),
+              current.childAttachments?.map(\.id) == recreation.fragments.map(\.id),
+              abs((current.duration ?? 0) - recreation.duration) <= max(0.25, recreation.duration * 0.05),
+              RecordingFragments.mismatch(expected: recreation.transcript,
+                                          actual: current.transcriptWords ?? []) == nil,
+              (current.recordingFragments ?? []) == (expected.recordingFragments ?? []) else {
+            return .refuse(.contentMismatch)
+        }
+        for fragment in recreation.fragments {
+            guard let rows = index.existing[fragment.id], rows.count == 1,
+                  let row = rows.first,
+                  row.parentID == parentID,
+                  row.typeUTI == fragment.material.typeUTI,
+                  case .present(let actual) = row.evidence.blob,
+                  actual == SnapshotRestoreDigest(
+                    sha256: fragment.material.blobSHA256 ?? "",
+                    byteCount: fragment.material.byteCount ?? 0
+                  ) else { return .refuse(.contentMismatch) }
+        }
+        let actualMetadata = current.recording
+        guard actualMetadata != recreation.metadata else { return .none }
+        guard let metadata = recreation.metadata,
+              completeRestorableRecordingMetadata(metadata),
+              canApplyRecordingMetadata(metadata, over: actualMetadata) else {
+            return .refuse(.unsupportedRecording)
+        }
+        return .restore(SnapshotExistingRecordingMetadataRestore(
+            metadata: metadata,
+            unmark: parentRow.isMarkedForDeletion
+        ))
+    }
+
+    private static func completeRestorableRecordingMetadata(_ metadata: RecordingMetadata) -> Bool {
+        guard safeRecordingMetadata(metadata) else { return false }
+        let hasSummary = metadata.summary != nil || metadata.topLineSummary != nil || metadata.summaryVersion != nil
+        if hasSummary {
+            guard metadata.summary?.isEmpty == false,
+                  metadata.topLineSummary?.isEmpty == false,
+                  metadata.summaryVersion != nil else { return false }
+        }
+        let attribution = [metadata.externalModelAttributionProviderName,
+                           metadata.externalModelAttributionSymbolName]
+        return attribution.allSatisfy({ $0 == nil }) || attribution.allSatisfy({ $0?.isEmpty == false })
+    }
+
+    private static func canApplyRecordingMetadata(
+        _ expected: RecordingMetadata,
+        over actual: RecordingMetadata?
+    ) -> Bool {
+        let actual = actual ?? RecordingMetadata()
+        if expected.summary == nil && actual.summary != nil { return false }
+        if expected.topLineSummary == nil && actual.topLineSummary != nil { return false }
+        if expected.summaryVersion == nil && actual.summaryVersion != nil { return false }
+        if expected.externalModelAttributionProviderName == nil && actual.externalModelAttributionProviderName != nil { return false }
+        if expected.externalModelAttributionSymbolName == nil && actual.externalModelAttributionSymbolName != nil { return false }
+        if expected.localSpeakerHandle == nil && actual.localSpeakerHandle != nil { return false }
+        if expected.remoteSpeakerHandle == nil && actual.remoteSpeakerHandle != nil { return false }
+        if expected.callType == nil && actual.callType != nil { return false }
+        if expected.isCallRecording == nil && actual.isCallRecording != nil { return false }
+        if expected.startTime == nil && actual.startTime != nil { return false }
+        return true
+    }
+
+    private static func existingMarkupDecision(
+        id: String,
+        row: SnapshotRestoreExistingAttachment,
+        index: SnapshotIndex,
+        archive: SnapshotAttachmentArchive?
+    ) -> ExistingMarkupDecision {
+        guard let attachment = index.attachments[id],
+              AttachmentMarkupPolicy.supports(attachment.typeUTI),
+              archive?.formatVersion == 1,
+              let materials = index.materials[id], materials.count == 1,
+              let material = materials.first,
+              material.unavailableReason == nil else { return .none }
+        let expectedHash = material.scanMarkupSHA256
+        let expectedBytes = material.scanMarkupByteCount
+        guard (expectedHash == nil) == (expectedBytes == nil) else { return .refuse(.invalidSnapshot) }
+        if let expectedHash, let expectedBytes {
+            guard expectedHash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                  expectedBytes > 0,
+                  attachment.markupDataBytes == expectedBytes else { return .refuse(.invalidSnapshot) }
+        } else {
+            guard (attachment.markupDataBytes ?? 0) == 0,
+                  attachment.hasEmbeddedMarkup != true else { return .refuse(.invalidSnapshot) }
+        }
+        guard expectedHash != nil || attachment.hasEmbeddedMarkup != true else {
+            return .refuse(.invalidSnapshot)
+        }
+        let expected = expectedHash.map { SnapshotRestoreDigest(sha256: $0, byteCount: expectedBytes!) }
+        let differs: Bool
+        switch row.evidence.scanMarkup {
+        case .notCollected: return .none
+        case .absent: differs = expected != nil
+        case .present(let actual): differs = actual != expected
+        }
+        guard differs else { return .none }
+        return .restore(SnapshotExistingMarkupRestore(
+            sha256: expectedHash,
+            byteCount: expectedBytes,
+            embedded: attachment.hasEmbeddedMarkup == true,
+            unmark: row.isMarkedForDeletion
+        ))
+    }
+
     /// Rejects keeping a row whose collected evidence proves it differs from the snapshot.
     /// Evidence that was not collected is left to post-restore verification.
     private static func existingEvidenceRefusal(
@@ -393,13 +643,15 @@ enum SnapshotRestorePlanner {
             case .present(let value): return expected != value
             }
         }
-        let pairs: [(SnapshotRestoreDigest?, SnapshotRestoreDigestEvidence)] = [
+        var pairs: [(SnapshotRestoreDigest?, SnapshotRestoreDigestEvidence)] = [
             (digest(material.blobSHA256, material.byteCount), evidence.blob),
             (digest(material.paperBundleSHA256, material.paperBundleByteCount), evidence.paperBundle),
             (digest(material.synapseSHA256, material.synapseByteCount), evidence.synapse),
             (digest(material.linkMetadataSHA256, material.linkMetadataByteCount), evidence.linkMetadata),
-            (digest(material.scanMarkupSHA256, material.scanMarkupByteCount), evidence.scanMarkup),
         ]
+        if index.attachments[id].map({ AttachmentMarkupPolicy.supports($0.typeUTI) }) != true {
+            pairs.append((digest(material.scanMarkupSHA256, material.scanMarkupByteCount), evidence.scanMarkup))
+        }
         return pairs.contains(where: { differs($0.0, $0.1) }) ? .contentMismatch : nil
     }
 

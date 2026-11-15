@@ -207,11 +207,14 @@ enum SnapshotRestoreVerification {
               (expected.scanOrientation ?? 0) == (actual.scanOrientation ?? 0),
               (expected.scanHasMarkup == true) == (actual.scanHasMarkup == true),
               (expected.scanHasEmbeddedMarkup == true) == (actual.scanHasEmbeddedMarkup == true) else { return false }
-        if let crop = expected.scanCrop,
-           !NativeVerificationRules.sameScanCrop(crop, actual.scanCrop, tolerance: 0.000_1) { return false }
+        if expected.scanCrop != nil || actual.scanCrop != nil {
+            guard NativeVerificationRules.sameScanCrop(expected.scanCrop, actual.scanCrop,
+                                                       tolerance: 0.000_1) else { return false }
+        }
         guard ((expected.markupDataBytes ?? 0) > 0) == ((actual.markupDataBytes ?? 0) > 0),
               (expected.hasEmbeddedMarkup == true) == (actual.hasEmbeddedMarkup == true) else { return false }
         if isRecordingRoot {
+            guard expected.recording == actual.recording else { return false }
             if let duration = expected.duration {
                 guard let actualDuration = actual.duration,
                       abs(actualDuration - duration) <= max(0.25, duration * 0.05) else { return false }

@@ -18,9 +18,11 @@ final class SnapshotRestoreVerificationEvidenceTests: XCTestCase {
                    childAttachments: order.map { Attachment(id: $0, typeUTI: "public.jpeg", scanFilter: 1, scanOrientation: 0) })
     }
 
-    private func recording(_ order: [String], duration: Double = 10, words: [TranscriptWord] = []) -> Attachment {
+    private func recording(_ order: [String], duration: Double = 10, words: [TranscriptWord] = [],
+                           metadata: RecordingMetadata? = nil) -> Attachment {
         Attachment(id: "recording", typeUTI: "com.apple.m4a-audio", transcriptWords: words,
-                   recordingFragments: order.map { RecordingFragmentMetadata(id: $0) }, duration: duration,
+                   recording: metadata, recordingFragments: order.map { RecordingFragmentMetadata(id: $0) },
+                   duration: duration,
                    childAttachmentIDs: order,
                    childAttachments: order.map { Attachment(id: $0, typeUTI: "com.apple.m4a-audio") })
     }
@@ -46,6 +48,37 @@ final class SnapshotRestoreVerificationEvidenceTests: XCTestCase {
         let changed = [TranscriptWord(text: "goodbye", start: 0, duration: 0.5)]
         XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected,
                                                            actual: try note([recording(["f1"], duration: 10, words: changed)])))
+    }
+
+    func testRejectsChangedRecordingSummaryAndCallMetadata() throws {
+        let metadata = RecordingMetadata(
+            summary: "Saved summary", topLineSummary: "Saved preview", summaryVersion: 3,
+            externalModelAttributionProviderName: "Provider",
+            externalModelAttributionSymbolName: "symbol",
+            localSpeakerHandle: "local", remoteSpeakerHandle: "remote",
+            callType: 2, isCallRecording: true, startTime: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let expected = try note([recording(["f1"], metadata: metadata)])
+        XCTAssertTrue(SnapshotRestoreVerification.matches(expected: expected, actual: expected))
+
+        for change in [
+            { (value: inout RecordingMetadata) in value.summary = "Wrong" },
+            { (value: inout RecordingMetadata) in value.topLineSummary = nil },
+            { (value: inout RecordingMetadata) in value.summaryVersion = 4 },
+            { (value: inout RecordingMetadata) in value.externalModelAttributionProviderName = nil },
+            { (value: inout RecordingMetadata) in value.externalModelAttributionSymbolName = nil },
+            { (value: inout RecordingMetadata) in value.localSpeakerHandle = "other" },
+            { (value: inout RecordingMetadata) in value.remoteSpeakerHandle = nil },
+            { (value: inout RecordingMetadata) in value.callType = 1 },
+            { (value: inout RecordingMetadata) in value.isCallRecording = false },
+            { (value: inout RecordingMetadata) in value.startTime = Date(timeIntervalSince1970: 1) },
+        ] {
+            var changed = metadata
+            change(&changed)
+            XCTAssertFalse(SnapshotRestoreVerification.matches(
+                expected: expected, actual: try note([recording(["f1"], metadata: changed)])
+            ))
+        }
     }
 
     func testRejectsChangedOCRAndImageClassificationMetadata() throws {
@@ -98,6 +131,13 @@ final class SnapshotRestoreVerificationEvidenceTests: XCTestCase {
         XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: try altered {
             $0[0].childAttachments?[0].scanCrop?.topRight = ScanPoint(x: 0.9, y: 1)
         }))
+        XCTAssertFalse(SnapshotRestoreVerification.matches(expected: try note([
+            Attachment(id: "scan", typeUTI: "com.apple.notes.gallery", childAttachmentIDs: ["page"],
+                       childAttachments: [Attachment(id: "page", typeUTI: "public.jpeg", scanCrop: nil)])
+        ]), actual: try note([
+            Attachment(id: "scan", typeUTI: "com.apple.notes.gallery", childAttachmentIDs: ["page"],
+                       childAttachments: [page])
+        ])))
         XCTAssertFalse(SnapshotRestoreVerification.matches(expected: expected, actual: try altered {
             $0[1].url = "https://example.com/b"
         }))

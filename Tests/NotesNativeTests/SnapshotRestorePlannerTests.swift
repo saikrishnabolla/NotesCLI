@@ -1282,7 +1282,7 @@ final class SnapshotRestorePlannerTests: XCTestCase {
         XCTAssertEqual(try action(for: attachment, archive: archive, existing: [row(.notCollected)]), .keep)
     }
 
-    func testRefusesKeptRowWhoseLinkOrMarkupPayloadChanged() throws {
+    func testRestoresOnlyChangedExistingAttachmentMarkup() throws {
         let link = Attachment(id: "link", typeUTI: "public.url", url: "https://example.com", synapseDataBytes: 10)
         var linkMaterial = material("link", typeUTI: "public.url", hash: nil, byteCount: nil)
         linkMaterial.synapseSHA256 = String(repeating: "c", count: 64)
@@ -1303,7 +1303,63 @@ final class SnapshotRestorePlannerTests: XCTestCase {
             evidence: SnapshotRestoreExistingEvidence(blob: .present(digest("a")),
                                                       scanMarkup: .present(digest("e", 7)))
         )
-        XCTAssertEqual(try action(for: image, archive: imageArchive, existing: [markedUp]), .refuse(.contentMismatch))
+        XCTAssertEqual(
+            try action(for: image, archive: imageArchive, existing: [markedUp]),
+            .restoreExistingMarkup(SnapshotExistingMarkupRestore(
+                sha256: nil, byteCount: nil, embedded: false, unmark: false
+            ))
+        )
+
+        var savedMarkup = material("image", typeUTI: "public.png")
+        savedMarkup.scanMarkupSHA256 = String(repeating: "c", count: 64)
+        savedMarkup.scanMarkupByteCount = 10
+        let savedImage = Attachment(id: "image", typeUTI: "public.png", markupDataBytes: 10,
+                                    hasEmbeddedMarkup: true)
+        let savedArchive = SnapshotAttachmentArchive(attachments: [savedMarkup])
+        func imageRow(_ markup: SnapshotRestoreDigestEvidence, deleted: Bool = false) -> SnapshotRestoreExistingAttachment {
+            SnapshotRestoreExistingAttachment(
+                id: "image", typeUTI: "public.png", isMarkedForDeletion: deleted,
+                evidence: SnapshotRestoreExistingEvidence(blob: .present(digest("a")), scanMarkup: markup)
+            )
+        }
+        let restore = SnapshotExistingMarkupRestore(
+            sha256: String(repeating: "c", count: 64), byteCount: 10, embedded: true, unmark: false
+        )
+        XCTAssertEqual(try action(for: savedImage, archive: savedArchive,
+                                  existing: [imageRow(.present(digest("d", 10)))]),
+                       .restoreExistingMarkup(restore))
+        XCTAssertEqual(try action(for: savedImage, archive: savedArchive,
+                                  existing: [imageRow(.absent)]),
+                       .restoreExistingMarkup(restore))
+        var unmark = restore
+        unmark.unmark = true
+        XCTAssertEqual(try action(for: savedImage, archive: savedArchive,
+                                  existing: [imageRow(.absent, deleted: true)]),
+                       .restoreExistingMarkup(unmark))
+    }
+
+    func testRefusesMalformedOrUnsupportedExistingMarkupRestore() throws {
+        var malformed = material("image", typeUTI: "public.png")
+        malformed.scanMarkupSHA256 = "future-format"
+        malformed.scanMarkupByteCount = 10
+        let image = Attachment(id: "image", typeUTI: "public.png", markupDataBytes: 10)
+        let row = SnapshotRestoreExistingAttachment(
+            id: "image", typeUTI: "public.png", isMarkedForDeletion: false,
+            evidence: SnapshotRestoreExistingEvidence(blob: .present(digest("a")), scanMarkup: .absent)
+        )
+        XCTAssertEqual(try action(for: image, archive: SnapshotAttachmentArchive(attachments: [malformed]),
+                                  existing: [row]), .refuse(.invalidSnapshot))
+
+        var unsupported = material("text", typeUTI: "public.plain-text")
+        unsupported.scanMarkupSHA256 = String(repeating: "c", count: 64)
+        unsupported.scanMarkupByteCount = 10
+        let text = Attachment(id: "text", typeUTI: "public.plain-text", markupDataBytes: 10)
+        let textRow = SnapshotRestoreExistingAttachment(
+            id: "text", typeUTI: "public.plain-text", isMarkedForDeletion: false,
+            evidence: SnapshotRestoreExistingEvidence(blob: .present(digest("a")), scanMarkup: .absent)
+        )
+        XCTAssertEqual(try action(for: text, archive: SnapshotAttachmentArchive(attachments: [unsupported]),
+                                  existing: [textRow]), .refuse(.contentMismatch))
     }
 
     func testRefusesKeptPaperDocumentWhoseBundleChanged() throws {
@@ -1321,6 +1377,105 @@ final class SnapshotRestorePlannerTests: XCTestCase {
         XCTAssertEqual(try action(for: paper, archive: archive, existing: [row(.present(digest("f", 99)))]), .keep)
         XCTAssertEqual(try action(for: paper, archive: archive, existing: [row(.present(digest("0", 99)))]),
                        .refuse(.contentMismatch))
+    }
+
+    func testRestoresClearedExistingRecordingSummaryWithoutRecreatingAudio() throws {
+        let words = [TranscriptWord(text: "hello", start: 0, duration: 0.5, fragment: 0)]
+        let fragments = [RecordingFragmentMetadata(
+            id: "fragment", createdDate: Date(timeIntervalSince1970: 100), transcriptVersion: 1
+        )]
+        let metadata = RecordingMetadata(
+            summary: "Saved summary", topLineSummary: "Saved preview", summaryVersion: 2,
+            externalModelAttributionProviderName: "Provider",
+            externalModelAttributionSymbolName: "symbol",
+            localSpeakerHandle: "local", remoteSpeakerHandle: "remote",
+            callType: 2, isCallRecording: true,
+            startTime: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        let child = Attachment(id: "fragment", typeUTI: "com.apple.m4a-audio", duration: 10)
+        let saved = Attachment(
+            id: "recording", typeUTI: "com.apple.m4a-audio", transcriptWords: words,
+            recording: metadata, recordingFragments: fragments, duration: 10,
+            childAttachmentIDs: [child.id], childAttachments: [child]
+        )
+        var current = saved
+        var clearedMetadata = metadata
+        clearedMetadata.summary = nil
+        clearedMetadata.topLineSummary = nil
+        clearedMetadata.summaryVersion = nil
+        clearedMetadata.externalModelAttributionProviderName = nil
+        clearedMetadata.externalModelAttributionSymbolName = nil
+        current.recording = clearedMetadata
+        let snapshot = try note(
+            attachments: [saved],
+            runs: [AttributeRun(length: 1, attachment: InlineRef(id: saved.id, typeUTI: saved.typeUTI))]
+        )
+        let archive = SnapshotAttachmentArchive(attachments: [material(
+            child.id, typeUTI: child.typeUTI, filename: "recording.m4a",
+            parentID: saved.id, mediaDuration: 10
+        )])
+        let rows = [
+            SnapshotRestoreExistingAttachment(
+                id: saved.id, typeUTI: saved.typeUTI, isMarkedForDeletion: false,
+                evidence: SnapshotRestoreExistingEvidence(orderedChildIDs: [child.id], readback: current)
+            ),
+            SnapshotRestoreExistingAttachment(
+                id: child.id, typeUTI: child.typeUTI, parentID: saved.id, isMarkedForDeletion: false,
+                evidence: SnapshotRestoreExistingEvidence(blob: .present(digest("a")), readback: child)
+            ),
+        ]
+
+        let plan = SnapshotRestorePlanner.plan(snapshot: snapshot, verifiedArchive: archive, existing: rows)
+        XCTAssertEqual(plan.attachment(saved.id)?.action,
+                       .restoreExistingRecordingMetadata(.init(metadata: metadata, unmark: false)))
+        XCTAssertEqual(plan.attachment(child.id)?.action, .keep)
+
+        var restoredMetadata = current.recording
+        var unmarked = false
+        let applied = try NativeNotesWriter.applyExistingRecordingMetadataAction(
+            try XCTUnwrap(plan.attachment(saved.id)?.action),
+            unmark: { unmarked = true },
+            apply: { restoredMetadata = $0 }
+        )
+        XCTAssertEqual(applied, .init(metadata: metadata, unmark: false))
+        XCTAssertEqual(restoredMetadata, metadata)
+        XCTAssertFalse(unmarked)
+    }
+
+    func testRefusesUnsafeOrGraphMismatchedExistingRecordingMetadataRestore() throws {
+        let child = Attachment(id: "fragment", typeUTI: "com.apple.m4a-audio", duration: 10)
+        let unsafe = RecordingMetadata(summary: "Saved summary", topLineSummary: nil, summaryVersion: 2)
+        let saved = Attachment(
+            id: "recording", typeUTI: "com.apple.m4a-audio",
+            transcriptWords: [TranscriptWord(text: "saved", start: 0, duration: 0.5, fragment: 0)],
+            recording: unsafe, duration: 10,
+            childAttachmentIDs: [child.id], childAttachments: [child]
+        )
+        var current = saved
+        current.recording = nil
+        let snapshot = try note(
+            attachments: [saved],
+            runs: [AttributeRun(length: 1, attachment: InlineRef(id: saved.id, typeUTI: saved.typeUTI))]
+        )
+        let archive = SnapshotAttachmentArchive(attachments: [material(
+            child.id, typeUTI: child.typeUTI, filename: "recording.m4a",
+            parentID: saved.id, mediaDuration: 10
+        )])
+        func plan(_ readback: Attachment) -> SnapshotRestorePlan {
+            SnapshotRestorePlanner.plan(snapshot: snapshot, verifiedArchive: archive, existing: [
+                SnapshotRestoreExistingAttachment(
+                    id: saved.id, typeUTI: saved.typeUTI, isMarkedForDeletion: false,
+                    evidence: SnapshotRestoreExistingEvidence(orderedChildIDs: [child.id], readback: readback)
+                ),
+                SnapshotRestoreExistingAttachment(
+                    id: child.id, typeUTI: child.typeUTI, parentID: saved.id, isMarkedForDeletion: false,
+                    evidence: SnapshotRestoreExistingEvidence(blob: .present(digest("a")), readback: child)
+                ),
+            ])
+        }
+        XCTAssertEqual(plan(current).attachment(saved.id)?.action, .refuse(.unsupportedRecording))
+        current.transcriptWords = [TranscriptWord(text: "changed", start: 0, duration: 0.5, fragment: 0)]
+        XCTAssertEqual(plan(current).attachment(saved.id)?.action, .refuse(.contentMismatch))
     }
 
     func testRefusesExistingScanAndRecordingGraphsWithReversedChildOrder() throws {
@@ -1347,5 +1502,113 @@ final class SnapshotRestorePlannerTests: XCTestCase {
             XCTAssertEqual(plan(["two", "one"]).attachment("parent")?.action, .refuse(.parentChildTopology), parentType)
             XCTAssertFalse(plan(["two", "one"]).canRestore, parentType)
         }
+    }
+
+    func testRestoresExistingScanStateAndOrderWithoutRecreatingPages() throws {
+        let crop = ScanCrop(
+            bottomLeft: ScanPoint(x: 0.1, y: 0.9), bottomRight: ScanPoint(x: 0.9, y: 0.9),
+            topLeft: ScanPoint(x: 0.1, y: 0.1), topRight: ScanPoint(x: 0.9, y: 0.1)
+        )
+        let first = Attachment(id: "one", typeUTI: "public.jpeg", scanFilter: 2, scanOrientation: 1,
+                               scanCrop: crop, scanHasMarkup: false, scanHasEmbeddedMarkup: false)
+        let second = Attachment(id: "two", typeUTI: "public.jpeg", scanFilter: 0, scanOrientation: 0,
+                                scanCrop: nil, scanHasMarkup: true, scanHasEmbeddedMarkup: true)
+        let gallery = Attachment(id: "gallery", typeUTI: "com.apple.notes.gallery",
+                                 childAttachmentIDs: [first.id, second.id], childAttachments: [first, second])
+        let snapshot = try note(
+            attachments: [gallery],
+            runs: [AttributeRun(length: 1, attachment: InlineRef(id: gallery.id, typeUTI: gallery.typeUTI))]
+        )
+        let firstMaterial = material(first.id, typeUTI: first.typeUTI, filename: "one.jpg", parentID: gallery.id)
+        var secondMaterial = material(second.id, typeUTI: second.typeUTI, filename: "two.jpg",
+                                      hash: String(repeating: "b", count: 64), parentID: gallery.id)
+        secondMaterial.scanMarkupSHA256 = String(repeating: "c", count: 64)
+        secondMaterial.scanMarkupByteCount = 10
+        let currentFirst = Attachment(id: first.id, typeUTI: first.typeUTI, scanFilter: 4, scanOrientation: 0,
+                                      scanCrop: crop, scanHasMarkup: false, scanHasEmbeddedMarkup: false)
+        let currentSecond = Attachment(id: second.id, typeUTI: second.typeUTI, scanFilter: 0, scanOrientation: 0,
+                                       scanCrop: nil, scanHasMarkup: false, scanHasEmbeddedMarkup: false)
+        let currentGallery = Attachment(id: gallery.id, typeUTI: gallery.typeUTI,
+                                        childAttachmentIDs: [second.id, first.id],
+                                        childAttachments: [currentSecond, currentFirst])
+        let rows = [
+            SnapshotRestoreExistingAttachment(
+                id: gallery.id, typeUTI: gallery.typeUTI, isMarkedForDeletion: false,
+                evidence: SnapshotRestoreExistingEvidence(
+                    orderedChildIDs: [second.id, first.id], readback: currentGallery
+                )
+            ),
+            SnapshotRestoreExistingAttachment(
+                id: first.id, typeUTI: first.typeUTI, parentID: gallery.id, isMarkedForDeletion: false,
+                evidence: SnapshotRestoreExistingEvidence(
+                    blob: .present(digest("a")), scanMarkup: .absent, readback: currentFirst
+                )
+            ),
+            SnapshotRestoreExistingAttachment(
+                id: second.id, typeUTI: second.typeUTI, parentID: gallery.id, isMarkedForDeletion: false,
+                evidence: SnapshotRestoreExistingEvidence(
+                    blob: .present(digest("b")), scanMarkup: .absent, readback: currentSecond
+                )
+            ),
+        ]
+        let plan = SnapshotRestorePlanner.plan(
+            snapshot: snapshot,
+            verifiedArchive: SnapshotAttachmentArchive(attachments: [firstMaterial, secondMaterial]),
+            existing: rows
+        )
+        XCTAssertEqual(plan.attachment(gallery.id)?.action, .restoreExistingScan(.init(
+            parentID: gallery.id,
+            orderedPageIDs: [first.id, second.id],
+            pages: [
+                .init(id: first.id, filter: 2, orientation: 1, crop: crop,
+                      markupSHA256: nil, markupByteCount: nil, hasEmbeddedMarkup: false, unmark: false),
+                .init(id: second.id, filter: 0, orientation: 0, crop: nil,
+                      markupSHA256: String(repeating: "c", count: 64), markupByteCount: 10,
+                      hasEmbeddedMarkup: true, unmark: false),
+            ],
+            unmarkParent: false
+        )))
+        XCTAssertEqual(plan.attachment(first.id)?.action, .restoredByParent(gallery.id))
+        XCTAssertEqual(plan.attachment(second.id)?.action, .restoredByParent(gallery.id))
+    }
+
+    func testRefusesUnsafeExistingScanClearAndNilCropRestore() throws {
+        let savedPage = Attachment(id: "page", typeUTI: "public.jpeg", scanFilter: 0, scanOrientation: 0,
+                                   scanCrop: nil, scanHasMarkup: false, scanHasEmbeddedMarkup: false)
+        let gallery = Attachment(id: "gallery", typeUTI: "com.apple.notes.gallery",
+                                 childAttachmentIDs: [savedPage.id], childAttachments: [savedPage])
+        let snapshot = try note(
+            attachments: [gallery],
+            runs: [AttributeRun(length: 1, attachment: InlineRef(id: gallery.id, typeUTI: gallery.typeUTI))]
+        )
+        let archive = SnapshotAttachmentArchive(attachments: [material(
+            savedPage.id, typeUTI: savedPage.typeUTI, filename: "page.jpg", parentID: gallery.id
+        )])
+        func plan(_ current: Attachment, markup: SnapshotRestoreDigestEvidence) -> SnapshotRestorePlan {
+            let currentGallery = Attachment(id: gallery.id, typeUTI: gallery.typeUTI,
+                                            childAttachmentIDs: [current.id], childAttachments: [current])
+            return SnapshotRestorePlanner.plan(snapshot: snapshot, verifiedArchive: archive, existing: [
+                SnapshotRestoreExistingAttachment(
+                    id: gallery.id, typeUTI: gallery.typeUTI, isMarkedForDeletion: false,
+                    evidence: SnapshotRestoreExistingEvidence(orderedChildIDs: [current.id], readback: currentGallery)
+                ),
+                SnapshotRestoreExistingAttachment(
+                    id: current.id, typeUTI: current.typeUTI, parentID: gallery.id, isMarkedForDeletion: false,
+                    evidence: SnapshotRestoreExistingEvidence(blob: .present(digest("a")),
+                                                              scanMarkup: markup, readback: current)
+                ),
+            ])
+        }
+        var current = savedPage
+        current.scanCrop = ScanCrop(
+            bottomLeft: ScanPoint(x: 0, y: 1), bottomRight: ScanPoint(x: 1, y: 1),
+            topLeft: ScanPoint(x: 0, y: 0), topRight: ScanPoint(x: 1, y: 0)
+        )
+        XCTAssertEqual(plan(current, markup: .absent).attachment(gallery.id)?.action,
+                       .refuse(.unsupportedScan))
+        current = savedPage
+        current.scanHasMarkup = true
+        XCTAssertEqual(plan(current, markup: .present(digest("c", 10))).attachment(gallery.id)?.action,
+                       .refuse(.unsupportedScan))
     }
 }

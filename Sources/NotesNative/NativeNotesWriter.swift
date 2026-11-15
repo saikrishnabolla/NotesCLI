@@ -11,6 +11,7 @@ import NotesNativeObjC
 import NotesStore
 import PDFKit
 import PencilKit
+import UniformTypeIdentifiers
 
 fileprivate struct UnsafeSendableBox<Value>: @unchecked Sendable {
     let value: Value
@@ -1727,23 +1728,34 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     struct ScanPageEvidence: Sendable {
+        enum Format: Equatable, Sendable {
+            case png
+            case jpeg
+            case pdfPage
+            case unsupported
+        }
+
         var width: Int
         var height: Int
         var samples: [UInt8]
         var rasterSHA256: String
+        var format: Format
 
-        func visuallyMatches(_ other: ScanPageEvidence) -> Bool {
-            guard width == other.width, height == other.height, samples.count == other.samples.count else { return false }
-            if rasterSHA256 == other.rasterSHA256 { return true }
-            guard samples.count == 256 * 256 * 4 else { return false }
+        func visuallyMatches(_ destination: ScanPageEvidence) -> Bool {
+            guard format != .unsupported, destination.format != .unsupported,
+                  width == destination.width, height == destination.height,
+                  samples.count == destination.samples.count else { return false }
+            if rasterSHA256 == destination.rasterSHA256 { return true }
+            guard format == .png, destination.format == .jpeg,
+                  samples.count == 256 * 256 * 4 else { return false }
             var totalDifference = 0
             var changedPixels = 0
             var blockDifferences = [Int](repeating: 0, count: 64 * 64)
             for pixel in 0..<(256 * 256) {
                 let offset = pixel * 4
-                let red = abs(Int(samples[offset]) - Int(other.samples[offset]))
-                let green = abs(Int(samples[offset + 1]) - Int(other.samples[offset + 1]))
-                let blue = abs(Int(samples[offset + 2]) - Int(other.samples[offset + 2]))
+                let red = abs(Int(samples[offset]) - Int(destination.samples[offset]))
+                let green = abs(Int(samples[offset + 1]) - Int(destination.samples[offset + 1]))
+                let blue = abs(Int(samples[offset + 2]) - Int(destination.samples[offset + 2]))
                 let difference = red + green + blue
                 totalDifference += difference
                 if max(red, green, blue) > 24 { changedPixels += 1 }
@@ -1755,8 +1767,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let averageDifference = Double(totalDifference) / Double(channelCount)
             let maximumBlockAverage = Double(blockDifferences.max() ?? 0) / Double(4 * 4 * 3)
             return averageDifference <= 3.0 &&
-                changedPixels <= (256 * 256) / 500 &&
-                maximumBlockAverage <= 18.0
+                changedPixels <= (256 * 256) / 128 &&
+                maximumBlockAverage <= 64.0
         }
     }
 
@@ -1778,17 +1790,25 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     static func scanPageEvidence(url: URL, name: String) throws -> ScanPageEvidence {
-        guard let image = NSImage(contentsOf: url),
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let identifier = CGImageSourceGetType(source) as String?,
+              let image = NSImage(contentsOf: url),
               !image.representations.contains(where: { $0 is NSPDFImageRep }),
               let representation = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw NotesError("invalid_scan_image", "Every scan page must be a readable image: \(name)")
         }
+        let format: ScanPageEvidence.Format
+        switch identifier {
+        case UTType.png.identifier: format = .png
+        case UTType.jpeg.identifier: format = .jpeg
+        default: format = .unsupported
+        }
         return try rasterEvidence(representation, width: representation.width,
-                                  height: representation.height, name: name)
+                                  height: representation.height, name: name, format: format)
     }
 
     private static func rasterEvidence(_ representation: CGImage, width: Int, height: Int,
-                                       name: String) throws -> ScanPageEvidence {
+                                       name: String, format: ScanPageEvidence.Format) throws -> ScanPageEvidence {
         var samples = [UInt8](repeating: 0, count: 256 * 256 * 4)
         let rendered = samples.withUnsafeMutableBytes { bytes -> Bool in
             guard let base = bytes.baseAddress,
@@ -1804,7 +1824,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         guard rendered else { throw NotesError("invalid_scan_image", "The scan page could not be sampled: \(name)") }
         let hash = SHA256.hash(data: Data(samples)).map { String(format: "%02x", $0) }.joined()
         return ScanPageEvidence(width: width, height: height,
-                                samples: samples, rasterSHA256: hash)
+                                samples: samples, rasterSHA256: hash, format: format)
     }
 
     private static func pdfPageEvidence(_ url: URL) throws -> [ScanPageEvidence] {
@@ -1822,7 +1842,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             }
             let aspect = bounds.height == 0 ? 0 : bounds.width / bounds.height
             return try rasterEvidence(image, width: Int((aspect * 10_000).rounded()),
-                                      height: 10_000, name: "Paper page \(index + 1)")
+                                      height: 10_000, name: "Paper page \(index + 1)", format: .pdfPage)
         }
     }
 
@@ -1930,7 +1950,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     return try? Self.scanPageEvidence(url: URL(fileURLWithPath: path), name: child.filename ?? child.id)
                 }
                 guard storedPages.count == receipt.sourcePages.count,
-                      zip(storedPages, receipt.sourcePages).allSatisfy({ $0.visuallyMatches($1) }) else { return nil }
+                      zip(receipt.sourcePages, storedPages).allSatisfy({ $0.visuallyMatches($1) }) else { return nil }
                 return ["attachmentID": receipt.attachmentID,
                         "pageIDs": receipt.pageAttachmentIDs.joined(separator: ","),
                         "pageCount": String(orderedChildren.count), "pages": "decoded_and_matched"]
@@ -2014,7 +2034,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                     return try? Self.scanPageEvidence(url: URL(fileURLWithPath: path), name: child.filename ?? child.id)
                 }
                 guard storedPages.count == receipt.sourcePages.count,
-                      zip(storedPages, receipt.sourcePages).allSatisfy({ $0.visuallyMatches($1) }) else { return nil }
+                      zip(receipt.sourcePages, storedPages).allSatisfy({ $0.visuallyMatches($1) }) else { return nil }
                 return ["attachmentID": receipt.attachmentID,
                         "pageIDs": receipt.pageAttachmentIDs.joined(separator: ","),
                         "pageCount": String(expectedOrder.count), "pages": "decoded_and_matched"]
@@ -4757,7 +4777,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                             synapse: dataEvidence(value(attachment, "synapseData") as? Data),
                             linkMetadata: dataEvidence(value(attachment, "linkPresentationArchivedMetadata") as? Data),
                             scanMarkup: dataEvidence(value(attachment, "markupModelData") as? Data),
-                            orderedChildIDs: orderedChildIDs
+                            orderedChildIDs: orderedChildIDs,
+                            readback: readback
                         )
                     } else {
                         evidence = SnapshotRestoreExistingEvidence()
@@ -4798,6 +4819,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
             var recreatedFileCount = 0
             var recreatedFileIDs: Set<String> = []
             var recreatedFileMarkup: [String: (sha256: String, embedded: Bool)] = [:]
+            var restoredExistingMarkup: [String: SnapshotExistingMarkupRestore] = [:]
+            var restoredRecordingMetadata: [String: SnapshotExistingRecordingMetadataRestore] = [:]
+            var restoredExistingScans: [String: SnapshotExistingScanRestore] = [:]
             var recreatedRichLinks: [String: Attachment] = [:]
             var recreatedMaps: [String: Attachment] = [:]
             var recreatedLinkPayloads: [String: (synapseHash: String?, synapseBytes: Int?,
@@ -4836,8 +4860,101 @@ public final class NativeNotesWriter: NotesNativeWriting {
                         if planned.typeUTI.lowercased().contains("hashtag") {
                             try NCNotesRuntime.reviveTagAttachment(attachment)
                         }
+                    case .restoreExistingMarkup(let restore):
+                        guard let attachment = attachmentObjects[planned.id] else {
+                            throw NotesError("snapshot_attachment_unavailable", "Attachment \(planned.id) disappeared before markup restore.")
+                        }
+                        if restore.unmark { try NCNotesRuntime.unmarkForDeletion(attachment) }
+                        let payload: Data?
+                        if let hash = restore.sha256, let byteCount = restore.byteCount {
+                            let data = try Self.verifiedMarkupPayload(
+                                hash: hash, byteCount: byteCount, restoreMaterial: material
+                            )
+                            _ = try FrozenAttachmentMarkup(data: data)
+                            payload = data
+                        } else {
+                            guard restore.sha256 == nil, restore.byteCount == nil, !restore.embedded else {
+                                throw NotesError("snapshot_integrity_failed", "The saved attachment markup state is invalid.")
+                            }
+                            payload = nil
+                        }
+                        try NCNotesRuntime.setValue(payload, forKey: "markupModelData", of: attachment)
+                        try NCNotesRuntime.setValue(payload == nil ? false : restore.embedded,
+                                                    forKey: "hasMarkupData", of: attachment)
+                        try NCNotesRuntime.updateChangeCount(of: attachment, reason: "Restored editable markup")
+                        restoredExistingMarkup[planned.id] = restore
+                    case .restoreExistingRecordingMetadata:
+                        guard let attachment = attachmentObjects[planned.id] else {
+                            throw NotesError("snapshot_attachment_unavailable", "Recording \(planned.id) disappeared before metadata restore.")
+                        }
+                        guard let restore = try Self.applyExistingRecordingMetadataAction(
+                            planned.action,
+                            unmark: { try NCNotesRuntime.unmarkForDeletion(attachment) },
+                            apply: { metadata in
+                                try NCNotesRuntime.applyRecordingMetadata(
+                                    Self.recordingMetadataPayload(metadata),
+                                    toAudioAttachment: attachment
+                                )
+                            }
+                        ) else {
+                            throw NotesError("invalid_snapshot", "The recording metadata restore action is invalid.")
+                        }
+                        restoredRecordingMetadata[planned.id] = restore
+                    case .restoreExistingScan(let restore):
+                        do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
+                        guard let gallery = attachmentObjects[planned.id] else {
+                            throw NotesError("snapshot_attachment_unavailable", "Scan \(planned.id) disappeared before restore.")
+                        }
+                        if restore.unmarkParent { try NCNotesRuntime.unmarkForDeletion(gallery) }
+                        for page in restore.pages where page.unmark {
+                            guard let object = attachmentObjects[page.id] else {
+                                throw NotesError("snapshot_attachment_unavailable", "Scan page \(page.id) disappeared before restore.")
+                            }
+                            try NCNotesRuntime.unmarkForDeletion(object)
+                        }
+                        for (index, pageID) in restore.orderedPageIDs.enumerated() {
+                            let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+                            if order.indices.contains(index), order[index] != pageID {
+                                try NCNotesRuntime.moveScanPage(pageID, toIndex: UInt(index), gallery: gallery)
+                            }
+                        }
+                        for page in restore.pages {
+                            if let savedCrop = page.crop {
+                                guard let object = attachmentObjects[page.id],
+                                      let fileURL = value(object, "fileURL") as? URL,
+                                      let size = Self.scanImagePixelSize(fileURL),
+                                      let crop = Self.normalizedScanCrop(
+                                        savedCrop, pixelWidth: size.width, pixelHeight: size.height
+                                      ) else {
+                                    throw NotesError("unsupported_scan_crop", "The saved crop for scan page \(page.id) cannot be mapped safely.")
+                                }
+                                try NCNotesRuntime.setScanCrop(
+                                    bottomLeftX: crop.bottomLeft.x, bottomLeftY: crop.bottomLeft.y,
+                                    bottomRightX: crop.bottomRight.x, bottomRightY: crop.bottomRight.y,
+                                    topLeftX: crop.topLeft.x, topLeftY: crop.topLeft.y,
+                                    topRightX: crop.topRight.x, topRightY: crop.topRight.y,
+                                    pageIdentifier: page.id, gallery: gallery
+                                )
+                            }
+                            try NCNotesRuntime.applyScanFilter(Int16(page.filter), pageIdentifier: page.id, gallery: gallery)
+                            try NCNotesRuntime.setScanOrientation(page.orientation, pageIdentifier: page.id, gallery: gallery)
+                            if let hash = page.markupSHA256, let byteCount = page.markupByteCount {
+                                let data = try Self.verifiedMarkupPayload(
+                                    hash: hash, byteCount: byteCount, restoreMaterial: material
+                                )
+                                _ = try FrozenAttachmentMarkup(data: data)
+                                try NCNotesRuntime.setScanMarkupData(data, pageIdentifier: page.id, gallery: gallery)
+                            }
+                            guard let object = attachmentObjects[page.id] else {
+                                throw NotesError("snapshot_attachment_unavailable", "Scan page \(page.id) disappeared during restore.")
+                            }
+                            try NCNotesRuntime.setValue(page.hasEmbeddedMarkup, forKey: "hasMarkupData", of: object)
+                            try NCNotesRuntime.updateChangeCount(of: object, reason: "Restored scan metadata")
+                        }
+                        restoredExistingScans[planned.id] = restore
                     case .recreateFile, .recreateScan, .recreateRecording, .recreatedByParent, .recreateTable,
-                         .recreateRichLink, .recreateMap, .recreatePaperDocument, .recreateDrawing, .recreateInline, .refuse:
+                         .restoredByParent, .recreateRichLink, .recreateMap, .recreatePaperDocument,
+                         .recreateDrawing, .recreateInline, .refuse:
                         break
                     }
                 }
@@ -5401,7 +5518,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                         attachmentObjects[planned.id] = created
                         recreatedInline[newID] = (request, savedParentID)
                         operation?.childAttachmentIDs.append(newID)
-                    case .keep, .unmark, .recreateScan, .recreatedByParent, .refuse:
+                    case .keep, .unmark, .restoreExistingMarkup, .restoreExistingRecordingMetadata,
+                         .restoreExistingScan, .recreateScan, .recreatedByParent, .restoredByParent, .refuse:
                         break
                     }
                 }
@@ -5789,6 +5907,73 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 let embedded = (value(attachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false
                 return hash == expected.sha256 && embedded == expected.embedded
             }
+            let existingMarkupVerified = try restoredExistingMarkup.allSatisfy { id, expected in
+                guard let attachment = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", id, fresh),
+                    in: context,
+                    limit: 1
+                ).first else { return false }
+                let data = value(attachment, "markupModelData") as? Data
+                let embedded = (value(attachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false
+                guard data?.count == expected.byteCount, embedded == expected.embedded else { return false }
+                if let hash = expected.sha256, let data {
+                    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() == hash
+                }
+                return expected.sha256 == nil && data?.isEmpty != false && !embedded
+            }
+            let existingRecordingMetadataVerified = try restoredRecordingMetadata.allSatisfy { id, restore in
+                let attachment = try recordingSummaryAttachment(id, note: fresh, in: context)
+                let state = try recordingSummaryState(attachment)
+                guard state.metadata == restore.metadata,
+                      let expected = snapshot.attachments.first(where: { $0.id == id }),
+                      state.fragments == (expected.childAttachmentIDs ?? []),
+                      state.fragmentMetadata == (expected.recordingFragments ?? []),
+                      RecordingFragments.mismatch(expected: expected.transcriptWords ?? [],
+                                                  actual: state.transcript) == nil else { return false }
+                if let duration = expected.duration {
+                    return abs(((value(attachment, "duration") as? NSNumber)?.doubleValue ?? 0) - duration)
+                        <= max(0.25, duration * 0.05)
+                }
+                return true
+            }
+            let existingScansVerified = try restoredExistingScans.allSatisfy { id, restore in
+                guard let gallery = try fetch(
+                    "ICAttachment",
+                    predicate: NSPredicate(format: "identifier == %@ AND note == %@", id, fresh),
+                    in: context,
+                    limit: 1
+                ).first,
+                      try NCNotesRuntime.galleryPageIdentifiers(in: gallery) == restore.orderedPageIDs else {
+                    return false
+                }
+                for page in restore.pages {
+                    let state = try scanPageState(restoredNoteID, attachmentID: id, pageID: page.id, in: context)
+                    guard let object = try fetch(
+                        "ICAttachment",
+                        predicate: NSPredicate(format: "identifier == %@ AND parentAttachment == %@", page.id, gallery),
+                        in: context,
+                        limit: 1
+                    ).first else { return false }
+                    let size = (value(object, "fileURL") as? URL).flatMap(Self.scanImagePixelSize)
+                    let expectedCrop = page.crop.flatMap {
+                        Self.normalizedScanCrop($0, pixelWidth: size?.width, pixelHeight: size?.height)
+                    }
+                    guard state.filter.value == page.filter,
+                          state.orientation.value == page.orientation,
+                          NativeVerificationRules.sameScanCrop(state.crop, expectedCrop),
+                          state.hasMarkup == (page.markupSHA256 != nil),
+                          state.hasEmbeddedMarkup == page.hasEmbeddedMarkup else { return false }
+                    let data = value(object, "markupModelData") as? Data
+                    if let hash = page.markupSHA256, let byteCount = page.markupByteCount {
+                        guard data?.count == byteCount, let data,
+                              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == hash else {
+                            return false
+                        }
+                    } else if data?.isEmpty == false { return false }
+                }
+                return true
+            }
             let linkPayloadsVerified = try recreatedLinkPayloads.allSatisfy { id, expected in
                 guard let attachment = try fetch(
                     "ICAttachment",
@@ -5900,6 +6085,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
                          "attachmentIDMap": idMapJSON, "restoredSHA256": hashesJSON,
                          "bodyVerified": String(bodyVerified),
                          "markersVerified": String(markersVerified),
+                         "existingMarkupVerified": String(existingMarkupVerified),
+                         "recordingMetadataVerified": String(existingRecordingMetadataVerified),
+                         "existingScansVerified": String(existingScansVerified),
                          "scansVerified": String(scansVerified),
                          "inlineParentsVerified": String(inlineParentsVerified),
                          "paperDocumentsVerified": String(paperDocumentsVerified),
@@ -5908,7 +6096,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 nativeVerified: bodyVerified && markersVerified && filesVerified && recordingFilesVerified &&
                     drawingsVerified && legacyDrawingsVerified && paperDocumentsVerified && paperBundleDrawingsVerified &&
                     archivedPaperBundlesVerified &&
-                    fileMarkupVerified && linkPayloadsVerified && scansVerified &&
+                    fileMarkupVerified && existingMarkupVerified && existingRecordingMetadataVerified &&
+                    linkPayloadsVerified && scansVerified && existingScansVerified &&
                     recordingsVerified && inlineParentsVerified,
                 sqlite: { restored in
                     func nestedAttachment(_ id: String, in attachments: [Attachment]) -> Attachment? {
@@ -5965,6 +6154,31 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                         .scanMarkupPayloads(restored.summary.id.uuid)[newID] else { return false }
                               return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined() == expected.sha256
                           }),
+                          restoredExistingMarkup.allSatisfy({ id, expected in
+                              guard let actual = nestedAttachment(id, in: restored.attachments),
+                                    actual.markupDataBytes == expected.byteCount,
+                                    actual.hasEmbeddedMarkup == expected.embedded else { return false }
+                              let payload = try? SQLiteNotesStore(refresh: true)
+                                  .scanMarkupPayloads(restored.summary.id.uuid)[id]
+                              if let hash = expected.sha256, let payload {
+                                  return SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined() == hash
+                              }
+                              return expected.sha256 == nil && payload == nil && (actual.markupDataBytes ?? 0) == 0
+                          }),
+                          restoredRecordingMetadata.allSatisfy({ id, restore in
+                              guard let actual = nestedAttachment(id, in: restored.attachments),
+                                    let expected = snapshot.attachments.first(where: { $0.id == id }),
+                                    actual.recording == restore.metadata,
+                                    actual.childAttachmentIDs == expected.childAttachmentIDs,
+                                    actual.childAttachments?.map(\.id) == expected.childAttachments?.map(\.id),
+                                    actual.recordingFragments == expected.recordingFragments,
+                                    RecordingFragments.mismatch(expected: expected.transcriptWords ?? [],
+                                                                actual: actual.transcriptWords ?? []) == nil else {
+                                  return false
+                              }
+                              guard let duration = expected.duration else { return true }
+                              return abs((actual.duration ?? 0) - duration) <= max(0.25, duration * 0.05)
+                          }),
                           recreatedPaperDocuments.allSatisfy({ newID, recreation in
                               guard let actual = restored.attachments.first(where: { $0.id == newID }),
                                     actual.typeUTI == (recreation.subtype == "scan"
@@ -5980,6 +6194,36 @@ public final class NativeNotesWriter: NotesNativeWriting {
                               }
                               return expectedPages.count == actualPages.count &&
                                   zip(expectedPages, actualPages).allSatisfy { $0.visuallyMatches($1) }
+                          }),
+                          restoredExistingScans.allSatisfy({ id, restore in
+                              guard let gallery = nestedAttachment(id, in: restored.attachments),
+                                    gallery.childAttachmentIDs == restore.orderedPageIDs,
+                                    gallery.childAttachments?.map(\.id) == restore.orderedPageIDs else { return false }
+                              return restore.pages.allSatisfy { page in
+                                  guard let actual = nestedAttachment(page.id, in: gallery.childAttachments ?? []),
+                                        actual.scanFilter == page.filter,
+                                        actual.scanOrientation == page.orientation,
+                                        actual.scanHasMarkup == (page.markupSHA256 != nil),
+                                        actual.scanHasEmbeddedMarkup == page.hasEmbeddedMarkup else { return false }
+                                  let size = actual.filePath.flatMap {
+                                      Self.scanImagePixelSize(URL(fileURLWithPath: $0))
+                                  }
+                                  let expectedCrop = page.crop.flatMap {
+                                      Self.normalizedScanCrop($0, pixelWidth: size?.width, pixelHeight: size?.height)
+                                  }
+                                  let actualCrop = actual.scanCrop.flatMap {
+                                      Self.normalizedScanCrop($0, pixelWidth: size?.width, pixelHeight: size?.height)
+                                  }
+                                  guard NativeVerificationRules.sameScanCrop(expectedCrop, actualCrop) else { return false }
+                                  let payload = try? SQLiteNotesStore(refresh: true)
+                                      .scanMarkupPayloads(restored.summary.id.uuid)[page.id]
+                                  if let hash = page.markupSHA256, let byteCount = page.markupByteCount,
+                                     let payload {
+                                      return payload.count == byteCount &&
+                                          SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined() == hash
+                                  }
+                                  return page.markupSHA256 == nil && payload == nil
+                              }
                           }),
                           recreatedScans.allSatisfy({ newParentID, scan in
                               guard let gallery = restored.attachments.first(where: { $0.id == newParentID }),
@@ -6344,6 +6588,17 @@ public final class NativeNotesWriter: NotesNativeWriting {
         if let value = metadata.isCallRecording { result["isCallRecording"] = value }
         if let value = metadata.startTime { result["startTime"] = value }
         return result
+    }
+
+    static func applyExistingRecordingMetadataAction(
+        _ action: SnapshotRestoreAction,
+        unmark: () throws -> Void,
+        apply: (RecordingMetadata) throws -> Void
+    ) throws -> SnapshotExistingRecordingMetadataRestore? {
+        guard case .restoreExistingRecordingMetadata(let restore) = action else { return nil }
+        if restore.unmark { try unmark() }
+        try apply(restore.metadata)
+        return restore
     }
 
     private static func snapshotTableRows(_ id: String, in document: NoteDocument) -> [[TableCellDocument]]? {

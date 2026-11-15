@@ -82,6 +82,8 @@ final class ReportMarkdownTests: XCTestCase {
 
             Query fragment https://example.com/story?topic=#query-tag stays text.
 
+            See [Intro](#intro), color #ffcc00, and entity &#x27;quoted&#x27; text.
+
             ```html
             <a href="https://example.com/code">#code</a>
             ![Code](https://images.example.com/fenced.png)
@@ -123,6 +125,10 @@ final class ReportMarkdownTests: XCTestCase {
         XCTAssertFalse(plan.markdown.contains("notescli-tag:fragment"))
         XCTAssertFalse(plan.markdown.contains("notescli-tag:query-tag"))
         XCTAssertFalse(plan.markdown.contains("notescli-tag:1"))
+        XCTAssertTrue(plan.markdown.contains("[Intro](#intro)"))
+        XCTAssertFalse(plan.markdown.contains("notescli-tag:intro"))
+        XCTAssertFalse(plan.markdown.contains("notescli-tag:ffcc00"))
+        XCTAssertFalse(plan.markdown.contains("notescli-tag:x27"))
         XCTAssertEqual(plan.requested.tags, 1)
         XCTAssertEqual(plan.requested.richLinks, 1)
         XCTAssertEqual(plan.requested.remoteImages, 1)
@@ -311,18 +317,18 @@ final class ReportMarkdownTests: XCTestCase {
         XCTAssertEqual(target.existing.map(\.summary.id.uuid), ["default-note"])
     }
 
-    func testReplacementRequiresOneExistingReportInTheTargetFolder() throws {
+    func testReplacementCreatesReportWhenNoneExistsInTheTargetFolder() throws {
         let account = Account(id: "account", name: "Primary", kind: "icloud", isDefault: true,
                               defaultFolderID: "default-folder", defaultFolderName: "Notes")
         let folder = Folder(id: "default-folder", name: "Notes", accountID: account.id, parentID: nil,
                             path: ["Notes"], isSmartFolder: false, isRecentlyDeleted: false, noteCount: 0)
         let reader = InMemoryNotes(accounts: [account], folders: [folder], notes: [])
 
-        XCTAssertThrowsError(try NotesReportWriter.resolveTarget(
+        let target = try NotesReportWriter.resolveTarget(
             title: "Missing report", folder: nil, replacing: true, reader: reader
-        )) { error in
-            XCTAssertEqual((error as? NotesError)?.code, "report_not_found")
-        }
+        )
+        XCTAssertEqual(target.folder.id, "default-folder")
+        XCTAssertTrue(target.existing.isEmpty)
     }
 
     func testUnknownReplacementDeleteKeepsNewReportAndReportsAmbiguity() {

@@ -217,7 +217,7 @@ enum ReportMarkdownPreprocessor {
 
     private static func rewriteTags(in markdown: String, requested: inout ReportElementCounts) -> String {
         let expression = try! NSRegularExpression(
-            pattern: #"(?<![\p{L}\p{N}_/#])#([\p{L}_][\p{L}\p{N}_-]*)(?![\p{L}\p{N}_-])"#
+            pattern: #"(?<![\p{L}\p{N}_/#(&\[])#([\p{L}_][\p{L}\p{N}_-]*)(?![\p{L}\p{N}_-])"#
         )
         let urlExpression = try! NSRegularExpression(
             pattern: #"(?i)\b(?:https?://|www\.)[^\s<>()\[\]{}]+"#
@@ -229,6 +229,9 @@ enum ReportMarkdownPreprocessor {
                 .map(\.range)
             for match in matches.reversed() {
                 guard !urlRanges.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { continue }
+                if let token = Range(match.range(at: 1), in: prose).map({ String(prose[$0]) }),
+                   [3, 6, 8].contains(token.count), token.allSatisfy(\.isHexDigit),
+                   token.contains(where: \.isNumber) { continue }
                 guard let whole = Range(match.range(at: 0), in: result),
                       let tagRange = Range(match.range(at: 1), in: result) else { continue }
                 let tag = String(result[tagRange])
@@ -624,9 +627,6 @@ public final class NotesReportWriter: @unchecked Sendable {
         }
         guard summaries.count <= 1 else {
             throw NotesError("ambiguous_report", "More than one note named \(title) already exists in the target folder.")
-        }
-        if replacing, summaries.isEmpty {
-            throw NotesError("report_not_found", "No note named \(title) exists in the target folder to replace.")
         }
         return ReportTargetResolution(folder: folder, existing: try summaries.map { try reader.note($0.id.uuid) })
     }

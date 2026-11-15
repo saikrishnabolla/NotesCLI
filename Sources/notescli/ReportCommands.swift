@@ -22,7 +22,7 @@ struct ReportCreate: ParsableCommand {
     @Option(help: "Comma-separated native tags.") var tags: String?
     @Option(name: .long, parsing: .upToNextOption,
             help: "Local paths or HTTPS URLs to attach.") var attach: [String] = []
-    @Flag(help: "Replace one exact-title report in the target folder.") var replace = false
+    @Flag(help: "Replace the exact-title report in the target folder, or create it if none exists.") var replace = false
 
     func run() throws {
         let backend = try options.writable()

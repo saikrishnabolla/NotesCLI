@@ -379,7 +379,9 @@ final class ProtocolTests: XCTestCase {
 
         let first = validData, second = try imageData(width: 9, height: 7)
         let pages = [first.base64EncodedString(), second.base64EncodedString()]
-        let arguments: [String: Any] = ["ref": "welcome", "pages": pages, "page_names": ["one.png", "two.png"]]
+        let privatePath = "/Users/reviewer/Private/secret-scan.png"
+        let arguments: [String: Any] = ["ref": "welcome", "pages": pages,
+                                        "page_names": [privatePath, "two.png"]]
         let wire = try JSONSerialization.data(withJSONObject: [
             "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["name": "scan_add", "arguments": arguments],
         ] as [String: Any])
@@ -397,6 +399,8 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(recorded["source_page_sha256"] as? String, sha(first) + "," + sha(second))
         XCTAssertEqual(recorded["page_count"] as? Int, 2)
         XCTAssertNil(recorded["pages"])
+        XCTAssertNil(recorded["page_names"])
+        XCTAssertFalse(String(decoding: entry.arguments, as: UTF8.self).contains(privatePath))
     }
 
     func testScanCorrectionRunsAfterSafetyAndReappliesEncodedAndDecodedPayloadCaps() throws {

@@ -1831,6 +1831,7 @@ public final class MCPServer: @unchecked Sendable {
         }
         if ["scan_add", "scan_append"].contains(tool.name), let pages = arguments["pages"] as? [String] {
             recordedArguments.removeValue(forKey: "pages")
+            recordedArguments.removeValue(forKey: "page_names")
             recordedArguments["page_count"] = pages.count
             var sourceHashes: [String] = []
             sourceHashes.reserveCapacity(pages.count)

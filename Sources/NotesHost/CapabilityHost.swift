@@ -74,7 +74,7 @@ public enum CapabilityHostPolicy {
         "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "ocr", "image-labels", "map", "scan", "quick-note", "settings", "checklist", "pin",
         "unpin", "tag", "link", "collaboration", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
         "write", "fetch", "index", "stats", "count", "show-many", "selection", "backlinks", "raw", "deleted",
-        "smart-folders", "prepend", "insert-under-heading", "replace-section", "replace-text", "exists", "history",
+        "smart-folders", "prepend", "insert-under-heading", "replace-section", "replace-text", "attachment", "exists", "history",
         "diff", "undo", "revert", "journal", "smart-folder", "permissions", "mcp", "anchor", "wait-sync",
         "native-doctor", "native-checklist", "native-pin", "native-tag", "native-link", "native-text", "native-format",
         "native-attachment", "native-table", "native-duplicate", "native-restore", "native-move-folder", "write-markdown",
@@ -101,6 +101,14 @@ public enum CapabilityHostPolicy {
         if command == "scan" {
             guard index + 1 < arguments.count,
                   ["state", "filter", "rotate", "crop", "move", "delete"].contains(arguments[index + 1]) else { return false }
+        }
+        if command == "attachment" {
+            guard index + 1 < arguments.count else { return false }
+            if arguments[index + 1] == "delete" { }
+            else if arguments[index + 1] == "markup" {
+                guard index + 2 < arguments.count,
+                      ["inspect", "copy", "clear"].contains(arguments[index + 2]) else { return false }
+            } else { return false }
         }
         if arguments[index] == "mcp", index + 1 < arguments.count,
            localMCPActions.contains(arguments[index + 1]) { return false }

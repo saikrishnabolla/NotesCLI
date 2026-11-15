@@ -370,8 +370,11 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
             guard let data = Data(base64Encoded: value) else { throw NotesError("invalid_scan_page", "Every scan page must be valid base64.") }
             return try FrozenAttachmentInput(data: data, suggestedName: name)
         }
-        let pages = boolean("perspective_correct") == true ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
-        return try result(writer.insertScan(try ref(), pages: pages, position: integer("position"), allowShared: allowShared))
+        guard boolean("perspective_correct") != true else {
+            throw NotesError("scan_correction_not_prepared", "The MCP safety layer must prepare perspective-corrected pages before native dispatch.")
+        }
+        try ScanCorrection.validateImages(at: sourcePages.map(\.url), requireUpOrientation: false)
+        return try result(writer.insertScan(try ref(), pages: sourcePages, position: integer("position"), allowShared: allowShared))
     case "scan_append":
         guard let encoded = arguments["pages"] as? [String], (1...NativeNotesWriter.maximumScanPages).contains(encoded.count) else {
             throw NotesError("invalid_scan_page_count", "A scanned document requires between 1 and 100 image pages.")
@@ -382,9 +385,12 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
             guard let data = Data(base64Encoded: value) else { throw NotesError("invalid_scan_page", "Every scan page must be valid base64.") }
             return try FrozenAttachmentInput(data: data, suggestedName: name)
         }
-        let pages = boolean("perspective_correct") == true ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
+        guard boolean("perspective_correct") != true else {
+            throw NotesError("scan_correction_not_prepared", "The MCP safety layer must prepare perspective-corrected pages before native dispatch.")
+        }
+        try ScanCorrection.validateImages(at: sourcePages.map(\.url), requireUpOrientation: false)
         return try result(writer.appendScanPages(
-            try ref(), attachmentID: string("attachment_id")!, pages: pages,
+            try ref(), attachmentID: string("attachment_id")!, pages: sourcePages,
             expectedPageIDs: arguments["expected_page_ids"] as? [String], allowShared: allowShared))
     case "set_folder_date_grouping":
         return try result(writer.setFolderDateGrouping(try ref(), type: boolean("enabled")! ? 2 : 1,

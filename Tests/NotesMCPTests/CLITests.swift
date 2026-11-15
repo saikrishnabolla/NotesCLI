@@ -1,6 +1,10 @@
+import CoreGraphics
+import CryptoKit
 import XCTest
 import Foundation
+import ImageIO
 import NotesSafety
+import UniformTypeIdentifiers
 
 final class CLITests: XCTestCase {
     private var root: URL { URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent() }
@@ -23,6 +27,22 @@ final class CLITests: XCTestCase {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-cli-home-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: false)
         return home
+    }
+    private func writeImage(to url: URL, value: UInt8) throws -> Data {
+        let width = 8, height = 6
+        var bytes = [UInt8](repeating: value, count: width * height * 4)
+        for offset in stride(from: 3, to: bytes.count, by: 4) { bytes[offset] = 255 }
+        let image = try XCTUnwrap(bytes.withUnsafeMutableBytes { buffer in
+            CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                      bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+        })
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.png.identifier as CFString, 1, nil
+        ))
+        CGImageDestinationAddImage(destination, image, [kCGImagePropertyOrientation: 1] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return try Data(contentsOf: url)
     }
 
     func testAppendRecordsSnapshotAndJournalPreimage() throws {
@@ -853,8 +873,20 @@ final class CLITests: XCTestCase {
         try FileManager.default.createDirectory(at: images, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: images) }
         let first = images.appendingPathComponent("page,one.png"), second = images.appendingPathComponent("page two.png")
-        try Data("first page".utf8).write(to: first)
-        try Data("second page".utf8).write(to: second)
+        let firstData = try writeImage(to: first, value: 40)
+        let secondData = try writeImage(to: second, value: 180)
+        func sha(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+
+        let dryRun = try run([
+            "--backend", "fake", "--engine=native", "--json", "scan", "add", "welcome",
+            first.path, "--perspective-correct", "--dry-run",
+        ], environment: environment)
+        XCTAssertEqual(dryRun.0, 0, dryRun.2)
+        let dryRunPlan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(dryRun.1.utf8)) as? [String: Any])
+        let dryRunArguments = try XCTUnwrap(dryRunPlan["arguments"] as? [String: String])
+        XCTAssertEqual(dryRunArguments["source_page_sha256"], sha(firstData))
+        XCTAssertEqual(dryRunArguments["page_sha256"], "")
+        XCTAssertEqual(dryRunArguments["perspective_correct"], "true")
 
         // "welcome" exists only in the fake store, so a native write could not succeed.
         let scan = try run(["--backend", "fake", "--engine=native", "--json", "scan", "add", "welcome", first.path, second.path],
@@ -898,10 +930,11 @@ final class CLITests: XCTestCase {
         let arguments = try XCTUnwrap(try JSONSerialization.jsonObject(with: rawArguments) as? [String: String])
         XCTAssertNil(arguments["images"])
         XCTAssertEqual(arguments["page_count"], "2")
-        XCTAssertEqual(arguments["image_sha256"]?.split(separator: ",").map(String.init), [
-            "845bb60fe5c91b77a0b634e351b296a9222c94d686371b0ad741dff73c95edbb",
-            "9500210b0cfd2a6521c015c59c7ad9bc8578f6d363741b6df73821b29672a343"
-        ])
+        let hashes = [sha(firstData), sha(secondData)]
+        XCTAssertEqual(arguments["source_page_sha256"]?.split(separator: ",").map(String.init), hashes)
+        XCTAssertEqual(arguments["page_sha256"]?.split(separator: ",").map(String.init), hashes)
+        XCTAssertNil(arguments["source_image_sha256"])
+        XCTAssertNil(arguments["image_sha256"])
         XCTAssertFalse(String(decoding: rawArguments, as: UTF8.self).contains(images.lastPathComponent))
     }
 

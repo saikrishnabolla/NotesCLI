@@ -14,8 +14,17 @@ struct ScanEdgeCandidate: Sendable {
 public enum ScanCorrection {
     private static let minimumArea = 0.01
     private static let minimumEdgeLength = 0.02
+    private static let minimumCandidateConfidence: Float = 0.7
+    private static let maximumInputPixels = 40_000_000
+    private static let maximumTotalInputPixels = 100_000_000
     private static let maximumOutputPixels = 100_000_000
     private static let maximumOutputDimension = 20_000
+
+    private struct ImageMetadata {
+        var width: Int
+        var height: Int
+        var pixels: Int { width * height }
+    }
 
     static func scanCrop(visionTopLeft: CGPoint, visionTopRight: CGPoint,
                          visionBottomRight: CGPoint, visionBottomLeft: CGPoint) -> ScanCrop {
@@ -36,8 +45,8 @@ public enum ScanCorrection {
             (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
         }
         let turns = points.indices.map { cross(points[$0], points[($0 + 1) % 4], points[($0 + 2) % 4]) }
-        guard turns.allSatisfy({ $0 > 0.000_001 }) || turns.allSatisfy({ $0 < -0.000_001 }) else {
-            throw NotesError("unsafe_scan_geometry", "Scan corners must form one convex, non-intersecting quadrilateral.")
+        guard turns.allSatisfy({ $0 > 0.000_001 }) else {
+            throw NotesError("unsafe_scan_geometry", "Scan corners must use top-left, top-right, bottom-right, bottom-left winding and form one convex quadrilateral.")
         }
         let edges = points.indices.map { index -> Double in
             let next = points[(index + 1) % 4]
@@ -49,43 +58,44 @@ public enum ScanCorrection {
     }
 
     static func selectCandidate(_ candidates: [ScanEdgeCandidate]) throws -> ScanCrop {
-        guard !candidates.isEmpty else {
-            throw NotesError("scan_edges_not_found", "No document rectangle was detected in the image.")
-        }
-        let valid = try candidates.map { candidate -> (ScanEdgeCandidate, Double) in
-            try validate(candidate.crop)
+        let valid = candidates.compactMap { candidate -> (ScanEdgeCandidate, Double)? in
+            guard candidate.confidence >= minimumCandidateConfidence,
+                  (try? validate(candidate.crop)) != nil else { return nil }
             return (candidate, area(candidate.crop))
         }.sorted {
-            if $0.1 != $1.1 { return $0.1 > $1.1 }
             if $0.0.confidence != $1.0.confidence { return $0.0.confidence > $1.0.confidence }
+            if $0.1 != $1.1 { return $0.1 > $1.1 }
             return sortKey($0.0.crop).lexicographicallyPrecedes(sortKey($1.0.crop))
         }
-        if valid.count > 1,
-           valid[1].1 / valid[0].1 >= 0.8,
-           abs(valid[0].0.confidence - valid[1].0.confidence) <= 0.1 {
-            throw NotesError("ambiguous_scan_edges", "More than one comparable document rectangle was detected.")
+        var distinct: [(ScanEdgeCandidate, Double)] = []
+        for candidate in valid where !distinct.contains(where: { nearDuplicate($0.0.crop, candidate.0.crop) }) {
+            distinct.append(candidate)
         }
-        return valid[0].0.crop
+        guard let selected = distinct.first else {
+            throw NotesError("scan_edges_not_found", "No safe document rectangle was detected in the image.")
+        }
+        guard distinct.count == 1 else {
+            throw NotesError("ambiguous_scan_edges", "More than one plausible document rectangle was detected.")
+        }
+        return selected.0.crop
     }
 
     public static func detectCrop(at url: URL) throws -> ScanCrop {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        let source = try imageSource(at: url)
+        _ = try metadata(source: source, requireUpOrientation: true)
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw NotesError("invalid_scan_image", "The scan page is not a readable image.")
         }
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-        let rawOrientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value ?? 1
-        let orientation = CGImagePropertyOrientation(rawValue: rawOrientation) ?? .up
         let request = VNDetectRectanglesRequest()
         request.revision = VNDetectRectanglesRequestRevision1
         request.minimumAspectRatio = 0.1
         request.maximumAspectRatio = 1
         request.minimumSize = 0.15
-        request.minimumConfidence = 0.7
+        request.minimumConfidence = minimumCandidateConfidence
         request.quadratureTolerance = 30
         request.maximumObservations = 8
         do {
-            try VNImageRequestHandler(cgImage: image, orientation: orientation).perform([request])
+            try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
         } catch {
             throw NotesError("scan_edge_detection_failed", "Vision could not inspect the scan image.")
         }
@@ -98,17 +108,57 @@ public enum ScanCorrection {
     }
 
     public static func correctedPage(_ page: FrozenAttachmentInput) throws -> FrozenAttachmentInput {
-        guard let source = CGImageSourceCreateWithURL(page.url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        let source = try imageSource(at: page.url)
+        _ = try metadata(source: source, requireUpOrientation: true)
+        let crop = try detectCrop(at: page.url)
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw NotesError("invalid_scan_image", "The scan page is not a readable image: \(page.sourceName)")
         }
-        let crop = try detectCrop(at: page.url)
-        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
-        let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.int32Value ?? 1
-        let oriented = CIImage(cgImage: image).oriented(forExifOrientation: orientation)
-        let data = try correctedPNG(image: oriented, crop: crop)
+        let data = try correctedPNG(image: CIImage(cgImage: image), crop: crop)
         let stem = URL(fileURLWithPath: page.sourceName).deletingPathExtension().lastPathComponent
         return try FrozenAttachmentInput(data: data, suggestedName: stem + "-corrected.png")
+    }
+
+    public static func validateImages(at urls: [URL], requireUpOrientation: Bool) throws {
+        var pixels: [Int] = []
+        pixels.reserveCapacity(urls.count)
+        for url in urls {
+            let source = try imageSource(at: url)
+            pixels.append(try metadata(source: source, requireUpOrientation: requireUpOrientation).pixels)
+        }
+        try validatePixelTotal(pixels)
+    }
+
+    public static func validateImageData(_ data: Data, requireUpOrientation: Bool) throws -> Int {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            throw NotesError("invalid_scan_image_metadata", "The scan page does not contain readable image metadata.")
+        }
+        return try metadata(source: source, requireUpOrientation: requireUpOrientation).pixels
+    }
+
+    static func validateMetadata(width: Int, height: Int, orientation: UInt32,
+                                 requireUpOrientation: Bool) throws {
+        guard width > 0, height > 0 else {
+            throw NotesError("invalid_scan_image_metadata", "The scan image has invalid pixel dimensions.")
+        }
+        guard width <= maximumOutputDimension, height <= maximumOutputDimension,
+              width <= maximumInputPixels / height else {
+            throw NotesError("scan_image_too_large", "Each scan image is limited to 40,000,000 pixels and 20,000 pixels per dimension.")
+        }
+        if requireUpOrientation && orientation != CGImagePropertyOrientation.up.rawValue {
+            throw NotesError("scan_exif_orientation_unsupported", "Perspective correction requires EXIF orientation 1 (.up); normalize the image first.")
+        }
+    }
+
+    public static func validatePixelTotal(_ pixels: [Int]) throws {
+        var total = 0
+        for count in pixels {
+            guard count >= 0, count <= maximumTotalInputPixels,
+                  total <= maximumTotalInputPixels - count else {
+                throw NotesError("scan_total_pixels_too_large", "Scan inputs are limited to 100,000,000 pixels per request.")
+            }
+            total += count
+        }
     }
 
     static func correctedPNG(image: CGImage, crop: ScanCrop) throws -> Data {
@@ -180,6 +230,29 @@ public enum ScanCorrection {
             let next = points[(index + 1) % points.count]
             return sum + points[index].x * next.y - next.x * points[index].y
         }) / 2
+    }
+
+    private static func imageSource(at url: URL) throws -> CGImageSource {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw NotesError("invalid_scan_image_metadata", "The scan page does not contain readable image metadata.")
+        }
+        return source
+    }
+
+    private static func metadata(source: CGImageSource, requireUpOrientation: Bool) throws -> ImageMetadata {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue else {
+            throw NotesError("invalid_scan_image_metadata", "The scan page does not contain readable image dimensions.")
+        }
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value ?? 1
+        try validateMetadata(width: width, height: height, orientation: orientation,
+                             requireUpOrientation: requireUpOrientation)
+        return ImageMetadata(width: width, height: height)
+    }
+
+    private static func nearDuplicate(_ lhs: ScanCrop, _ rhs: ScanCrop) -> Bool {
+        zip(sortKey(lhs), sortKey(rhs)).allSatisfy { abs($0 - $1) <= 0.02 }
     }
 
     private static func sortKey(_ crop: ScanCrop) -> [Double] {

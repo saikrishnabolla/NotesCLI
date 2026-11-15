@@ -1,8 +1,11 @@
 import CryptoKit
+import CoreGraphics
+import ImageIO
 import XCTest
 import NotesCore
 import NotesNative
 import NotesSafety
+import UniformTypeIdentifiers
 @testable import NotesMCP
 
 final class ProtocolTests: XCTestCase {
@@ -14,6 +17,21 @@ final class ProtocolTests: XCTestCase {
         return try XCTUnwrap(response["result"] as? [String: Any])
     }
     func structured(_ result: [String: Any]) throws -> [String: Any] { try XCTUnwrap(result["structuredContent"] as? [String: Any]) }
+    private func imageData(width: Int, height: Int, orientation: UInt32 = 1) throws -> Data {
+        var bytes = [UInt8](repeating: 127, count: width * height * 4)
+        let image = try XCTUnwrap(bytes.withUnsafeMutableBytes { buffer in
+            CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                      bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)?.makeImage()
+        })
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(
+            data, UTType.jpeg.identifier as CFString, 1, nil
+        ))
+        CGImageDestinationAddImage(destination, image, [kCGImagePropertyOrientation: orientation] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
     func testStdioRunKeepsTheMainQueueAvailableForNativeRequests() throws {
         XCTAssertTrue(Thread.isMainThread)
         let input = Pipe()
@@ -353,21 +371,14 @@ final class ProtocolTests: XCTestCase {
         }
         let overHalf = String(repeating: "A", count: 2_000_004)
         XCTAssertEqual(try rejection([overHalf, overHalf]), "scan_too_large")
-        let valid = Data([0x89, 0x50, 0x4e]).base64EncodedString()
+        let validData = try imageData(width: 8, height: 6)
+        let valid = validData.base64EncodedString()
         XCTAssertEqual(try rejection([valid, "not base64!"]), "invalid_scan_page")
         XCTAssertEqual(try rejection([""]), "invalid_scan_page")
         XCTAssertEqual(dispatched, 0)
 
-        var state: UInt32 = 0x1234_5678
-        func bytes(_ count: Int) -> Data {
-            Data((0..<count).map { _ in
-                state = state &* 1_664_525 &+ 1_013_904_223
-                return UInt8(truncatingIfNeeded: state >> 24)
-            })
-        }
-        let first = bytes(1_500_000), second = bytes(1_500_000)
+        let first = validData, second = try imageData(width: 9, height: 7)
         let pages = [first.base64EncodedString(), second.base64EncodedString()]
-        XCTAssertEqual(pages.reduce(0) { $0 + $1.utf8.count }, MCPServer.maximumScanEncodedBytes)
         let arguments: [String: Any] = ["ref": "welcome", "pages": pages, "page_names": ["one.png", "two.png"]]
         let wire = try JSONSerialization.data(withJSONObject: [
             "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": ["name": "scan_add", "arguments": arguments],
@@ -383,8 +394,117 @@ final class ProtocolTests: XCTestCase {
         let recorded = try XCTUnwrap(JSONSerialization.jsonObject(with: entry.arguments) as? [String: Any])
         func sha(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
         XCTAssertEqual(recorded["page_sha256"] as? String, sha(first) + "," + sha(second))
+        XCTAssertEqual(recorded["source_page_sha256"] as? String, sha(first) + "," + sha(second))
         XCTAssertEqual(recorded["page_count"] as? Int, 2)
         XCTAssertNil(recorded["pages"])
+    }
+
+    func testScanCorrectionRunsAfterSafetyAndReappliesEncodedAndDecodedPayloadCaps() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-scan-corrected-limit-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fake = InMemoryNotes.sample()
+        var correctionCount = 0
+        var dispatchCount = 0
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            if tool == "scan_add" {
+                dispatchCount += 1
+                XCTAssertEqual(arguments["perspective_correct"] as? Bool, false)
+            }
+            return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+        }, stateRoot: root)
+        let source = try imageData(width: 8, height: 6).base64EncodedString()
+        server.scanPageCorrector = { page in
+            correctionCount += 1
+            let count = correctionCount == 1 ? 1_499_998 : 1_500_001
+            return try FrozenAttachmentInput(data: Data(repeating: UInt8(correctionCount), count: count),
+                                             suggestedName: page.sourceName)
+        }
+
+        let dryRun = try structured(call(server, "scan_add", [
+            "ref": "welcome", "pages": [source], "perspective_correct": true, "dry_run": true,
+        ]))
+        XCTAssertEqual(dryRun["dry_run"] as? Bool, true)
+        XCTAssertEqual(correctionCount, 0)
+        XCTAssertEqual(dispatchCount, 0)
+
+        let denied = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { _, _ in
+            XCTFail("Denied correction must not dispatch")
+            return try MCPNativeResult(result: WriteResult(outcome: .unknown), value: ["ok": false])
+        }, writeFolders: "Personal", stateRoot: root.appendingPathComponent("denied"))
+        denied.scanPageCorrector = server.scanPageCorrector
+        let deniedResult = try structured(call(denied, "scan_add", [
+            "ref": "welcome", "pages": [source], "perspective_correct": true,
+        ]))
+        XCTAssertEqual((deniedResult["error"] as? [String: Any])?["code"] as? String, "write_not_allowed")
+        XCTAssertEqual(correctionCount, 0)
+
+        let encodedCapped = try structured(call(server, "scan_add", [
+            "ref": "welcome", "pages": [source, source], "perspective_correct": true,
+        ]))
+        XCTAssertEqual((encodedCapped["error"] as? [String: Any])?["code"] as? String,
+                       "scan_corrected_payload_too_large")
+        XCTAssertEqual(correctionCount, 2)
+        XCTAssertEqual(dispatchCount, 0)
+
+        correctionCount = 0
+        server.scanPageCorrector = { page in
+            correctionCount += 1
+            return try FrozenAttachmentInput(data: Data(repeating: UInt8(correctionCount), count: 1_500_001),
+                                             suggestedName: page.sourceName)
+        }
+        let decodedCapped = try structured(call(server, "scan_add", [
+            "ref": "welcome", "pages": [source, source], "perspective_correct": true,
+        ]))
+        XCTAssertEqual((decodedCapped["error"] as? [String: Any])?["code"] as? String,
+                       "scan_corrected_payload_too_large")
+        XCTAssertEqual(correctionCount, 2)
+        XCTAssertEqual(dispatchCount, 0)
+    }
+
+    func testScanCorrectionCompletesStableJournalHashes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-scan-corrected-hashes-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fake = InMemoryNotes.sample()
+        let sourceData = try imageData(width: 8, height: 6)
+        let correctedData = try imageData(width: 7, height: 5)
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            XCTAssertEqual(tool, "scan_add")
+            XCTAssertEqual(arguments["perspective_correct"] as? Bool, false)
+            return try MCPNativeResult(result: WriteResult(outcome: .verified), value: ["ok": true])
+        }, stateRoot: root)
+        server.scanPageCorrector = { page in
+            try FrozenAttachmentInput(data: correctedData, suggestedName: page.sourceName)
+        }
+
+        let result = try structured(call(server, "scan_add", [
+            "ref": "welcome", "pages": [sourceData.base64EncodedString()], "perspective_correct": true,
+        ]))
+        XCTAssertNil(result["error"])
+        let entry = try XCTUnwrap(WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 1).first)
+        let recorded = try XCTUnwrap(JSONSerialization.jsonObject(with: entry.arguments) as? [String: Any])
+        func sha(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+        XCTAssertEqual(recorded["source_page_sha256"] as? String, sha(sourceData))
+        XCTAssertEqual(recorded["page_sha256"] as? String, sha(correctedData))
+        XCTAssertNil(recorded["pages"])
+    }
+
+    func testScanPayloadMetadataRejectsRotatedEXIFForCorrection() throws {
+        let server = MCPServer(reader: InMemoryNotes.sample(), allowNative: true, nativeHandler: { _, _ in
+            XCTFail("Invalid metadata must not dispatch")
+            return try MCPNativeResult(result: WriteResult(outcome: .unknown), value: ["ok": false])
+        })
+        let up = try imageData(width: 12, height: 8, orientation: 1).base64EncodedString()
+        let rotated = try imageData(width: 12, height: 8, orientation: 6).base64EncodedString()
+
+        let accepted = try structured(call(server, "scan_add", [
+            "ref": "welcome", "pages": [up], "perspective_correct": true, "dry_run": true,
+        ]))
+        XCTAssertEqual(accepted["dry_run"] as? Bool, true)
+        let response = try request(server, method: "tools/call", params: [
+            "name": "scan_add", "arguments": ["ref": "welcome", "pages": [rotated], "perspective_correct": true],
+        ])
+        XCTAssertEqual(((response["error"] as? [String: Any])?["data"] as? [String: Any])?["code"] as? String,
+                       "scan_exif_orientation_unsupported")
     }
 
     func testScanEdgeDetectionUsesCropSafetyAndUndoContracts() throws {
@@ -699,7 +819,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(deleteDispatch?["expected_page_ids"] as? [String], ["page-2", "page-1"])
         _ = try call(server, "scan_append", [
             "ref": "Welcome", "attachment_id": "gallery-1", "page_id": "page-1",
-            "pages": [Data([1]).base64EncodedString()], "page_names": ["page.png"],
+            "pages": [try imageData(width: 8, height: 6).base64EncodedString()], "page_names": ["page.jpg"],
         ])
 
         let entries = try WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 20)

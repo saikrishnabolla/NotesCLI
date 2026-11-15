@@ -46,6 +46,7 @@ public final class MCPServer: @unchecked Sendable {
     private let stateRoot: URL
     private let defaultConnection = MCPConnection()
     private let executionGate = MCPExecutionGate()
+    var scanPageCorrector: (FrozenAttachmentInput) throws -> FrozenAttachmentInput = ScanCorrection.correctedPage
 
     public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false,
                 allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil, syncWaiter: MCPSyncWaiter? = nil,
@@ -756,19 +757,39 @@ public final class MCPServer: @unchecked Sendable {
 
     private static let scanTooLarge = NotesError("scan_too_large",
         "MCP scan_add accepts at most 4,000,000 base64 characters (3,000,000 decoded bytes) across all pages. Use the notescli scan add command with local files for larger scans.")
+    private static let correctedScanTooLarge = NotesError("scan_corrected_payload_too_large",
+        "Perspective-corrected MCP scan pages exceed the 4,000,000 base64-character or 3,000,000 decoded-byte limit. Use the notescli scan command with local files.")
 
     /// Checks scan_add pages before any write: aggregate size first, then every page must decode.
     private func scanPayloadIssue(_ args: [String: Any]) -> NotesError? {
         guard let pages = args["pages"] as? [String] else { return nil }
         guard pages.reduce(0, { $0 + $1.utf8.count }) <= Self.maximumScanEncodedBytes else { return Self.scanTooLarge }
         var decoded = 0
+        var pixels: [Int] = []
+        pixels.reserveCapacity(pages.count)
+        let requiresUpOrientation = args["perspective_correct"] as? Bool == true
         for (index, page) in pages.enumerated() {
             guard let data = Data(base64Encoded: page), !data.isEmpty else {
                 return NotesError("invalid_scan_page", "pages[\(index)] is not valid nonempty base64.")
             }
             decoded += data.count
+            do {
+                pixels.append(try ScanCorrection.validateImageData(data, requireUpOrientation: requiresUpOrientation))
+            } catch let error as NotesError {
+                return error
+            } catch {
+                return NotesError("invalid_scan_image_metadata", "pages[\(index)] does not contain readable image metadata.")
+            }
         }
-        return decoded <= Self.maximumScanDecodedBytes ? nil : Self.scanTooLarge
+        guard decoded <= Self.maximumScanDecodedBytes else { return Self.scanTooLarge }
+        do {
+            try ScanCorrection.validatePixelTotal(pixels)
+            return nil
+        } catch let error as NotesError {
+            return error
+        } catch {
+            return NotesError("invalid_scan_image_metadata", "The scan pages do not contain readable image metadata.")
+        }
     }
 
     private func content(_ structured: [String: Any], isError: Bool = false) throws -> [String: Any] {
@@ -1809,29 +1830,62 @@ public final class MCPServer: @unchecked Sendable {
             }
         }
         if ["scan_add", "scan_append"].contains(tool.name), let pages = arguments["pages"] as? [String] {
-            let decoded = pages.compactMap { Data(base64Encoded: $0) }
-            guard decoded.count == pages.count else {
-                throw NotesError("invalid_scan_page", "Every scan page must be valid base64.")
-            }
             recordedArguments.removeValue(forKey: "pages")
             recordedArguments["page_count"] = pages.count
-            let sourceHashes = decoded.map(FrozenAttachmentInput.hash)
-            if arguments["perspective_correct"] as? Bool == true {
-                let names = arguments["page_names"] as? [String] ?? decoded.indices.map { "page-\($0 + 1).png" }
-                let corrected = try zip(decoded, names).map { data, name in
-                    try ScanCorrection.correctedPage(FrozenAttachmentInput(data: data, suggestedName: name))
+            var sourceHashes: [String] = []
+            sourceHashes.reserveCapacity(pages.count)
+            for page in pages {
+                guard let data = Data(base64Encoded: page) else {
+                    throw NotesError("invalid_scan_page", "Every scan page must be valid base64.")
                 }
-                let correctedData = try corrected.map { try Data(contentsOf: $0.url, options: .mappedIfSafe) }
-                dispatchArguments["pages"] = correctedData.map { $0.base64EncodedString() }
-                dispatchArguments["page_names"] = corrected.map(\.sourceName)
-                dispatchArguments["perspective_correct"] = false
-                recordedArguments["source_page_sha256"] = sourceHashes.joined(separator: ",")
-                recordedArguments["page_sha256"] = correctedData.map(FrozenAttachmentInput.hash).joined(separator: ",")
-            } else {
-                recordedArguments["page_sha256"] = sourceHashes.joined(separator: ",")
+                sourceHashes.append(FrozenAttachmentInput.hash(data))
+            }
+            let joined = sourceHashes.joined(separator: ",")
+            recordedArguments["source_page_sha256"] = joined
+            if arguments["perspective_correct"] as? Bool != true {
+                recordedArguments["page_sha256"] = joined
             }
         }
-        return try safeWrite(tool: tool, arguments: recordedArguments, note: note, paths: paths, engine: "native", snapshotNotes: targetNotes) {
+        var finishedScanArguments: [String: Any] = [:]
+        return try safeWrite(tool: tool, arguments: recordedArguments, note: note, paths: paths, engine: "native",
+                             snapshotNotes: targetNotes, finishArguments: { finishedScanArguments }) {
+            if ["scan_add", "scan_append"].contains(tool.name),
+               arguments["perspective_correct"] as? Bool == true,
+               let pages = arguments["pages"] as? [String] {
+                let names = arguments["page_names"] as? [String] ?? pages.indices.map { "page-\($0 + 1).png" }
+                var encodedPages: [String] = []
+                var correctedNames: [String] = []
+                var correctedHashes: [String] = []
+                var totalDecodedBytes = 0
+                var totalEncodedBytes = 0
+                encodedPages.reserveCapacity(pages.count)
+                correctedNames.reserveCapacity(pages.count)
+                correctedHashes.reserveCapacity(pages.count)
+                for (encoded, name) in zip(pages, names) {
+                    guard let data = Data(base64Encoded: encoded) else {
+                        throw NotesError("invalid_scan_page", "Every scan page must be valid base64.")
+                    }
+                    let source = try FrozenAttachmentInput(data: data, suggestedName: name)
+                    let corrected = try scanPageCorrector(source)
+                    let correctedData = try Data(contentsOf: corrected.url, options: .mappedIfSafe)
+                    totalDecodedBytes += correctedData.count
+                    guard totalDecodedBytes <= Self.maximumScanDecodedBytes else {
+                        throw Self.correctedScanTooLarge
+                    }
+                    let correctedEncoded = correctedData.base64EncodedString()
+                    totalEncodedBytes += correctedEncoded.utf8.count
+                    guard totalEncodedBytes <= Self.maximumScanEncodedBytes else {
+                        throw Self.correctedScanTooLarge
+                    }
+                    encodedPages.append(correctedEncoded)
+                    correctedNames.append(corrected.sourceName)
+                    correctedHashes.append(FrozenAttachmentInput.hash(correctedData))
+                }
+                dispatchArguments["pages"] = encodedPages
+                dispatchArguments["page_names"] = correctedNames
+                dispatchArguments["perspective_correct"] = false
+                finishedScanArguments["page_sha256"] = correctedHashes.joined(separator: ",")
+            }
             let value = try nativeHandler(tool.name, dispatchArguments)
             guard let result = value.result else { throw NotesError("invalid_native_result", "The native write did not return a write result.") }
             return (result, try JSONSerialization.jsonObject(with: value.value), value.operationID)
@@ -1840,6 +1894,7 @@ public final class MCPServer: @unchecked Sendable {
 
     private func safeWrite(tool: Tool, arguments: [String: Any], note: Note?, paths: [[String]], engine: String,
                            snapshotNotes: [Note] = [],
+                           finishArguments: (() -> [String: Any])? = nil,
                            action: () throws -> (WriteResult, Any?, String?)) throws -> [String: Any] {
         let serverAllowlist = WriteAllowlist(writeFolders ?? ProcessInfo.processInfo.environment["NOTESCLI_WRITE_FOLDERS"])
         let requestAllowlist = WriteAllowlist(arguments["write_folders"] as? String)
@@ -1926,6 +1981,10 @@ public final class MCPServer: @unchecked Sendable {
             let started = Date().addingTimeInterval(-1)
             var (result, details, operationID) = try action()
             var undoMetadataChanged = false
+            if let extra = finishArguments?(), !extra.isEmpty {
+                recorded.merge(extra) { _, new in new }
+                undoMetadataChanged = true
+            }
             if tool.name == "scan_append",
                let detail = details as? [String: Any],
                let created = detail["pageAttachmentIDs"] as? [String],

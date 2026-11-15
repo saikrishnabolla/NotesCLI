@@ -229,21 +229,25 @@ struct ScanAddCommand: ParsableCommand {
                                     kind: "scan image", maxBytes: FrozenAttachmentInput.maxBytes)
         }
         let sourcePages = try paths.map(FrozenAttachmentInput.init(file:))
-        let frozen = perspectiveCorrect ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
+        try ScanCorrection.validateImages(at: sourcePages.map(\.url), requireUpOrientation: perspectiveCorrect)
+        let sourceHashes = sourcePages.map(\.sha256).joined(separator: ",")
+        var finalHashes = perspectiveCorrect ? "" : sourceHashes
         // Hex digests contain no commas, so the joined list stays unambiguous and records no local paths.
-        let arguments = ["ref": note.summary.id.uuid,
-                         "source_image_sha256": sourcePages.map(\.sha256).joined(separator: ","),
-                         "image_sha256": frozen.map(\.sha256).joined(separator: ","),
-                         "page_count": String(frozen.count), "position": position.map(String.init) ?? "",
+        let arguments = ["ref": note.summary.id.uuid, "source_page_sha256": sourceHashes,
+                         "page_sha256": finalHashes, "page_count": String(sourcePages.count),
+                         "position": position.map(String.init) ?? "",
                          "perspective_correct": String(perspectiveCorrect), "engine": "native"]
         let plan = DryRunPlan(operation: "scanAdd", target: note.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(note), engine: "native")
         var captured: NativeScanResult?
         let result = try SafetyExecutor.run(options: write, operation: "scanAdd", arguments: arguments,
                                             note: note, allowedPaths: [note.summary.folderPath], destructive: true, plan: plan,
-                                            capturePrivatePayloads: !backend.isFake) {
+                                            capturePrivatePayloads: !backend.isFake,
+                                            finishArguments: { ["page_sha256": finalHashes] }) {
             if backend.isFake { return FakeParityWrite.result(note, storing: "scanned documents") }
-            let value = try NativeNotesWriter().insertScan(note.summary.id.uuid, pages: frozen, position: position,
+            let pages = perspectiveCorrect ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
+            finalHashes = pages.map(\.sha256).joined(separator: ",")
+            let value = try NativeNotesWriter().insertScan(note.summary.id.uuid, pages: pages, position: position,
                                                            allowShared: write.allowShared)
             captured = value
             return value.write.writeResult
@@ -288,11 +292,12 @@ struct ScanAppendCommand: ParsableCommand {
                                     kind: "scan image", maxBytes: FrozenAttachmentInput.maxBytes)
         }
         let sourcePages = try paths.map(FrozenAttachmentInput.init(file:))
-        let frozen = perspectiveCorrect ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
+        try ScanCorrection.validateImages(at: sourcePages.map(\.url), requireUpOrientation: perspectiveCorrect)
+        let sourceHashes = sourcePages.map(\.sha256).joined(separator: ",")
+        var finalHashes = perspectiveCorrect ? "" : sourceHashes
         let arguments = ["ref": note.summary.id.uuid, "attachment_id": attachmentID,
-                         "source_image_sha256": sourcePages.map(\.sha256).joined(separator: ","),
-                         "image_sha256": frozen.map(\.sha256).joined(separator: ","),
-                         "page_count": String(frozen.count),
+                         "source_page_sha256": sourceHashes, "page_sha256": finalHashes,
+                         "page_count": String(sourcePages.count),
                          "perspective_correct": String(perspectiveCorrect),
                          "previous_page_order": previousPageIDs.joined(separator: ","), "engine": "native"]
         let plan = DryRunPlan(operation: "scanAppend", target: note.summary.id.uuid, arguments: arguments,
@@ -302,13 +307,18 @@ struct ScanAppendCommand: ParsableCommand {
                                             note: note, allowedPaths: [note.summary.folderPath],
                                             destructive: true, plan: plan,
                                             capturePrivatePayloads: !backend.isFake, finishArguments: {
-            guard let captured else { return [:] }
-            return ["created_page_ids": captured.pageAttachmentIDs.joined(separator: ","),
-                    "applied_page_order": (previousPageIDs + captured.pageAttachmentIDs).joined(separator: ",")]
+            var values = ["page_sha256": finalHashes]
+            if let captured {
+                values["created_page_ids"] = captured.pageAttachmentIDs.joined(separator: ",")
+                values["applied_page_order"] = (previousPageIDs + captured.pageAttachmentIDs).joined(separator: ",")
+            }
+            return values
         }) {
             if backend.isFake { return FakeParityWrite.result(note, storing: "scanned document pages") }
+            let pages = perspectiveCorrect ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
+            finalHashes = pages.map(\.sha256).joined(separator: ",")
             let value = try NativeNotesWriter().appendScanPages(
-                note.summary.id.uuid, attachmentID: attachmentID, pages: frozen,
+                note.summary.id.uuid, attachmentID: attachmentID, pages: pages,
                 expectedPageIDs: previousPageIDs, allowShared: write.allowShared)
             captured = value
             return value.write.writeResult

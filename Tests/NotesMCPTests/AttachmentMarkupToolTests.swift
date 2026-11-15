@@ -1,6 +1,7 @@
 import Foundation
 import NotesCore
 import NotesNative
+import NotesNativeObjC
 import NotesSafety
 import XCTest
 @testable import NotesMCP
@@ -19,12 +20,7 @@ final class AttachmentMarkupToolTests: XCTestCase {
     }
 
     private func knownMarkup() throws -> Data {
-        try PropertyListSerialization.data(fromPropertyList: [
-            "$archiver": "NSKeyedArchiver",
-            "$version": 100_000,
-            "$top": ["AKComprArchiveRoot": 1],
-            "$objects": ["$null", "AKComprSizeKey", "AKComprDataKey", 10, Data([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 1])],
-        ], format: .binary, options: 0)
+        try NCNotesRuntime.scanRectangleMarkupData(x: 1, y: 2, width: 8, height: 6, strokeWidth: 1)
     }
 
     func testMarkupToolSchemasAndReadOnlyExposure() throws {

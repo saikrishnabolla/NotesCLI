@@ -12,6 +12,17 @@ final class AttachmentMarkupTests: XCTestCase {
         try NCNotesRuntime.scanRectangleMarkupData(x: 1, y: 2, width: 8, height: 6, strokeWidth: 1)
     }
 
+    private func mutatedGeneratedMarkup(_ mutate: (inout [Any], [String: Any]) throws -> Void) throws -> Data {
+        var root = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: generatedMarkup(), format: nil
+        ) as? [String: Any])
+        var objects = try XCTUnwrap(root["$objects"] as? [Any])
+        let top = try XCTUnwrap(root["$top"] as? [String: Any])
+        try mutate(&objects, top)
+        root["$objects"] = objects
+        return try PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0)
+    }
+
     func testFrozenMarkupAcceptsAnnotationKitArchiveAndKeepsExactBytes() throws {
         let data = try generatedMarkup()
         let frozen = try FrozenAttachmentMarkup(data: data)
@@ -27,6 +38,64 @@ final class AttachmentMarkupTests: XCTestCase {
         }
         XCTAssertThrowsError(try FrozenAttachmentMarkup(data: Data(repeating: 0, count: FrozenAttachmentMarkup.maximumBytes + 1))) {
             XCTAssertEqual(($0 as? NotesError)?.code, "attachment_markup_too_large")
+        }
+    }
+
+    func testFrozenMarkupRejectsMagicOnlyCompressedPayload() throws {
+        let data = try PropertyListSerialization.data(fromPropertyList: [
+            "$archiver": "NSKeyedArchiver",
+            "$version": 100_000,
+            "$top": ["AKComprArchiveRoot": 1],
+            "$objects": ["$null", "AKComprSizeKey", "AKComprDataKey", 10,
+                         Data([0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00, 1])],
+        ], format: .binary, options: 0)
+
+        XCTAssertThrowsError(try FrozenAttachmentMarkup(data: data)) {
+            XCTAssertEqual(($0 as? NotesError)?.code, "unknown_attachment_markup")
+        }
+    }
+
+    func testFrozenMarkupRejectsTruncatedAndMismatchedCompressedPayloads() throws {
+        let truncated = try mutatedGeneratedMarkup { objects, _ in
+            let index = try XCTUnwrap(objects.firstIndex { $0 is Data })
+            objects[index] = Data((objects[index] as! Data).prefix(7))
+        }
+        let mismatched = try mutatedGeneratedMarkup { objects, _ in
+            let index = try XCTUnwrap(objects.firstIndex { $0 is NSNumber })
+            objects[index] = (objects[index] as! NSNumber).intValue + 1
+        }
+
+        for data in [truncated, mismatched] {
+            XCTAssertThrowsError(try FrozenAttachmentMarkup(data: data)) {
+                XCTAssertEqual(($0 as? NotesError)?.code, "unknown_attachment_markup")
+            }
+        }
+    }
+
+    func testFrozenMarkupRejectsOversizedCyclicAndDecoyArchives() throws {
+        let oversized = try mutatedGeneratedMarkup { objects, _ in
+            let index = try XCTUnwrap(objects.firstIndex { $0 is NSNumber })
+            objects[index] = FrozenAttachmentMarkup.maximumBytes + 1
+        }
+        let cyclic = try mutatedGeneratedMarkup { objects, top in
+            var root = try XCTUnwrap(objects[1] as? [String: Any])
+            var values = try XCTUnwrap(root["NS.objects"] as? [Any])
+            values[1] = try XCTUnwrap(top["AKComprArchiveRoot"])
+            root["NS.objects"] = values
+            objects[1] = root
+        }
+        let decoy = try mutatedGeneratedMarkup { objects, _ in
+            var root = try XCTUnwrap(objects[1] as? [String: Any])
+            var values = try XCTUnwrap(root["NS.objects"] as? [Any])
+            values[1] = values[0]
+            root["NS.objects"] = values
+            objects[1] = root
+        }
+
+        for data in [oversized, cyclic, decoy] {
+            XCTAssertThrowsError(try FrozenAttachmentMarkup(data: data)) {
+                XCTAssertEqual(($0 as? NotesError)?.code, "unknown_attachment_markup")
+            }
         }
     }
 

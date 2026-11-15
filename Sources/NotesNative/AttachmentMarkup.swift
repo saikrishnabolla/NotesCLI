@@ -1,4 +1,5 @@
 import CryptoKit
+import Compression
 import Darwin
 import Foundation
 import NotesCore
@@ -32,23 +33,228 @@ public struct FrozenAttachmentMarkup: Sendable {
     }
 
     public static func isKnownArchive(_ data: Data) -> Bool {
-        guard data.count <= maximumBytes,
-              let root = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              root["$archiver"] as? String == "NSKeyedArchiver",
-              (root["$version"] as? NSNumber)?.intValue == 100_000,
-              let top = root["$top"] as? [String: Any],
-              top["AKComprArchiveRoot"] != nil,
-              let objects = root["$objects"] as? [Any],
-              objects.contains(where: { $0 as? String == "AKComprSizeKey" }),
-              objects.contains(where: { $0 as? String == "AKComprDataKey" }),
-              objects.contains(where: {
-                  guard let size = $0 as? NSNumber else { return false }
-                  return size.intValue > 0 && size.intValue <= maximumBytes
-              }),
-              let compressed = objects.compactMap({ $0 as? Data }).first,
-              compressed.starts(with: [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) else { return false }
-        return true
+        (try? AttachmentMarkupArchiveValidator.validate(data, maximumBytes: maximumBytes)) != nil
     }
+}
+
+private enum AttachmentMarkupArchiveValidator {
+    private static let maximumObjects = 100_000
+    private static let maximumDepth = 64
+    private static let xzMagic: [UInt8] = [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]
+
+    static func validate(_ data: Data, maximumBytes: Int) throws {
+        guard !data.isEmpty, data.count <= maximumBytes else { throw InvalidArchive() }
+        let outer = try KeyedArchive(data: data)
+        try outer.validateGraph(rootKey: "AKComprArchiveRoot")
+        let root = try outer.rootDictionary(
+            key: "AKComprArchiveRoot", classes: Set(["NSDictionary", "NSMutableDictionary"])
+        )
+        let entries = try outer.dictionaryEntries(root)
+        guard entries.count == 2,
+              let size = entries["AKComprSizeKey"] as? NSNumber,
+              size.int64Value > 0, size.int64Value <= maximumBytes,
+              let compressed = entries["AKComprDataKey"] as? Data,
+              compressed.count <= maximumBytes,
+              compressed.starts(with: xzMagic) else { throw InvalidArchive() }
+
+        let decoded = try decompress(compressed, expectedBytes: size.intValue, maximumBytes: maximumBytes)
+        let archivePayloads = try dataPayloads(in: decoded, rootKey: "AKArchiveRoot")
+        guard !archivePayloads.isEmpty else { throw InvalidArchive() }
+        var annotationCount = 0
+        for payload in archivePayloads {
+            let annotationPayloads = try dataPayloads(in: payload, rootKey: "root")
+            guard !annotationPayloads.isEmpty else { throw InvalidArchive() }
+            for annotation in annotationPayloads {
+                let archive = try KeyedArchive(data: annotation)
+                try archive.validateGraph(rootKey: "root")
+                let record = try archive.rootDictionary(key: "root")
+                let descriptor = try archive.classDescriptor(of: record)
+                guard descriptor.name.hasPrefix("AK"), descriptor.name.hasSuffix("Annotation"),
+                      descriptor.classes.contains("AKAnnotation"),
+                      descriptor.classes.last == "NSObject" else { throw InvalidArchive() }
+                annotationCount += 1
+                guard annotationCount <= maximumObjects else { throw InvalidArchive() }
+            }
+        }
+        guard annotationCount > 0 else { throw InvalidArchive() }
+    }
+
+    private static func dataPayloads(in data: Data, rootKey: String) throws -> [Data] {
+        let archive = try KeyedArchive(data: data)
+        try archive.validateGraph(rootKey: rootKey)
+        let root = try archive.rootDictionary(key: rootKey, classes: Set(["NSArray", "NSMutableArray"]))
+        let values = try archive.arrayValues(root)
+        guard !values.isEmpty, values.count <= maximumObjects else { throw InvalidArchive() }
+        return try values.map { value in
+            guard let record = try archive.resolve(value) as? [String: Any] else { throw InvalidArchive() }
+            let descriptor = try archive.classDescriptor(of: record)
+            guard ["NSData", "NSMutableData"].contains(descriptor.name),
+                  let payload = try archive.resolve(record["NS.data"] as Any) as? Data,
+                  !payload.isEmpty else { throw InvalidArchive() }
+            return payload
+        }
+    }
+
+    private static func decompress(_ data: Data, expectedBytes: Int, maximumBytes: Int) throws -> Data {
+        guard expectedBytes > 0, expectedBytes <= maximumBytes else { throw InvalidArchive() }
+        var output = [UInt8](repeating: 0, count: expectedBytes + 1)
+        let result: (compression_status, Int, Int) = try data.withUnsafeBytes { source in
+            try output.withUnsafeMutableBytes { destination in
+                var stream = compression_stream(
+                    dst_ptr: destination.bindMemory(to: UInt8.self).baseAddress!, dst_size: destination.count,
+                    src_ptr: source.bindMemory(to: UInt8.self).baseAddress!, src_size: source.count,
+                    state: nil
+                )
+                guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_LZMA) != COMPRESSION_STATUS_ERROR else {
+                    throw InvalidArchive()
+                }
+                defer { compression_stream_destroy(&stream) }
+                let status = compression_stream_process(&stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
+                return (status, source.count - stream.src_size, destination.count - stream.dst_size)
+            }
+        }
+        guard result.0 == COMPRESSION_STATUS_END,
+              result.1 == data.count,
+              result.2 == expectedBytes else { throw InvalidArchive() }
+        return Data(output.prefix(expectedBytes))
+    }
+
+    private struct ClassDescriptor {
+        var name: String
+        var classes: [String]
+    }
+
+    private struct KeyedArchive {
+        let objects: [Any]
+        let top: [String: Any]
+
+        init(data: Data) throws {
+            guard data.count <= FrozenAttachmentMarkup.maximumBytes else { throw InvalidArchive() }
+            let propertyList = try PropertyListSerialization.propertyList(from: data, format: nil)
+            guard let root = propertyList as? [String: Any],
+                  root["$archiver"] as? String == "NSKeyedArchiver",
+                  (root["$version"] as? NSNumber)?.intValue == 100_000,
+                  let top = root["$top"] as? [String: Any], top.count == 1 else { throw InvalidArchive() }
+            guard let objects = root["$objects"] as? [Any],
+                  (2...maximumObjects).contains(objects.count),
+                  objects.first as? String == "$null" else { throw InvalidArchive() }
+            self.objects = objects
+            self.top = top
+        }
+
+        func rootDictionary(key: String, classes: Set<String>? = nil) throws -> [String: Any] {
+            guard top.count == 1, let value = top[key],
+                  let root = try resolve(value) as? [String: Any] else { throw InvalidArchive() }
+            if let classes {
+                guard classes.contains(try classDescriptor(of: root).name) else { throw InvalidArchive() }
+            }
+            return root
+        }
+
+        func classDescriptor(of record: [String: Any]) throws -> ClassDescriptor {
+            guard let reference = record["$class"],
+                  let descriptor = try resolve(reference) as? [String: Any],
+                  let name = descriptor["$classname"] as? String,
+                  let classes = descriptor["$classes"] as? [String],
+                  !name.isEmpty, !classes.isEmpty, classes.first == name else { throw InvalidArchive() }
+            return ClassDescriptor(name: name, classes: classes)
+        }
+
+        func dictionaryEntries(_ record: [String: Any]) throws -> [String: Any] {
+            let descriptor = try classDescriptor(of: record)
+            guard ["NSDictionary", "NSMutableDictionary"].contains(descriptor.name),
+                  let keys = record["NS.keys"] as? [Any],
+                  let values = record["NS.objects"] as? [Any],
+                  keys.count == values.count else { throw InvalidArchive() }
+            var result: [String: Any] = [:]
+            for (keyReference, valueReference) in zip(keys, values) {
+                guard let key = try resolve(keyReference) as? String,
+                      result[key] == nil else { throw InvalidArchive() }
+                result[key] = try resolve(valueReference)
+            }
+            return result
+        }
+
+        func arrayValues(_ record: [String: Any]) throws -> [Any] {
+            let descriptor = try classDescriptor(of: record)
+            guard ["NSArray", "NSMutableArray"].contains(descriptor.name),
+                  let values = record["NS.objects"] as? [Any] else { throw InvalidArchive() }
+            return values
+        }
+
+        func resolve(_ value: Any) throws -> Any {
+            guard let index = UID.value(value) else { return value }
+            guard objects.indices.contains(index), index > 0 else { throw InvalidArchive() }
+            return objects[index]
+        }
+
+        func validateGraph(rootKey: String) throws {
+            guard let root = top[rootKey], top.count == 1,
+                  UID.value(root) != nil else { throw InvalidArchive() }
+            var visited = Set<Int>()
+            var active = Set<Int>()
+            var traversed = 0
+            try visit(root, depth: 0, visited: &visited, active: &active, traversed: &traversed)
+            guard visited == Set(objects.indices.dropFirst()) else { throw InvalidArchive() }
+        }
+
+        private func visit(_ value: Any, depth: Int, visited: inout Set<Int>,
+                           active: inout Set<Int>, traversed: inout Int) throws {
+            guard depth <= maximumDepth else { throw InvalidArchive() }
+            traversed += 1
+            guard traversed <= maximumObjects * 16 else { throw InvalidArchive() }
+            if let index = UID.value(value) {
+                guard objects.indices.contains(index) else { throw InvalidArchive() }
+                if index == 0 { return }
+                guard index > 0,
+                      !active.contains(index) else { throw InvalidArchive() }
+                if visited.contains(index) { return }
+                active.insert(index)
+                try visit(objects[index], depth: depth + 1, visited: &visited, active: &active, traversed: &traversed)
+                active.remove(index)
+                visited.insert(index)
+                return
+            }
+            if let dictionary = value as? [String: Any] {
+                for (key, child) in dictionary {
+                    guard !key.isEmpty else { throw InvalidArchive() }
+                    try visit(child, depth: depth + 1, visited: &visited, active: &active, traversed: &traversed)
+                }
+                return
+            }
+            if let array = value as? [Any] {
+                for child in array {
+                    try visit(child, depth: depth + 1, visited: &visited, active: &active, traversed: &traversed)
+                }
+                return
+            }
+            guard value is String || value is NSNumber || value is Data || value is Date else {
+                throw InvalidArchive()
+            }
+        }
+    }
+
+    private enum UID {
+        private typealias GetTypeID = @convention(c) () -> CFTypeID
+        private typealias GetValue = @convention(c) (CFTypeRef) -> UInt32
+        private static let symbols: (CFTypeID, GetValue)? = {
+            let handle = UnsafeMutableRawPointer(bitPattern: -2)
+            guard let typeSymbol = dlsym(handle, "_CFKeyedArchiverUIDGetTypeID"),
+                  let valueSymbol = dlsym(handle, "_CFKeyedArchiverUIDGetValue") else { return nil }
+            let type = unsafeBitCast(typeSymbol, to: GetTypeID.self)()
+            let value = unsafeBitCast(valueSymbol, to: GetValue.self)
+            return (type, value)
+        }()
+
+        static func value(_ object: Any) -> Int? {
+            guard let symbols else { return nil }
+            let reference = object as CFTypeRef
+            guard CFGetTypeID(reference) == symbols.0 else { return nil }
+            return Int(symbols.1(reference))
+        }
+    }
+
+    private struct InvalidArchive: Error {}
 }
 
 public struct NativeAttachmentMarkupMetadata: Codable, Sendable, Equatable {

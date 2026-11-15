@@ -236,13 +236,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
         context.reset()
     }
 
-    fileprivate func requireUndoState<T: Equatable>(_ current: T, expected: T?, label: String) throws {
+    func requireUndoState<T: Equatable>(_ current: T, expected: T?, label: String) throws {
         guard expected == nil || current == expected else {
             throw NotesError("undo_conflict", "\(label) changed after NotesCLI read it; refusing to overwrite the newer value.")
         }
     }
 
-    fileprivate func requireUndoIdentifier(_ current: String, expected: String?, label: String) throws {
+    func requireUndoIdentifier(_ current: String, expected: String?, label: String) throws {
         guard expected == nil || current.caseInsensitiveCompare(expected!) == .orderedSame else {
             throw NotesError("undo_conflict", "\(label) changed after NotesCLI read it; refusing to overwrite the newer value.")
         }

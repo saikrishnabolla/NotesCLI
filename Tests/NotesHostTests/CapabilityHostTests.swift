@@ -7,20 +7,20 @@ final class CapabilityHostTests: XCTestCase {
     func testRequestCarriesHostProtocolAndCLIRelease() {
         let request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
         XCTAssertEqual(request.protocolVersion, 2)
-        XCTAssertEqual(request.clientVersion, "1.1.9")
+        XCTAssertEqual(request.clientVersion, "1.1.10")
     }
 
     func testVersionMismatchExplainsHowToUpgradeTheHost() {
         var request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
         request.clientVersion = "1.1.6"
-        XCTAssertThrowsError(try request.validate(forHostVersion: "1.1.9")) { error in
+        XCTAssertThrowsError(try request.validate(forHostVersion: "1.1.10")) { error in
             XCTAssertTrue(error.localizedDescription.contains("client is 1.1.6"))
             XCTAssertTrue(error.localizedDescription.contains("notescli onboard"))
         }
 
-        request.clientVersion = "1.1.9"
+        request.clientVersion = "1.1.10"
         request.protocolVersion = 1
-        XCTAssertThrowsError(try request.validate(forHostVersion: "1.1.9")) { error in
+        XCTAssertThrowsError(try request.validate(forHostVersion: "1.1.10")) { error in
             XCTAssertTrue(error.localizedDescription.contains("notescli onboard"))
         }
     }

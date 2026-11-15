@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.10
+
+### Added
+
+- Native OCR and image-label writes support exact readback, history, and undo.
+- Attachment markup can be inspected, copied, set, cleared, exported, and restored.
+- Scanned documents support edge detection and perspective correction.
+- Notes settings support list and gallery views, sorting, note counts, dark backgrounds, zoom, and Quick Note behavior.
+- Recording summaries can be removed and restored through history.
+
+### Fixed
+
+- Snapshot restore preserves existing scan state, editable markup, recording metadata, and deleted-note locations.
+- Scan restore checks revisions before any scan editor saves and reports interrupted saved writes as unsafe to retry.
+- Notes move operations now have a timeout and report delayed writes as unsafe to retry.
+- MCP journals no longer retain caller-supplied scan page paths.
+
 ## 1.1.9
 
 ### Added

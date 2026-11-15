@@ -99,6 +99,30 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(crossedCrop.2.contains("unsafe_scan_geometry"), crossedCrop.2)
     }
 
+    func testCameraCaptureStartsOnlyAfterDryRunAndWriteSafetyChecks() throws {
+        let missing = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notescli-camera-must-not-read-" + UUID().uuidString + ".png").path
+
+        for command in ["photo", "scan"] {
+            let dryRun = try run([
+                "--backend", "fake", "--engine", "native", "--json", "camera", command, "welcome",
+                "--source-image", missing, "--dry-run",
+            ])
+            XCTAssertEqual(dryRun.0, 0, "\(command): \(dryRun.2)")
+            let plan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(dryRun.1.utf8)) as? [String: Any])
+            XCTAssertEqual(plan["dryRun"] as? Bool, true)
+            XCTAssertEqual(plan["operation"] as? String, command == "photo" ? "cameraPhoto" : "cameraScan")
+
+            let refused = try run([
+                "--backend", "fake", "--engine", "native", "--json", "camera", command, "welcome",
+                "--source-image", missing, "--write-folders", "Personal",
+            ])
+            XCTAssertNotEqual(refused.0, 0, command)
+            XCTAssertTrue(refused.2.contains("write_not_allowed"), "\(command): \(refused.2)")
+            XCTAssertFalse(refused.2.contains("camera source image"), "\(command): \(refused.2)")
+        }
+    }
+
     func testLockedAttachmentExportRequiresStdinPasswordAndSaveDirectory() throws {
         let help = try run(["attachments", "--help"])
         XCTAssertEqual(help.0, 0, help.2)

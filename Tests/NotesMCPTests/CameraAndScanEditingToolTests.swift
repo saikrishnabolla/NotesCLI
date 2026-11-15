@@ -13,7 +13,11 @@ final class CameraAndScanEditingToolTests: XCTestCase {
         try XCTUnwrap(try request(server, "tools/call", ["name": name, "arguments": arguments])["result"] as? [String: Any])
     }
 
-    func testCameraAndRicherScanToolsAreExposedWithReadOnlyDeviceListing() throws {
+    private func structured(_ result: [String: Any]) throws -> [String: Any] {
+        try XCTUnwrap(result["structuredContent"] as? [String: Any])
+    }
+
+    func testCameraToolsAreLocalWritableOnly() throws {
         let writable = MCPServer(reader: InMemoryNotes.sample(), writer: InMemoryNotes.sample(), allowNative: true)
         let tools = try XCTUnwrap((try request(writable, "tools/list")["result"] as? [String: Any])?["tools"] as? [[String: Any]])
         for name in ["camera_devices", "camera_photo", "camera_scan", "scan_reorder", "scan_replace", "scan_correct"] {
@@ -21,9 +25,34 @@ final class CameraAndScanEditingToolTests: XCTestCase {
         }
         let readOnly = MCPServer(reader: InMemoryNotes.sample(), readOnly: true, allowNative: true)
         let readOnlyTools = try XCTUnwrap((try request(readOnly, "tools/list")["result"] as? [String: Any])?["tools"] as? [[String: Any]])
-        XCTAssertTrue(readOnlyTools.contains { $0["name"] as? String == "camera_devices" })
-        XCTAssertFalse(readOnlyTools.contains { $0["name"] as? String == "camera_photo" })
-        XCTAssertFalse(readOnlyTools.contains { $0["name"] as? String == "camera_scan" })
+        for name in ["camera_devices", "camera_photo", "camera_scan"] {
+            XCTAssertFalse(readOnlyTools.contains { $0["name"] as? String == name }, name)
+        }
+    }
+
+    func testRemoteProfileHidesAndRefusesLocalResourceTools() throws {
+        var nativeCalls = 0
+        let remote = MCPServer(
+            reader: InMemoryNotes.sample(), writer: InMemoryNotes.sample(), allowNative: true,
+            nativeHandler: { _, _ in
+                nativeCalls += 1
+                return try MCPNativeResult(value: ["unexpected": true])
+            }, exposureProfile: .remote
+        )
+        let tools = try XCTUnwrap((try request(remote, "tools/list")["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let names = Set(tools.compactMap { $0["name"] as? String })
+        let denied = [
+            "camera_devices", "camera_photo", "camera_scan", "doctor",
+            "attachment_markup_export", "attachment_markup_render", "attachment_markup_set",
+        ]
+        XCTAssertTrue(Set(denied).isDisjoint(with: names))
+
+        for name in denied {
+            let response = try structured(call(remote, name, [:]))
+            XCTAssertEqual((response["error"] as? [String: Any])?["code"] as? String,
+                           "remote_local_resource_denied", name)
+        }
+        XCTAssertEqual(nativeCalls, 0)
     }
 
     func testCameraPhotoDispatchesBoundedCaptureOptions() throws {

@@ -50,6 +50,11 @@ public final class MCPServer: @unchecked Sendable {
     private let executionGate = MCPExecutionGate()
     var scanPageCorrector: (FrozenAttachmentInput) throws -> FrozenAttachmentInput = ScanCorrection.correctedPage
 
+    private static let cameraTools: Set<String> = ["camera_devices", "camera_photo", "camera_scan"]
+    private static let remoteLocalResourceTools: Set<String> = cameraTools.union([
+        "doctor", "attachment_markup_export", "attachment_markup_render", "attachment_markup_set",
+    ])
+
     public init(reader: any NotesReading, writer: (any NotesWriting)? = nil, readOnly: Bool = false,
                 allowNative: Bool = false, nativeHandler: MCPNativeHandler? = nil,
                 nativeAvailable: (() -> Bool)? = nil, syncWaiter: MCPSyncWaiter? = nil,
@@ -451,13 +456,14 @@ public final class MCPServer: @unchecked Sendable {
         ]
         // MARK: w3-read end
         var exposed = values.filter { (!readOnly || !$0.write) && (!$0.native || allowNative) }
+        if readOnly { exposed.removeAll { Self.cameraTools.contains($0.name) } }
         guard exposureProfile == .remote else { return exposed }
         let pathTools: Set<String> = [
             "save_attachment", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes",
             "recording_add", "recording_create", "attach_file", "diagram_add", "drawing_add", "drawing_create",
             "attachment_markup_export", "attachment_markup_render", "attachment_markup_set",
         ]
-        exposed.removeAll { pathTools.contains($0.name) }
+        exposed.removeAll { pathTools.contains($0.name) || Self.remoteLocalResourceTools.contains($0.name) }
         exposed = exposed.map { tool in
             guard ["create_note", "create_report", "recording_transcribe"].contains(tool.name) else { return tool }
             var properties = tool.properties
@@ -705,7 +711,17 @@ public final class MCPServer: @unchecked Sendable {
     }
 
     private func executeTool(params: [String: Any], context: MCPRequestContext) throws -> [String: Any] {
-        guard let name = params["name"] as? String, let tool = tools.first(where: { $0.name == name }) else {
+        guard let name = params["name"] as? String else {
+            throw MCPRPCError(code: -32602, message: "Unknown or unavailable tool", data: nil)
+        }
+        if exposureProfile == .remote, Self.remoteLocalResourceTools.contains(name) {
+            let error = NotesError(
+                "remote_local_resource_denied",
+                "Remote MCP cannot access local cameras, diagnostics, or file-backed markup tools."
+            )
+            return try content(["error": NotePresentation.object(error)], isError: true)
+        }
+        guard let tool = tools.first(where: { $0.name == name }) else {
             throw MCPRPCError(code: -32602, message: "Unknown or unavailable tool", data: nil)
         }
         guard params["arguments"] == nil || params["arguments"] is [String: Any] else {

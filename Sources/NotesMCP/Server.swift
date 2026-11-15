@@ -156,6 +156,7 @@ public final class MCPServer: @unchecked Sendable {
             // MARK: w9-ux end
             t("count_notes", "Count notes matching filters.", [], filters),
             t("get_stats", "Get note, folder, account, and attachment-kind counts."),
+            t("doctor", "Probe the native private-framework, Core Data, and SQLite contracts."),
             // MARK: w9-ux begin
             t("get_capabilities", "Report Apple Notes feature, engine, permission, and native selector support.", [], ["write": string]),
             // MARK: w9-ux end
@@ -388,7 +389,7 @@ public final class MCPServer: @unchecked Sendable {
                   ["ref", "attachment_id"], ["ref": string, "attachment_id": string], native: true),
                 t("attachment_markup_list", "List individual editable annotations in an image or PDF attachment.",
                   ["ref", "attachment_id"], ["ref": string, "attachment_id": string], native: true),
-                t("attachment_markup_add", "Add a basic editable annotation to an image or PDF attachment.",
+                t("attachment_markup_add", "Add a basic editable annotation to an image or PDF attachment. Coordinates are points measured from the bottom-left corner of the image or PDF page.",
                   ["ref", "attachment_id", "kind"],
                   ["ref": string, "attachment_id": string,
                    "kind": ["type": "string", "enum": AttachmentMarkupAnnotationKind.allCases.map(\.rawValue)],
@@ -1272,6 +1273,8 @@ public final class MCPServer: @unchecked Sendable {
             var folders: [String: Int] = [:], accounts: [String: Int] = [:]
             for note in notes { folders[note.folderPath.joined(separator: " > "), default: 0] += 1; accounts[note.accountID, default: 0] += 1 }
             return try content(["total": notes.count, "by_folder": folders, "by_account": accounts, "by_kind": reader.attachmentKindCounts()])
+        case "doctor":
+            return try content(try NotePresentation.object(NativeNotesWriter().doctor(forceContractProbe: true)) as! [String: Any])
         // MARK: w9-ux begin
         case "get_capabilities":
             if let feature = s("write") { try CapabilityCatalog.requireWrite(feature) }

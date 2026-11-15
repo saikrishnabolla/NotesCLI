@@ -197,17 +197,21 @@ public final class NativeNotesWriter: NotesNativeWriting {
     var createdNoteCleanup = CreatedNoteCleanup.notes
     fileprivate let operationID: () -> String
     fileprivate let contextProvider: () throws -> NSManagedObjectContext
+    fileprivate let contractProvider: () -> NativeContractReport
     fileprivate let serializesProductionWrites: Bool
 
     public convenience init() {
         self.init(operationID: { UUID().uuidString.lowercased() },
                   contextProvider: { try NCNotesRuntime.sharedContext() },
+                  contractProvider: { NativeContractProbe.live() },
                   serializesProductionWrites: true)
     }
     init(operationID: @escaping () -> String, contextProvider: @escaping () throws -> NSManagedObjectContext,
+         contractProvider: @escaping () -> NativeContractReport = { NativeContractProbe.live() },
          serializesProductionWrites: Bool = false) {
         self.operationID = operationID
         self.contextProvider = contextProvider
+        self.contractProvider = contractProvider
         self.serializesProductionWrites = serializesProductionWrites
     }
 
@@ -215,7 +219,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
         try serializesProductionWrites ? NativeWriteLease.acquire() : nil
     }
 
-    public func doctor() -> NativeDoctorReport {
+    public func doctor() -> NativeDoctorReport { doctor(forceContractProbe: false) }
+
+    public func doctor(forceContractProbe: Bool) -> NativeDoctorReport {
         let raw = NCNotesRuntime.doctor()
         let classRows = raw["classes"] as? [String: [String: Any]] ?? [:]
         let classes = classRows.mapValues { row in
@@ -227,7 +233,12 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                   macOS: raw["macOS"] as? String ?? "",
                                   missing: raw["missing"] as? [String] ?? [],
                                   error: raw["error"] as? String,
-                                  classes: classes)
+                                  classes: classes,
+                                  contract: NativeContractProbe.live(force: forceContractProbe))
+    }
+
+    func requireContract(_ feature: NativeContractFeature) throws {
+        try contractProvider().require(feature)
     }
 
     fileprivate func context() throws -> NSManagedObjectContext {
@@ -265,7 +276,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
-    func performWrite(_ body: (NSManagedObjectContext) throws -> NativeWriteResult) throws -> NativeWriteResult {
+    func performWrite(feature: NativeContractFeature = .core,
+                      _ body: (NSManagedObjectContext) throws -> NativeWriteResult) throws -> NativeWriteResult {
+        try requireContract(feature)
         let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
@@ -293,9 +306,11 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     func performWriteWithFreshReadback<Receipt>(
+        feature: NativeContractFeature = .core,
         transaction: (NSManagedObjectContext) throws -> Receipt,
         readback: (NSManagedObjectContext, Receipt) throws -> NativeWriteResult
     ) throws -> NativeWriteResult {
+        try requireContract(feature)
         let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
@@ -326,7 +341,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
-    fileprivate func performAttachmentWrite(_ body: (NSManagedObjectContext) throws -> NativeAttachmentResult) throws -> NativeAttachmentResult {
+    fileprivate func performAttachmentWrite(feature: NativeContractFeature = .core,
+                                            _ body: (NSManagedObjectContext) throws -> NativeAttachmentResult) throws -> NativeAttachmentResult {
+        try requireContract(feature)
         let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
@@ -356,6 +373,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     fileprivate func performRecordingWrite(duration: Double,
                                             _ body: (NSManagedObjectContext) throws -> NativeRecordingResult) throws -> NativeRecordingResult {
+        try requireContract(.recordings)
         let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
@@ -387,6 +405,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         transaction: (NSManagedObjectContext) throws -> Receipt,
         readback: (NSManagedObjectContext, Receipt) throws -> NativeScanResult
     ) throws -> NativeScanResult {
+        try requireContract(.scans)
         let lease = try writeLease(); defer { lease?.release() }
         lock.lock(); defer { lock.unlock() }
         precondition(operation == nil)
@@ -974,7 +993,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func addTag(_ ref: String, tag: String, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tags) { context in
         let name = try normalizedTag(tag), note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
         do {
             let editor = try NCBodyEditor(note: note); try editor.prepare(["insert"])
@@ -1004,7 +1023,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func removeTag(_ ref: String, tag: String, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tags) { context in
         let name = try normalizedTag(tag), note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
         let matches = try inlineMatches(note, type: "com.apple.notes.inlinetextattachment.hashtag", label: name)
         guard !matches.isEmpty else { throw NotesError("tag_not_found", "The note does not contain that native tag.") }
@@ -1074,7 +1093,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func renameTag(_ tag: String, to: String, expectedCount: Int, allowShared: Bool = false) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tags) { context in
         let old = try normalizedTag(tag), new = try normalizedTag(to), uses = try tagUses(old, context: context)
         guard uses.count == expectedCount else { throw NotesError("expected_count_mismatch", "Tag is used by \(uses.count) notes/items, not \(expectedCount).") }
         for note in Dictionary(grouping: uses, by: { id($0.0) }).values.compactMap({ $0.first?.0 }) {
@@ -1095,7 +1114,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func deleteTag(_ tag: String, expectedCount: Int, allowShared: Bool = false) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tags) { context in
         let name = try normalizedTag(tag), uses = try tagUses(name, context: context)
         guard uses.count == expectedCount else { throw NotesError("expected_count_mismatch", "Tag is used \(uses.count) times, not \(expectedCount).") }
         let grouped = Dictionary(grouping: uses, by: { id($0.0) })
@@ -1633,7 +1652,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func insertDrawing(_ ref: String, drawing: PKDrawing, position: Int?, allowShared: Bool) throws -> NativeAttachmentResult {
         let expectedStrokes = PaperStrokeRecord.records([drawing])
         guard !expectedStrokes.isEmpty else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
-        return try performAttachmentWrite { context in
+        return try performAttachmentWrite(feature: .paper) { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note)
@@ -1678,7 +1697,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                     allowShared: Bool) throws -> NativeAttachmentResult {
         try LegacyDrawingStrokeRecord.validate(records)
         let data = try JSONEncoder().encode(records)
-        return try performAttachmentWrite { context in
+        return try performAttachmentWrite(feature: .paper) { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note)
@@ -2254,7 +2273,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     fileprivate func editScan(_ ref: String, attachmentID: String, pageID: String,
                               edit: ScanEdit, expected: ScanExpectation?, allowShared: Bool) throws -> NativeWriteResult {
         do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
-        return try performWrite { context in
+        return try performWrite(feature: .scans) { context in
             let before = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
             let expectationMatches: Bool
             switch expected {
@@ -2387,7 +2406,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             throw NotesError("invalid_scan_markup", "Scan markup data must be between 1 byte and 50 MB.")
         }
         let expectedHash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        return try performWrite { context in
+        return try performWrite(feature: .scans) { context in
             let before = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
             let target = try note(before.noteID, in: context)
             try guardWritable(target, allowShared: allowShared)
@@ -2575,7 +2594,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                         payload: FrozenAttachmentMarkup?, embedded: Bool,
                                         replacement: FrozenAttachmentInput? = nil,
                                         allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .scans) { context in
             let target = try note(ref, in: context)
             try guardWritable(target, allowShared: allowShared)
             let attachment = try attachmentMarkupObject(attachmentID, note: target, in: context, forMutation: true)
@@ -2837,7 +2856,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                expectedPageIDs: [String]? = nil,
                                allowShared: Bool) throws -> NativeWriteResult {
         do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
-        return try performWrite { context in
+        return try performWrite(feature: .scans) { context in
             let before = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
             if let expectedPageIDs, before.pageIDs != expectedPageIDs {
                 throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
@@ -2893,7 +2912,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                 expectedPageIDs: [String]? = nil,
                                 allowShared: Bool) throws -> NativeWriteResult {
         do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
-        return try performWrite { context in
+        return try performWrite(feature: .scans) { context in
             let target = try note(ref, in: context)
             try guardWritable(target, allowShared: allowShared)
             guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
@@ -2985,7 +3004,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             throw NotesError("invalid_scan_pages", "Provide one or more unique scanned-document page IDs.")
         }
         do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
-        return try performWrite { context in
+        return try performWrite(feature: .scans) { context in
             let target = try note(ref, in: context)
             try guardWritable(target, allowShared: allowShared)
             guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
@@ -3136,7 +3155,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         let expectedStrokes = PaperStrokeRecord.records([drawing])
         guard !expectedStrokes.isEmpty else { throw NotesError("invalid_drawing", "The drawing has no strokes.") }
         var createdAttachmentID = ""
-        let write = try performWrite { context in
+        let write = try performWrite(feature: .paper) { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
             var noteID = "", attachmentID = "", type = "com.apple.notes.paper", createdNoteID: String?
@@ -3213,7 +3232,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func recognizeHandwriting(_ ref: String, attachmentID: String,
                                      locale: String = "en-US") throws -> NativeHandwritingResult {
-        try performRead { context in
+        try requireContract(.paper)
+        return try performRead { context in
             let note = try note(ref, in: context)
             guard let attachment = try fetch(
                 "ICAttachment",
@@ -3238,7 +3258,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                                locale: String = "en-US",
                                                allowShared: Bool) throws -> NativeHandwritingResult {
         var recognition: NativeHandwritingResult?
-        let write = try performWrite { context in
+        let write = try performWrite(feature: .paper) { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note)
@@ -3294,7 +3314,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func setHandwritingSummary(_ ref: String, attachmentID: String, summary: String?,
                                       allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .paper) { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note)
@@ -3486,7 +3506,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         guard normalized == "pdf" || normalized == "scan" else {
             throw NotesError("invalid_paper_subtype", "Paper document subtype must be pdf or scan.")
         }
-        return try performAttachmentWrite { context in
+        return try performAttachmentWrite(feature: .paper) { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note)
@@ -3974,7 +3994,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return try (0..<rows).map { r in try (0..<columns).map { c in try editor.text(column: c, row: r) } }
     }
     public func createTable(_ ref: String, rows: [[String]], position: Int?, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tables) { context in
         let width = rows.map(\.count).max() ?? 0; guard !rows.isEmpty, width > 0 else { throw NotesError("invalid_table", "A table needs at least one cell.") }
         let padded = rows.map { $0 + Array(repeating: "", count: width - $0.count) }, note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
         var tableID = ""
@@ -3990,7 +4010,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
     public func editTable(_ ref: String, attachmentID: String, row: Int, column: Int, text: String, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tables) { context in
         let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note); let attachment = try table(attachmentID, note: note, context: context)
         var expectedRows = try tableRows(attachment)
         guard row >= 0, row < expectedRows.count, column >= 0, column < (expectedRows.first?.count ?? 0) else { throw NotesError("invalid_table_cell", "Cell is outside the table.") }
@@ -4005,7 +4025,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
     public func formatTableCell(_ ref: String, attachmentID: String, row: Int, column: Int, range: UTF16Range, format: InlineFormat, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tables) { context in
         if let superscript = format.superscript, !(-1...1).contains(superscript) { throw NotesError("invalid_superscript", "Superscript must be -1, 0, or 1.") }
         if let size = format.fontSize, !size.isFinite || size <= 0 { throw NotesError("invalid_font_size", "Font size must be a positive number.") }
         let requestedColor = try format.color.map(Self.color)
@@ -4052,7 +4072,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
     public func resizeTable(_ ref: String, attachmentID: String, axis: String, index: Int, add: Bool, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tables) { context in
         guard ["row", "column"].contains(axis), index >= 0 else { throw NotesError("invalid_table_resize", "Axis must be row or column and index nonnegative.") }; let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note); let attachment = try table(attachmentID, note: note, context: context)
         var expectedRows = try tableRows(attachment)
         do {
@@ -4078,7 +4098,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     public func convertTableToText(_ ref: String, attachmentID: String, separator: String, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .tables) { context in
         guard separator == "tab" || separator == "comma" else { throw NotesError("invalid_separator", "Separator must be tab or comma.") }
         let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
         let attachment = try table(attachmentID, note: note, context: context), rows = try tableRows(attachment)
@@ -7556,7 +7576,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func writeRecordingTranscripts(_ ref: String, transcripts: [String: [TranscriptWord]], allowShared: Bool) throws -> NativeWriteResult {
         guard !transcripts.isEmpty else { throw NotesError("recording_not_found", "No recording without a transcript was found.") }
-        return try performWrite { context in
+        return try performWrite(feature: .recordings) { context in
             let note = try note(ref, in: context)
             try guardWritable(note, allowShared: allowShared)
             try refreshIfStale(note, protectsBody: false)
@@ -7638,7 +7658,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func deleteRecordingSummary(_ ref: String, attachmentID: String,
                                        allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite { context in
+        try performWrite(feature: .recordings) { context in
             let target = try note(ref, in: context)
             try guardWritable(target, allowShared: allowShared)
             try refreshIfStale(target, protectsBody: false)

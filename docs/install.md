@@ -58,4 +58,10 @@ Check access:
 notescli doctor
 ```
 
+## After a macOS update
+
+Run `notescli doctor --native --json`. NotesCLI checks its private-framework, Core Data, and SQLite contracts against the current system. It detects drift and fails closed before an affected native write starts. Unaffected native features keep working. Plain-text writes may use AppleScript; rich writes fail instead of losing formatting.
+
+For a live write/read/delete check, run `notescli doctor --native --canary --json`. The canary uses the `NotesCLI Test hardening` folder, verifies each test element through SQLite, then deletes the test note.
+
 Full Disk Access has no programmatic grant. Setup can open the correct pane, but you must turn access on. Before that, NotesCLI can still list, search, and read plain note text through Notes Automation. JSON and MCP results label this path as `limited` and list the unavailable fields.

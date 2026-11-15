@@ -100,7 +100,7 @@ final class ProtocolTests: XCTestCase {
             let server = MCPServer(reader: fake, writer: fake, readOnly: readOnly)
             let result = try request(server, method: "tools/list")["result"] as! [String: Any]
             let tools = result["tools"] as! [[String: Any]]
-            XCTAssertEqual(tools.count, readOnly ? 31 : 54)
+            XCTAssertEqual(tools.count, readOnly ? 32 : 55)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "delete_note" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_add" }, !readOnly)
             XCTAssertEqual(tools.contains { $0["name"] as? String == "anchor_prune" }, !readOnly)
@@ -111,7 +111,7 @@ final class ProtocolTests: XCTestCase {
             }
         }
         let names = ((try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "history", "diff", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "pinned_notes", "count_notes", "get_stats", "get_capabilities", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "recording_transcript", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
+        XCTAssertEqual(names, ["list_accounts", "list_folders", "list_notes", "search_notes", "query_notes", "get_note", "history", "diff", "get_notes", "list_tags", "list_attachments", "save_attachment", "list_backlinks", "get_deeplink", "list_smart_folders", "list_deleted", "recent_notes", "today_notes", "pinned_notes", "count_notes", "get_stats", "doctor", "get_capabilities", "get_raw_note", "related_notes", "get_write_policy", "export_notes", "file_pull", "file_push", "file_diff", "sync_notes", "create_note", "append_to_note", "prepend_to_note", "update_note", "insert_under_heading", "replace_section", "replace_text", "rename_note", "move_note", "delete_note", "batch_move_notes", "batch_delete_notes", "create_folder", "rename_folder", "delete_folder", "write_markdown", "recording_transcript", "index_status", "get_attachment", "anchor_add", "anchor_list", "anchor_resolve", "anchor_prune", "table_get"])
         let defaultTools = (try request(MCPServer(reader: fake, writer: fake), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
         func readOnlyHint(_ name: String) -> Bool? {
             (defaultTools.first { $0["name"] as? String == name }?["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool
@@ -121,7 +121,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 165)
+        XCTAssertEqual(nativeTools.count, 166)
         for name in ["ocr_set", "image_labels_set", "attachment_markup_inspect", "attachment_markup_list",
                      "attachment_markup_add", "attachment_markup_remove", "attachment_markup_render",
                      "attachment_markup_export", "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear",
@@ -278,6 +278,14 @@ final class ProtocolTests: XCTestCase {
         let error = try XCTUnwrap(try structured(blocked)["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? String, "apple_blocked")
         XCTAssertTrue((error["message"] as? String)?.contains("blocked by Apple") == true)
+    }
+
+    func testDoctorReturnsNativeContract() throws {
+        let doctor = try structured(call(MCPServer(reader: InMemoryNotes.sample()), "doctor"))
+        let contract = try XCTUnwrap(doctor["contract"] as? [String: Any])
+        XCTAssertNotNil(contract["ok"] as? Bool)
+        XCTAssertFalse((contract["osBuild"] as? String ?? "").isEmpty)
+        XCTAssertFalse((contract["manifestHash"] as? String ?? "").isEmpty)
     }
 
     func testMCPNoteReferencesRejectNumberTitleCollisionsAndAcceptExplicitSyntax() throws {

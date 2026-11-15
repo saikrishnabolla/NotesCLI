@@ -164,8 +164,8 @@ struct AttachmentMarkupAdd: ParsableCommand {
     @Argument var ref: String
     @Argument var attachmentID: String
     @Argument(help: "text, rectangle, oval, arrow, line, ink, or highlight.") var kind: String
-    @Option var x: Double = 0
-    @Option var y: Double = 0
+    @Option(help: "Points from the left edge.") var x: Double = 0
+    @Option(help: "Points from the bottom edge.") var y: Double = 0
     @Option var width: Double = 0
     @Option var height: Double = 0
     @Option var text: String?

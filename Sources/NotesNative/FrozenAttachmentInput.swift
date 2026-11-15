@@ -21,6 +21,26 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
         try self.init(data: data, suggestedName: suggestedName, verifiedSHA256: nil)
     }
 
+    convenience init(notesFile source: URL) throws {
+        let resolved = source.standardizedFileURL.resolvingSymlinksInPath()
+        let values: URLResourceValues
+        do {
+            values = try resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        } catch {
+            throw NotesError("scan_page_image_unavailable", "The scanned page image is unavailable.")
+        }
+        guard values.isRegularFile == true, let size = values.fileSize, size <= Self.maxBytes else {
+            throw NotesError("scan_page_image_unavailable", "The scanned page image is unavailable or too large.")
+        }
+        let data: Data
+        do { data = try Data(contentsOf: resolved, options: .mappedIfSafe) }
+        catch { throw NotesError("scan_page_image_unavailable", "The scanned page image could not be read.") }
+        guard data.count <= Self.maxBytes else {
+            throw NotesError("scan_page_image_unavailable", "The scanned page image is too large.")
+        }
+        try self.init(data: data, suggestedName: resolved.lastPathComponent, verifiedSHA256: nil)
+    }
+
     convenience init(verifiedData data: Data, suggestedName: String, sha256: String) throws {
         try self.init(data: data, suggestedName: suggestedName, verifiedSHA256: sha256)
     }

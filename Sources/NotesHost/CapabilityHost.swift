@@ -29,7 +29,8 @@ public struct CapabilityHostRequest: Codable, Sendable {
     public static let currentProtocol = 2
     public static let maximumEncodedBytes = 1_048_576
     public static let allowedEnvironmentKeys: Set<String> = [
-        "TERM", "NO_COLOR", "LANG", "LC_ALL", "TZ", "NOTESCLI_BACKEND", "NOTESCLI_ENGINE", "NOTESCLI_WRITE_FOLDERS",
+        "TERM", "NO_COLOR", "LANG", "LC_ALL", "TZ", "SSH_CONNECTION", "SSH_TTY",
+        "NOTESCLI_BACKEND", "NOTESCLI_ENGINE", "NOTESCLI_WRITE_FOLDERS",
     ]
     public var protocolVersion: Int
     public var clientVersion: String
@@ -71,7 +72,7 @@ public struct CapabilityHostRequest: Codable, Sendable {
 public enum CapabilityHostPolicy {
     private static let allowedCommands: Set<String> = [
         "accounts", "folders", "list", "show", "search", "tags", "recent", "pinned", "capabilities", "help",
-        "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "ocr", "image-labels", "map", "scan", "recording", "quick-note", "settings", "checklist", "pin",
+        "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "ocr", "image-labels", "map", "scan", "camera", "recording", "quick-note", "settings", "checklist", "pin",
         "unpin", "tag", "link", "collaboration", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
         "write", "fetch", "index", "stats", "count", "show-many", "selection", "backlinks", "raw", "deleted",
         "smart-folders", "prepend", "insert-under-heading", "replace-section", "replace-text", "attachment", "exists", "history",
@@ -81,7 +82,7 @@ public enum CapabilityHostPolicy {
     ]
     private static let pathOptions: Set<String> = [
         "--file", "--attach", "--output", "--out", "--path", "--save", "--preview", "--svg", "--transcript-path",
-        "--transcript-file", "--template", "--assets", "--directory", "--exec",
+        "--transcript-file", "--template", "--assets", "--directory", "--exec", "--source-image",
     ]
     private static let localMCPActions: Set<String> = ["install", "uninstall", "status", "token", "config", "remove"]
 
@@ -100,7 +101,11 @@ public enum CapabilityHostPolicy {
         if command == "add", !containsOption("--body", in: arguments), !arguments.contains("--stdin") { return false }
         if command == "scan" {
             guard index + 1 < arguments.count,
-                  ["state", "filter", "rotate", "crop", "move", "delete"].contains(arguments[index + 1]) else { return false }
+                  ["state", "filter", "rotate", "crop", "move", "reorder", "correct", "delete"].contains(arguments[index + 1]) else { return false }
+        }
+        if command == "camera" {
+            guard index + 1 < arguments.count,
+                  ["devices", "photo", "scan"].contains(arguments[index + 1]) else { return false }
         }
         if command == "recording" {
             guard index + 1 < arguments.count, arguments[index + 1] == "clear-summary" else { return false }
@@ -110,7 +115,7 @@ public enum CapabilityHostPolicy {
             if arguments[index + 1] == "delete" { }
             else if arguments[index + 1] == "markup" {
                 guard index + 2 < arguments.count,
-                      ["inspect", "copy", "clear"].contains(arguments[index + 2]) else { return false }
+                      ["inspect", "list", "add", "remove", "copy", "clear"].contains(arguments[index + 2]) else { return false }
             } else { return false }
         }
         if arguments[index] == "mcp", index + 1 < arguments.count,

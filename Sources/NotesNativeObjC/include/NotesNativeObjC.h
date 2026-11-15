@@ -184,6 +184,35 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSData *)scanRectangleMarkupDataWithX:(double)x y:(double)y width:(double)width height:(double)height
                                       strokeWidth:(double)strokeWidth error:(NSError **)error
     NS_SWIFT_NAME(scanRectangleMarkupData(x:y:width:height:strokeWidth:));
++ (nullable NSData *)attachmentMarkupDataByAddingType:(NSString *)type
+                                                data:(nullable NSData *)data
+                                                   x:(double)x y:(double)y width:(double)width height:(double)height
+                                                text:(nullable NSString *)text
+                                              points:(nullable NSArray<NSNumber *> *)points
+                                         strokeWidth:(double)strokeWidth
+                                               color:(NSString *)color
+                                               error:(NSError **)error
+    NS_SWIFT_NAME(attachmentMarkupData(adding:data:x:y:width:height:text:points:strokeWidth:color:));
++ (nullable NSArray<NSDictionary<NSString *, id> *> *)attachmentMarkupAnnotationsInData:(NSData *)data
+                                                                                  error:(NSError **)error
+    NS_SWIFT_NAME(attachmentMarkupAnnotations(data:));
++ (nullable NSData *)attachmentMarkupDataByRemovingIdentifier:(NSString *)identifier
+                                                         data:(NSData *)data
+                                                        error:(NSError **)error
+    NS_SWIFT_NAME(attachmentMarkupData(removing:data:));
++ (nullable NSData *)renderAttachmentMarkupData:(NSData *)data
+                                    baseImageURL:(NSURL *)baseImageURL
+                                           error:(NSError **)error
+    NS_SWIFT_NAME(renderAttachmentMarkup(data:baseImageURL:));
++ (nullable NSData *)embeddedAttachmentMarkupDataAtURL:(NSURL *)url error:(NSError **)error
+    NS_SWIFT_NAME(embeddedAttachmentMarkupData(at:));
++ (nullable NSData *)attachmentImageDataByEmbeddingMarkupData:(nullable NSData *)data
+                                                  baseImageURL:(NSURL *)baseImageURL
+                                                         error:(NSError **)error
+    NS_SWIFT_NAME(attachmentImageData(embedding:baseImageURL:));
++ (BOOL)replaceAttachmentMediaWithURL:(NSURL *)url filename:(NSString *)filename
+                            attachment:(NSManagedObject *)attachment error:(NSError **)error
+    NS_SWIFT_NAME(replaceAttachmentMedia(url:filename:attachment:));
 + (BOOL)setScanOrientation:(NSInteger)orientation pageIdentifier:(NSString *)pageIdentifier gallery:(NSManagedObject *)gallery
                       error:(NSError **)error NS_SWIFT_NAME(setScanOrientation(_:pageIdentifier:gallery:));
 + (BOOL)moveScanPage:(NSString *)pageIdentifier toIndex:(NSUInteger)index gallery:(NSManagedObject *)gallery

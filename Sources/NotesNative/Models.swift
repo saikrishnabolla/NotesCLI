@@ -384,6 +384,23 @@ public struct NativeScanResult: Codable, Sendable {
     }
 }
 
+public struct NativeScanPageReplacementResult: Codable, Sendable {
+    public var attachmentID: String
+    public var replacedPageID: String
+    public var pageID: String
+    public var pageIDs: [String]
+    public var write: NativeWriteResult
+
+    public init(attachmentID: String, replacedPageID: String, pageID: String,
+                pageIDs: [String], write: NativeWriteResult) {
+        self.attachmentID = attachmentID
+        self.replacedPageID = replacedPageID
+        self.pageID = pageID
+        self.pageIDs = pageIDs
+        self.write = write
+    }
+}
+
 public enum NativeScanFilter: String, Codable, Sendable, CaseIterable {
     case photo, color, grayscale, blackAndWhite = "black-and-white", whiteboard
     public var value: Int {
@@ -593,6 +610,7 @@ public protocol NotesNativeWriting {
                          expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeScanResult
     func scanPageState(_ ref: String, attachmentID: String, pageID: String) throws -> NativeScanPageState
     func detectScanCrop(_ ref: String, attachmentID: String, pageID: String) throws -> ScanCrop
+    func scanPageImage(_ ref: String, attachmentID: String, pageID: String) throws -> FrozenAttachmentInput
     func setScanFilter(_ ref: String, attachmentID: String, pageID: String, filter: NativeScanFilter,
                        expectedCurrent: NativeScanFilter?, allowShared: Bool) throws -> NativeWriteResult
     func setScanOrientation(_ ref: String, attachmentID: String, pageID: String, orientation: NativeScanOrientation,
@@ -601,6 +619,13 @@ public protocol NotesNativeWriting {
                      expectedCurrent: ScanCrop?, allowShared: Bool) throws -> NativeWriteResult
     func moveScanPage(_ ref: String, attachmentID: String, pageID: String, toIndex: Int,
                       expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
+    func reorderScanPages(_ ref: String, attachmentID: String, pageIDs: [String],
+                          expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
+    func replaceScanPage(_ ref: String, attachmentID: String, pageID: String,
+                         page: FrozenAttachmentInput, expectedPageIDs: [String]?,
+                         allowShared: Bool) throws -> NativeScanPageReplacementResult
+    func correctScanPage(_ ref: String, attachmentID: String, pageID: String,
+                         expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeScanPageReplacementResult
     func deleteScanPage(_ ref: String, attachmentID: String, pageID: String,
                         expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeWriteResult
     func restoreScanPage(_ ref: String, attachmentID: String, pageID: String, toIndex: Int,

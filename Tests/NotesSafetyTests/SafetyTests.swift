@@ -397,12 +397,12 @@ final class SafetyTests: XCTestCase {
         let featureRows = features.split(separator: "\n").filter {
             $0.hasPrefix("|") && !$0.hasPrefix("| ---") && !$0.hasPrefix("| Feature")
         }.map { $0.split(separator: "|", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) } }
-        XCTAssertEqual(featureRows.count, 95)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 85)
-        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 8)
+        XCTAssertEqual(featureRows.count, 96)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Done" }.count, 87)
+        XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Partial" }.count, 7)
         XCTAssertEqual(featureRows.map { $0[2] }.filter { $0 == "Not possible" }.count, 2)
         XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Done" }.count, 71)
-        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 12)
+        XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Partial" }.count, 13)
         XCTAssertEqual(featureRows.map { $0[3] }.filter { $0 == "Not possible" }.count, 12)
 
         let parity = try String(contentsOf: root.appendingPathComponent("docs/PARITY.md"), encoding: .utf8)

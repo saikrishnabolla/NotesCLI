@@ -46,17 +46,17 @@ cp "$BUILT" "$STAGING/notescli"
 cp "$BUILT_HOST" "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
 if [[ "$IDENTITY" == "-" ]]; then
     echo "Signing ad hoc because NOTESCLI_SIGNING_IDENTITY=-"
-    codesign --force --sign - "$STAGING/notescli"
+    codesign --force --entitlements "$ENTITLEMENTS" --sign - "$STAGING/notescli"
 else
     echo "Signing with $IDENTITY"
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$STAGING/notescli"
 fi
 cp "$STAGING/notescli" "$HOST_APP/Contents/Helpers/notescli"
 if [[ "$IDENTITY" == "-" ]]; then
-    codesign --force --sign - "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
-    codesign --force --sign - "$HOST_APP"
+    codesign --force --entitlements "$ENTITLEMENTS" --sign - "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
+    codesign --force --entitlements "$ENTITLEMENTS" --sign - "$HOST_APP"
 else
-    codesign --force --options runtime --timestamp --sign "$IDENTITY" "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
+    codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"
     codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP"
 fi
 
@@ -87,6 +87,13 @@ codesign --verify --deep --strict --verbose=4 "$HOST_APP"
 [[ "$(codesign -d --verbose=4 "$HOST_APP/Contents/Helpers/notescli" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli" ]]
 [[ "$(codesign -d --verbose=4 "$HOST_APP" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli.capability-host" ]]
 codesign -d --verbose=4 --entitlements - "$STAGING/notescli" 2>&1
+for BINARY in "$STAGING/notescli" "$HOST_APP/Contents/MacOS/NotesCLI Capability Host"; do
+    CAMERA_ENTITLEMENT="$(codesign -d --entitlements - --xml "$BINARY" 2>&1 | sed -n '/^<?xml/,$p' | plutil -extract 'com\.apple\.security\.device\.camera' raw - 2>/dev/null || true)"
+    [[ "$CAMERA_ENTITLEMENT" == "true" ]] || {
+        echo "The signed binary is missing the camera entitlement: $BINARY" >&2
+        exit 1
+    }
+done
 
 lipo "$STAGING/notescli" -thin x86_64 -output "$STAGING/notescli-x86_64"
 INFO_SECTION="$(otool -l "$STAGING/notescli-x86_64" | awk '$1 == "sectname" && $2 == "__info_plist" { capture = 1 } capture { print } capture && $1 == "reserved2" { exit }')"
@@ -107,6 +114,19 @@ echo "Embedded Info.plist: NSAppleEventsUsageDescription present"
     exit 1
 }
 echo "Embedded Info.plist: NSSpeechRecognitionUsageDescription present"
+[[ "$(plutil -extract NSCameraUsageDescription raw "$STAGING/embedded-Info.plist")" == "NotesCLI captures photos you ask it to add to Apple Notes." ]] || {
+    echo "The embedded Info.plist is missing NSCameraUsageDescription." >&2
+    exit 1
+}
+[[ "$(plutil -extract NSCameraUseContinuityCameraDeviceType raw "$STAGING/embedded-Info.plist")" == "true" ]] || {
+    echo "The embedded Info.plist does not opt into Continuity Camera devices." >&2
+    exit 1
+}
+[[ "$(plutil -extract NSCameraUsageDescription raw "$HOST_APP/Contents/Info.plist")" == "NotesCLI captures photos you ask it to add to Apple Notes." ]] || {
+    echo "The capability host is missing NSCameraUsageDescription." >&2
+    exit 1
+}
+echo "Camera usage descriptions present"
 [[ "$(plutil -extract CFBundleShortVersionString raw "$STAGING/embedded-Info.plist")" == "$VERSION" ]] || {
     echo "The embedded CLI short version does not match $VERSION." >&2; exit 1;
 }

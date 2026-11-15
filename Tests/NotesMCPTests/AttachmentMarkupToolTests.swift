@@ -24,7 +24,9 @@ final class AttachmentMarkupToolTests: XCTestCase {
     }
 
     func testMarkupToolSchemasAndReadOnlyExposure() throws {
-        let names = ["attachment_markup_inspect", "attachment_markup_export", "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear"]
+        let names = ["attachment_markup_inspect", "attachment_markup_list", "attachment_markup_add",
+                     "attachment_markup_remove", "attachment_markup_render", "attachment_markup_export",
+                     "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear"]
         let writable = MCPServer(reader: InMemoryNotes.sample(), writer: InMemoryNotes.sample(), allowNative: true)
         let tools = try XCTUnwrap((try request(writable, "tools/list")["result"] as? [String: Any])?["tools"] as? [[String: Any]])
         for name in names { XCTAssertTrue(tools.contains { $0["name"] as? String == name }, name) }
@@ -34,16 +36,21 @@ final class AttachmentMarkupToolTests: XCTestCase {
         let copy = try XCTUnwrap(tools.first { $0["name"] as? String == "attachment_markup_copy" })
         XCTAssertEqual((copy["inputSchema"] as? [String: Any])?["required"] as? [String],
                        ["ref", "attachment_id", "source_ref", "source_attachment_id"])
+        let add = try XCTUnwrap(tools.first { $0["name"] as? String == "attachment_markup_add" })
+        XCTAssertEqual((add["inputSchema"] as? [String: Any])?["required"] as? [String],
+                       ["ref", "attachment_id", "kind"])
 
         let readOnly = MCPServer(reader: InMemoryNotes.sample(), readOnly: true, allowNative: true)
         let readOnlyTools = try XCTUnwrap((try request(readOnly, "tools/list")["result"] as? [String: Any])?["tools"] as? [[String: Any]])
         XCTAssertTrue(readOnlyTools.contains { $0["name"] as? String == "attachment_markup_inspect" })
-        for name in names.dropFirst() { XCTAssertFalse(readOnlyTools.contains { $0["name"] as? String == name }, name) }
+        XCTAssertTrue(readOnlyTools.contains { $0["name"] as? String == "attachment_markup_list" })
+        for name in names.dropFirst(2) { XCTAssertFalse(readOnlyTools.contains { $0["name"] as? String == name }, name) }
 
         let remote = MCPServer(reader: InMemoryNotes.sample(), writer: InMemoryNotes.sample(), allowNative: true, exposureProfile: .remote)
         let remoteTools = try XCTUnwrap((try request(remote, "tools/list")["result"] as? [String: Any])?["tools"] as? [[String: Any]])
         XCTAssertFalse(remoteTools.contains { $0["name"] as? String == "attachment_markup_export" })
         XCTAssertFalse(remoteTools.contains { $0["name"] as? String == "attachment_markup_set" })
+        XCTAssertFalse(remoteTools.contains { $0["name"] as? String == "attachment_markup_render" })
         XCTAssertTrue(remoteTools.contains { $0["name"] as? String == "attachment_markup_copy" })
     }
 

@@ -10,7 +10,7 @@ struct MapCommand: ParsableCommand {
 }
 
 struct ScanCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "scan", subcommands: [ScanAddCommand.self, ScanAppendCommand.self, ScanStateCommand.self, ScanFilterCommand.self, ScanRotateCommand.self, ScanCropCommand.self, ScanMoveCommand.self, ScanDeleteCommand.self])
+    static let configuration = CommandConfiguration(commandName: "scan", subcommands: [ScanAddCommand.self, ScanAppendCommand.self, ScanStateCommand.self, ScanFilterCommand.self, ScanRotateCommand.self, ScanCropCommand.self, ScanMoveCommand.self, ScanReorderCommand.self, ScanReplaceCommand.self, ScanCorrectCommand.self, ScanDeleteCommand.self])
 }
 
 struct ScanStateCommand: ParsableCommand {
@@ -87,6 +87,139 @@ struct ScanDeleteCommand: ParsableCommand {
     func run() throws {
         try UnifiedNative.scanDelete(options, write, ref: ref, attachmentID: attachmentID, pageID: pageID)
     }
+}
+
+struct ScanReorderCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "reorder", abstract: "Set the complete scanned-document page order.")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Argument var attachmentID: String
+    @Argument(help: "Every page ID in the requested order.") var pageIDs: [String] = []
+
+    func validate() throws {
+        guard !pageIDs.isEmpty else { throw ValidationError("Provide every page ID in the requested order.") }
+    }
+
+    func run() throws {
+        let backend = try options.writable()
+        _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        let note = try backend.reader.note(ref)
+        guard let gallery = note.attachments.first(where: { $0.id == attachmentID && $0.typeUTI == "com.apple.notes.gallery" }),
+              let previous = gallery.childAttachmentIDs else {
+            throw NotesError("scan_not_found", "No readable scanned document matches the attachment ID in this note.")
+        }
+        try NativeNotesWriter.validateScanOrder(current: previous, requested: pageIDs)
+        let arguments = ["ref": note.summary.id.uuid, "attachment_id": attachmentID,
+                         "previous_page_order": previous.joined(separator: ","),
+                         "applied_page_order": pageIDs.joined(separator: ","), "engine": "native"]
+        let plan = DryRunPlan(operation: "scanReorder", target: note.summary.id.uuid, arguments: arguments,
+                              resultingHTML: SafetyExecutor.html(note), engine: "native")
+        var captured: NativeWriteResult?
+        let result = try SafetyExecutor.run(options: write, operation: "scanReorder", arguments: arguments,
+                                            note: note, allowedPaths: [note.summary.folderPath],
+                                            destructive: true, plan: plan, capturePrivatePayloads: !backend.isFake) {
+            if backend.isFake { return FakeParityWrite.result(note, storing: "scan page order") }
+            let value = try NativeNotesWriter().reorderScanPages(
+                note.summary.id.uuid, attachmentID: attachmentID, pageIDs: pageIDs,
+                expectedPageIDs: previous, allowShared: write.allowShared
+            )
+            captured = value
+            return value.writeResult
+        }
+        guard let result else { return }
+        try outputEngineWrite(EngineWriteResponse(engine: "native", result: result,
+                                                  operationID: captured?.operationID,
+                                                  verification: captured?.verification,
+                                                  details: ["attachment_id": attachmentID,
+                                                            "page_ids": pageIDs.joined(separator: ",")]), options: options)
+    }
+}
+
+struct ScanReplaceCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "replace", abstract: "Replace one scanned-document page image.")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Argument var attachmentID: String; @Argument var pageID: String
+    @Argument(help: "Replacement image file.") var image: String
+    @Flag(help: "Detect edges and perspective-correct the replacement before insertion.") var perspectiveCorrect = false
+
+    func run() throws {
+        let backend = try options.writable()
+        _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        let note = try backend.reader.note(ref)
+        guard let gallery = note.attachments.first(where: { $0.id == attachmentID && $0.typeUTI == "com.apple.notes.gallery" }),
+              let previous = gallery.childAttachmentIDs, previous.contains(pageID) else {
+            throw NotesError("scan_page_not_found", "No matching page belongs to this scanned document.")
+        }
+        let path = try InputFile.validated(URL(fileURLWithPath: NSString(string: image).expandingTildeInPath),
+                                           kind: "scan image", maxBytes: FrozenAttachmentInput.maxBytes)
+        let source = try FrozenAttachmentInput(file: path)
+        try ScanCorrection.validateImages(at: [source.url], requireUpOrientation: perspectiveCorrect)
+        let replacement = perspectiveCorrect ? try ScanCorrection.correctedPage(source) : source
+        let arguments = ["ref": note.summary.id.uuid, "attachment_id": attachmentID, "page_id": pageID,
+                         "source_page_sha256": source.sha256, "page_sha256": replacement.sha256,
+                         "perspective_correct": String(perspectiveCorrect),
+                         "previous_page_order": previous.joined(separator: ","), "engine": "native"]
+        let plan = DryRunPlan(operation: "scanReplace", target: note.summary.id.uuid, arguments: arguments,
+                              resultingHTML: SafetyExecutor.html(note), engine: "native")
+        var captured: NativeScanPageReplacementResult?
+        let result = try SafetyExecutor.run(options: write, operation: "scanReplace", arguments: arguments,
+                                            note: note, allowedPaths: [note.summary.folderPath],
+                                            destructive: true, plan: plan, capturePrivatePayloads: !backend.isFake) {
+            if backend.isFake { return FakeParityWrite.result(note, storing: "replacement scan pages") }
+            let value = try NativeNotesWriter().replaceScanPage(
+                note.summary.id.uuid, attachmentID: attachmentID, pageID: pageID, page: replacement,
+                expectedPageIDs: previous, allowShared: write.allowShared
+            )
+            captured = value
+            return value.write.writeResult
+        }
+        guard let result else { return }
+        try outputScanReplacement(captured, result: result, options: options)
+    }
+}
+
+struct ScanCorrectCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "correct", abstract: "Re-detect edges and perspective-correct an existing scan page.")
+    @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
+    @Argument var ref: String; @Argument var attachmentID: String; @Argument var pageID: String
+
+    func run() throws {
+        let backend = try options.writable()
+        _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        let note = try backend.reader.note(ref)
+        guard let gallery = note.attachments.first(where: { $0.id == attachmentID && $0.typeUTI == "com.apple.notes.gallery" }),
+              let previous = gallery.childAttachmentIDs, previous.contains(pageID) else {
+            throw NotesError("scan_page_not_found", "No matching page belongs to this scanned document.")
+        }
+        let arguments = ["ref": note.summary.id.uuid, "attachment_id": attachmentID, "page_id": pageID,
+                         "previous_page_order": previous.joined(separator: ","),
+                         "perspective_correct": "true", "engine": "native"]
+        let plan = DryRunPlan(operation: "scanCorrect", target: note.summary.id.uuid, arguments: arguments,
+                              resultingHTML: SafetyExecutor.html(note), engine: "native")
+        var captured: NativeScanPageReplacementResult?
+        let result = try SafetyExecutor.run(options: write, operation: "scanCorrect", arguments: arguments,
+                                            note: note, allowedPaths: [note.summary.folderPath],
+                                            destructive: true, plan: plan, capturePrivatePayloads: !backend.isFake) {
+            if backend.isFake { return FakeParityWrite.result(note, storing: "corrected scan pages") }
+            let value = try NativeNotesWriter().correctScanPage(
+                note.summary.id.uuid, attachmentID: attachmentID, pageID: pageID,
+                expectedPageIDs: previous, allowShared: write.allowShared
+            )
+            captured = value
+            return value.write.writeResult
+        }
+        guard let result else { return }
+        try outputScanReplacement(captured, result: result, options: options)
+    }
+}
+
+private func outputScanReplacement(_ captured: NativeScanPageReplacementResult?, result: WriteResult,
+                                   options: GlobalOptions) throws {
+    let details = captured.map { ["attachment_id": $0.attachmentID, "replaced_page_id": $0.replacedPageID,
+                                  "page_id": $0.pageID, "page_ids": $0.pageIDs.joined(separator: ",")] }
+    try outputEngineWrite(EngineWriteResponse(engine: "native", result: result,
+                                              operationID: captured?.write.operationID,
+                                              verification: captured?.write.verification,
+                                              details: details), options: options)
 }
 
 struct MathCommand: ParsableCommand {

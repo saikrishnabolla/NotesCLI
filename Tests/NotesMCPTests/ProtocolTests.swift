@@ -121,9 +121,10 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 154)
-        for name in ["ocr_set", "image_labels_set", "attachment_markup_inspect", "attachment_markup_export",
-                     "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear",
+        XCTAssertEqual(nativeTools.count, 164)
+        for name in ["ocr_set", "image_labels_set", "attachment_markup_inspect", "attachment_markup_list",
+                     "attachment_markup_add", "attachment_markup_remove", "attachment_markup_render",
+                     "attachment_markup_export", "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear",
                      "handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
         }
@@ -242,7 +243,7 @@ final class ProtocolTests: XCTestCase {
 
         let capabilities = try structured(call(server, "get_capabilities"))
         XCTAssertEqual(capabilities["macOS"] as? String, ProcessInfo.processInfo.operatingSystemVersionString)
-        XCTAssertEqual((capabilities["features"] as? [[String: Any]])?.count, 95)
+        XCTAssertEqual((capabilities["features"] as? [[String: Any]])?.count, 96)
         let pin = (capabilities["features"] as? [[String: Any]])?.first { $0["feature"] as? String == "Pin and unpin" }
         XCTAssertEqual(pin?["read"] as? String, "Done")
         XCTAssertEqual(pin?["write"] as? String, "Done")
@@ -287,7 +288,7 @@ final class ProtocolTests: XCTestCase {
             guard columns.count == 4 else { return nil }
             return FeatureDefinition(feature: columns[0], read: columns[1], write: columns[2])
         }
-        XCTAssertEqual(documented.count, 95)
+        XCTAssertEqual(documented.count, 96)
         XCTAssertEqual(CapabilityCatalog.features, documented)
     }
 

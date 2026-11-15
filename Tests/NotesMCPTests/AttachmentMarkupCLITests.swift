@@ -17,7 +17,7 @@ final class AttachmentMarkupCLITests: XCTestCase {
         process.waitUntilExit()
 
         XCTAssertEqual(process.terminationStatus, 0, text)
-        for command in ["inspect", "export", "set", "copy", "clear"] {
+        for command in ["inspect", "list", "add", "remove", "render", "export", "set", "copy", "clear"] {
             XCTAssertTrue(text.contains("  \(command)"), text)
         }
     }

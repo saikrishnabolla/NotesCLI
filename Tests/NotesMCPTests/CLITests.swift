@@ -669,7 +669,7 @@ final class CLITests: XCTestCase {
         let capabilities = try run(["--backend", "fake", "capabilities", "--json"])
         XCTAssertEqual(capabilities.0, 0, capabilities.2)
         let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(capabilities.1.utf8)) as? [String: Any])
-        XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 95)
+        XCTAssertEqual((report["features"] as? [[String: Any]])?.count, 96)
 
         let help = try run(["help", "search"])
         XCTAssertEqual(help.0, 0, help.2)

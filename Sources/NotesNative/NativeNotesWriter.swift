@@ -2222,6 +2222,21 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    public func scanPageImage(_ ref: String, attachmentID: String, pageID: String) throws -> FrozenAttachmentInput {
+        try performRead { context in
+            let state = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
+            let target = try note(state.noteID, in: context)
+            let pages = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND parentAttachment.identifier == %@ AND parentAttachment.note == %@ AND markedForDeletion == NO",
+                pageID, attachmentID, target), in: context)
+            guard pages.count == 1, let page = pages.first,
+                  let url = value(page, "fileURL") as? URL else {
+                throw NotesError("scan_page_image_unavailable", "The scanned page image is unavailable.")
+            }
+            return try FrozenAttachmentInput(notesFile: url)
+        }
+    }
+
     fileprivate enum ScanEdit {
         case filter(NativeScanFilter)
         case orientation(NativeScanOrientation)
@@ -2459,7 +2474,11 @@ public final class NativeNotesWriter: NotesNativeWriting {
                                         in context: NSManagedObjectContext) throws -> NativeAttachmentMarkupExport {
         let note = try note(ref, in: context)
         let attachment = try attachmentMarkupObject(attachmentID, note: note, in: context)
-        let data = value(attachment, "markupModelData") as? Data ?? Data()
+        var data = value(attachment, "markupModelData") as? Data ?? Data()
+        let embedded = (value(attachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false
+        if data.isEmpty, embedded, let fileURL = value(attachment, "fileURL") as? URL {
+            data = (try? NCNotesRuntime.embeddedAttachmentMarkupData(at: fileURL)) ?? Data()
+        }
         guard data.count <= FrozenAttachmentMarkup.maximumBytes else {
             throw NotesError("attachment_markup_too_large", "Attachment markup is limited to 50 MB.")
         }
@@ -2468,7 +2487,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             noteID: id(note), attachmentID: id(attachment),
             typeUTI: value(attachment, "typeUTI") as? String ?? "",
             hasMarkup: !data.isEmpty, byteCount: data.count, sha256: hash,
-            embedded: (value(attachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false,
+            embedded: embedded,
             recognized: !data.isEmpty && FrozenAttachmentMarkup.isKnownArchive(data)
         )
         return NativeAttachmentMarkupExport(metadata: metadata, data: data)
@@ -2486,8 +2505,75 @@ public final class NativeNotesWriter: NotesNativeWriting {
         return value
     }
 
+    public func attachmentMarkupAnnotations(_ ref: String, attachmentID: String) throws -> [AttachmentMarkupAnnotation] {
+        let exported = try attachmentMarkupData(ref, attachmentID: attachmentID)
+        return try AttachmentMarkupArchive.annotations(in: exported.data)
+    }
+
+    public func addAttachmentMarkupAnnotation(_ ref: String, attachmentID: String,
+                                              input: AttachmentMarkupAnnotationInput,
+                                              allowShared: Bool) throws -> NativeWriteResult {
+        let metadata = try attachmentMarkupMetadata(ref, attachmentID: attachmentID)
+        let existing = metadata.hasMarkup ? try attachmentMarkupData(ref, attachmentID: attachmentID).data : nil
+        let payload = try AttachmentMarkupArchive.adding(input, to: existing)
+        return try setAttachmentMarkup(ref, attachmentID: attachmentID, payload: payload,
+                                       embedded: metadata.embedded, allowShared: allowShared)
+    }
+
+    public func removeAttachmentMarkupAnnotation(_ ref: String, attachmentID: String,
+                                                 identifier: String,
+                                                 allowShared: Bool) throws -> NativeWriteResult {
+        let exported = try attachmentMarkupData(ref, attachmentID: attachmentID)
+        if let payload = try AttachmentMarkupArchive.removing(identifier, from: exported.data) {
+            return try setAttachmentMarkup(ref, attachmentID: attachmentID, payload: payload,
+                                           embedded: exported.metadata.embedded, allowShared: allowShared)
+        }
+        return try clearAttachmentMarkup(ref, attachmentID: attachmentID, allowShared: allowShared)
+    }
+
+    public func renderAttachmentMarkup(_ ref: String, attachmentID: String) throws -> Data {
+        try performRead { context in
+            let target = try note(ref, in: context)
+            let object = try attachmentMarkupObject(attachmentID, note: target, in: context)
+            guard let url = value(object, "fileURL") as? URL else {
+                throw NotesError("attachment_file_unavailable", "The attachment file is unavailable for rendering.")
+            }
+            let data = try attachmentMarkupExport(id(target), attachmentID: attachmentID, in: context).data
+            return try AttachmentMarkupArchive.renderedPNG(data: data, baseImageURL: url)
+        }
+    }
+
+    private func attachmentMarkupMedia(_ ref: String, attachmentID: String) throws -> (URL, String, String) {
+        try performRead { context in
+            let target = try note(ref, in: context)
+            let attachment = try attachmentMarkupObject(attachmentID, note: target, in: context)
+            guard let url = value(attachment, "fileURL") as? URL else {
+                throw NotesError("attachment_file_unavailable", "The attachment file is unavailable for markup.")
+            }
+            return (url, url.lastPathComponent, value(attachment, "typeUTI") as? String ?? "")
+        }
+    }
+
+    private func embeddedAttachmentMarkupMutation(_ ref: String, attachmentID: String,
+                                                  payload: FrozenAttachmentMarkup?,
+                                                  allowShared: Bool) throws -> NativeWriteResult {
+        let (sourceURL, filename, _) = try attachmentMarkupMedia(ref, attachmentID: attachmentID)
+        let imageData = try AttachmentMarkupArchive.imageData(embedding: payload?.data, baseImageURL: sourceURL)
+        let replacement = try FrozenAttachmentInput(data: imageData, suggestedName: filename)
+        let canonical: FrozenAttachmentMarkup?
+        if payload != nil {
+            canonical = try FrozenAttachmentMarkup(data: AttachmentMarkupArchive.embeddedData(at: replacement.url))
+        } else {
+            canonical = nil
+        }
+        return try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: canonical,
+                                          embedded: payload != nil, replacement: replacement,
+                                          allowShared: allowShared)
+    }
+
     private func mutateAttachmentMarkup(_ ref: String, attachmentID: String,
                                         payload: FrozenAttachmentMarkup?, embedded: Bool,
+                                        replacement: FrozenAttachmentInput? = nil,
                                         allowShared: Bool) throws -> NativeWriteResult {
         try performWrite { context in
             let target = try note(ref, in: context)
@@ -2498,7 +2584,14 @@ public final class NativeNotesWriter: NotesNativeWriting {
             operation?.attachmentID = canonicalAttachmentID
             operation?.attachmentType = value(attachment, "typeUTI") as? String
             do {
-                try NCNotesRuntime.setValue(payload?.data, forKey: "markupModelData", of: attachment)
+                if let replacement {
+                    try NCNotesRuntime.replaceAttachmentMedia(
+                        url: replacement.url, filename: replacement.sourceName, attachment: attachment
+                    )
+                    try NCNotesRuntime.setValue(nil, forKey: "markupModelData", of: attachment)
+                } else {
+                    try NCNotesRuntime.setValue(payload?.data, forKey: "markupModelData", of: attachment)
+                }
                 try NCNotesRuntime.setValue(payload == nil ? false : embedded, forKey: "hasMarkupData", of: attachment)
                 try NCNotesRuntime.updateChangeCount(of: attachment,
                                                      reason: payload == nil ? "Cleared editable markup" : "Changed editable markup")
@@ -2511,10 +2604,15 @@ public final class NativeNotesWriter: NotesNativeWriting {
             let storedAttachment = try attachmentMarkupObject(canonicalAttachmentID, note: fresh, in: context)
             let stored = value(storedAttachment, "markupModelData") as? Data
             let storedEmbedded = (value(storedAttachment, "hasMarkupData") as? NSNumber)?.boolValue ?? false
-            let storedHash = stored.flatMap { data in
+            let databaseHash = stored.flatMap { data in
                 data.isEmpty ? nil : SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             }
+            let embeddedData = storedEmbedded
+                ? (value(storedAttachment, "fileURL") as? URL).flatMap { try? AttachmentMarkupArchive.embeddedData(at: $0) }
+                : nil
+            let storedHash = embeddedData.map { FrozenAttachmentInput.hash($0) } ?? databaseHash
             let expectedHash = payload?.sha256
+            let expectedAnnotations = payload.flatMap { try? AttachmentMarkupArchive.annotations(in: $0.data) }
             let cleared = stored?.isEmpty != false && !storedEmbedded
             let native = ["attachmentID": id(storedAttachment),
                           "sha256": storedHash ?? "", "embedded": String(storedEmbedded),
@@ -2533,13 +2631,32 @@ public final class NativeNotesWriter: NotesNativeWriting {
                               sqlitePayload == nil else { return nil }
                         return ["attachmentID": canonicalAttachmentID, "sha256": "", "embedded": "false", "hasMarkup": "false"]
                     }
-                    guard actual?.markupDataBytes == payload?.byteCount,
-                          actual?.hasEmbeddedMarkup == embedded,
-                          let sqlitePayload else { return nil }
-                    let hash = SHA256.hash(data: sqlitePayload).map { String(format: "%02x", $0) }.joined()
-                    return hash == expectedHash
-                        ? ["attachmentID": canonicalAttachmentID, "sha256": hash,
-                           "embedded": String(embedded), "hasMarkup": "true"] : nil
+                    guard actual?.hasEmbeddedMarkup == embedded else { return nil }
+                    let readback: Data?
+                    if embedded {
+                        var candidates: [Data] = []
+                        if let path = actual?.filePath,
+                           let mediaPayload = try? AttachmentMarkupArchive.embeddedData(
+                            at: URL(fileURLWithPath: path)
+                           ) { candidates.append(mediaPayload) }
+                        if let sqlitePayload { candidates.append(sqlitePayload) }
+                        readback = candidates.first { candidate in
+                            if FrozenAttachmentInput.hash(candidate) == expectedHash { return true }
+                            guard let expectedAnnotations,
+                                  let actualAnnotations = try? AttachmentMarkupArchive.annotations(in: candidate) else {
+                                return false
+                            }
+                            return actualAnnotations == expectedAnnotations
+                        }
+                    } else {
+                        guard actual?.markupDataBytes == payload?.byteCount else { return nil }
+                        readback = sqlitePayload
+                    }
+                    guard let readback else { return nil }
+                    let hash = FrozenAttachmentInput.hash(readback)
+                    guard embedded || hash == expectedHash else { return nil }
+                    return ["attachmentID": canonicalAttachmentID, "sha256": hash,
+                            "embedded": String(embedded), "hasMarkup": "true"]
                 },
                 mismatch: payload == nil
                     ? "The editable attachment markup remained after clear readback."
@@ -2558,8 +2675,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func setAttachmentMarkup(_ ref: String, attachmentID: String,
                                     payload: FrozenAttachmentMarkup, embedded: Bool,
                                     allowShared: Bool) throws -> NativeWriteResult {
-        try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: payload,
-                                   embedded: embedded, allowShared: allowShared)
+        let metadata = try attachmentMarkupMetadata(ref, attachmentID: attachmentID)
+        if AttachmentMarkupPolicy.embedsInMedia(metadata.typeUTI) {
+            return try embeddedAttachmentMarkupMutation(ref, attachmentID: attachmentID,
+                                                        payload: payload, allowShared: allowShared)
+        }
+        return try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: payload,
+                                          embedded: embedded, allowShared: allowShared)
     }
 
     public func copyAttachmentMarkup(_ ref: String, attachmentID: String,
@@ -2573,8 +2695,13 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func clearAttachmentMarkup(_ ref: String, attachmentID: String,
                                       allowShared: Bool) throws -> NativeWriteResult {
-        try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: nil,
-                                   embedded: false, allowShared: allowShared)
+        let metadata = try attachmentMarkupMetadata(ref, attachmentID: attachmentID)
+        if metadata.embedded && AttachmentMarkupPolicy.embedsInMedia(metadata.typeUTI) {
+            return try embeddedAttachmentMarkupMutation(ref, attachmentID: attachmentID,
+                                                        payload: nil, allowShared: allowShared)
+        }
+        return try mutateAttachmentMarkup(ref, attachmentID: attachmentID, payload: nil,
+                                          embedded: false, allowShared: allowShared)
     }
 
     public func setScanCrop(_ ref: String, attachmentID: String, pageID: String,
@@ -2589,6 +2716,121 @@ public final class NativeNotesWriter: NotesNativeWriting {
                              allowShared: Bool) throws -> NativeWriteResult {
         try editScan(ref, attachmentID: attachmentID, pageID: pageID, edit: .move(toIndex),
                      expected: expectedPageIDs.map(ScanExpectation.pageIDs), allowShared: allowShared)
+    }
+
+    public static func validateScanOrder(current: [String], requested: [String]) throws {
+        guard !requested.isEmpty, requested.count == current.count,
+              Set(requested).count == requested.count, Set(requested) == Set(current) else {
+            throw NotesError("invalid_scan_page_order", "The requested order must contain every current page ID exactly once.")
+        }
+    }
+
+    public func reorderScanPages(_ ref: String, attachmentID: String, pageIDs: [String],
+                                 expectedPageIDs: [String]? = nil,
+                                 allowShared: Bool) throws -> NativeWriteResult {
+        do { try NCNotesRuntime.validateScanEditing() } catch { throw nativeError(error) }
+        return try performWrite { context in
+            let target = try note(ref, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            guard let gallery = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND note == %@ AND markedForDeletion == NO", attachmentID, target),
+                in: context, limit: 1).first else {
+                throw NotesError("scan_not_found", "The scanned document disappeared before reordering.")
+            }
+            let before = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+            if let expectedPageIDs, before != expectedPageIDs {
+                throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
+            }
+            try Self.validateScanOrder(current: before, requested: pageIDs)
+            operation?.noteID = id(target)
+            operation?.attachmentID = attachmentID
+            operation?.attachmentType = "com.apple.notes.gallery"
+            var applied = before
+            do {
+                for (index, pageID) in pageIDs.enumerated() where applied[index] != pageID {
+                    guard let source = applied.firstIndex(of: pageID) else {
+                        throw NotesError("invalid_scan_page_order", "A requested page disappeared during reordering.")
+                    }
+                    try NCNotesRuntime.moveScanPage(pageID, toIndex: UInt(index), gallery: gallery)
+                    applied.remove(at: source)
+                    applied.insert(pageID, at: index)
+                    operation?.committed = true
+                }
+                guard !context.hasChanges else {
+                    context.rollback()
+                    throw NotesError("scan_edit_not_committed", "Notes left the page reorder unsaved; the change was rolled back.")
+                }
+            } catch {
+                if applied != before { operation?.committed = true }
+                throw nativeError(error)
+            }
+            context.refreshAllObjects()
+            let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+            return result(id(target), native: ["attachmentID": attachmentID,
+                                               "pageOrder": order.joined(separator: ",")],
+                          nativeVerified: order == pageIDs, sqlite: { decoded in
+                guard let stored = decoded.attachments.first(where: { $0.id == attachmentID }),
+                      stored.childAttachmentIDs == pageIDs else { return nil }
+                return ["attachmentID": attachmentID, "pageOrder": pageIDs.joined(separator: ",")]
+            }, mismatch: "The scanned document page order did not match after readback.")
+        }
+    }
+
+    public func replaceScanPage(_ ref: String, attachmentID: String, pageID: String,
+                                page: FrozenAttachmentInput, expectedPageIDs: [String]? = nil,
+                                allowShared: Bool) throws -> NativeScanPageReplacementResult {
+        let before = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID)
+        if let expectedPageIDs, before.pageIDs != expectedPageIDs {
+            throw NotesError("scan_state_conflict", "The scanned document changed after its preimage was read.")
+        }
+        let index = before.pageIDs.firstIndex(of: pageID)!
+        let appended = try appendScanPages(before.noteID, attachmentID: attachmentID, pages: [page],
+                                           expectedPageIDs: before.pageIDs, allowShared: allowShared)
+        guard let newPageID = appended.pageAttachmentIDs.first else {
+            throw NotesError("scan_replace_failed", "Notes did not return the replacement page ID.")
+        }
+        var order = before.pageIDs + [newPageID]
+        do {
+            if index != order.count - 1 {
+                _ = try moveScanPage(before.noteID, attachmentID: attachmentID, pageID: newPageID,
+                                     toIndex: index, expectedPageIDs: order, allowShared: allowShared)
+                order.removeLast()
+                order.insert(newPageID, at: index)
+            }
+            if before.filter != .photo {
+                _ = try setScanFilter(before.noteID, attachmentID: attachmentID, pageID: newPageID,
+                                      filter: before.filter, expectedCurrent: .photo, allowShared: allowShared)
+            }
+            let deleted = try deleteScanPage(before.noteID, attachmentID: attachmentID, pageID: pageID,
+                                             expectedPageIDs: order, allowShared: allowShared)
+            let finalOrder = order.filter { $0 != pageID }
+            return NativeScanPageReplacementResult(
+                attachmentID: attachmentID, replacedPageID: pageID, pageID: newPageID,
+                pageIDs: finalOrder, write: deleted
+            )
+        } catch {
+            _ = try? deleteScanPage(before.noteID, attachmentID: attachmentID, pageID: newPageID,
+                                    expectedPageIDs: nil, allowShared: allowShared)
+            throw error
+        }
+    }
+
+    public func correctScanPage(_ ref: String, attachmentID: String, pageID: String,
+                                expectedPageIDs: [String]? = nil,
+                                allowShared: Bool) throws -> NativeScanPageReplacementResult {
+        let state = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID)
+        guard state.orientation == .upright else {
+            throw NotesError("scan_correction_rotated_unproven", "Perspective correction is refused for rotated pages.")
+        }
+        guard !state.hasMarkup, !state.hasEmbeddedMarkup else {
+            throw NotesError("scan_correction_markup_unproven", "Perspective correction is refused for marked-up pages.")
+        }
+        let corrected = try ScanCorrection.correctedPage(scanPageImage(
+            state.noteID, attachmentID: attachmentID, pageID: pageID
+        ))
+        return try replaceScanPage(state.noteID, attachmentID: attachmentID, pageID: pageID,
+                                   page: corrected, expectedPageIDs: expectedPageIDs ?? state.pageIDs,
+                                   allowShared: allowShared)
     }
 
     public func deleteScanPage(_ ref: String, attachmentID: String, pageID: String,

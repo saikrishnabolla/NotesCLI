@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import CoreData
 import NotesAutomation
@@ -19,6 +20,18 @@ final class RecognitionTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    private func png() throws -> FrozenAttachmentInput {
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        bitmap.setColor(.blue, atX: 0, y: 0)
+        let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        return try FrozenAttachmentInput(data: data, suggestedName: "recognition.png")
     }
 
     func testRecognitionResultEncodesOnlyTextAndTitle() throws {
@@ -148,6 +161,80 @@ final class RecognitionTests: XCTestCase {
         XCTAssertThrowsError(try NativeImageMetadata.requireActive(markedForDeletion: true, attachmentID: "image")) {
             XCTAssertEqual(($0 as? NotesError)?.code, "attachment_not_found")
         }
+    }
+
+    func testLiveImageMetadataSetClearAndSnapshotRestore() throws {
+        guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_SNAPSHOT_TESTS"] == "1" else {
+            throw XCTSkip("Set NOTESCLI_LIVE_SNAPSHOT_TESTS=1; this test writes one disposable notescli-test note.")
+        }
+        let runner = OSAScriptRunner()
+        let native = NativeNotesWriter()
+        let scripting = ScriptingNotesWriter(timeout: 20, resolver: { ref in
+            try SQLiteNotesStore(refresh: true).note(ref).summary.id.coreDataID
+        })
+        let title = "notescli-test-image-metadata-\(UUID().uuidString.lowercased())"
+        let create = "function run(argv) { const app = Application('Notes'); const account = app.defaultAccount(); const note = app.make({new: 'note', at: account, withProperties: {name: argv[0], body: '<h1>' + argv[0] + '</h1><p>body</p>'}}); return String(note.id()); }"
+        let reply = try runner.run(source: create, language: .javaScript, arguments: [title], timeout: 20)
+        guard !reply.timedOut, reply.status == 0 else {
+            throw NotesError("unknown_write", "Disposable image-metadata fixture creation failed: \(reply.stderr)")
+        }
+        let scriptingID = reply.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        var noteID: String?
+        for attempt in 0..<40 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.25) }
+            noteID = try? SQLiteNotesStore(refresh: true).note(scriptingID).summary.id.uuid
+            if noteID != nil { break }
+        }
+        let ref = try XCTUnwrap(noteID)
+        defer { _ = try? scripting.deleteNote(ref) }
+
+        let source = try png()
+        let inserted = try native.insertFile(
+            ref, file: source.url, position: nil, imageView: nil, allowShared: false
+        )
+        XCTAssertEqual(inserted.write.writeResult.outcome, .verified)
+        let attachmentID = inserted.attachmentID
+        let ocrText = "Exact live OCR"
+        let labels = "receipt, document"
+        let ocr = try native.setOCRSummary(
+            ref, attachmentID: attachmentID, summary: ocrText, allowShared: false
+        )
+        XCTAssertEqual(ocr.writeResult.outcome, .verified)
+        XCTAssertEqual(ocr.verification.nativeReadback["ocr"], ocrText)
+        XCTAssertEqual(ocr.verification.sqliteReadback?["ocr"], ocrText)
+        let labelWrite = try native.setImageClassificationSummary(
+            ref, attachmentID: attachmentID, summary: labels, allowShared: false
+        )
+        XCTAssertEqual(labelWrite.writeResult.outcome, .verified)
+        XCTAssertEqual(labelWrite.verification.nativeReadback["imageLabels"], labels)
+        XCTAssertEqual(labelWrite.verification.sqliteReadback?["imageLabels"], labels)
+
+        let captured = try SQLiteNotesStore(refresh: true).note(ref)
+        let store = SnapshotStore(rootURL: temporaryDirectory.appendingPathComponent("snapshot", isDirectory: true))
+        let saved = try store.save(captured)
+        let loaded = try store.loadRestorable(ref, snapshot: saved.id)
+        XCTAssertEqual(try native.setOCRSummary(
+            ref, attachmentID: attachmentID, summary: nil, allowShared: false
+        ).writeResult.outcome, .verified)
+        XCTAssertEqual(try native.setImageClassificationSummary(
+            ref, attachmentID: attachmentID, summary: nil, allowShared: false
+        ).writeResult.outcome, .verified)
+
+        let restored = try native.restoreSnapshot(
+            ref,
+            snapshot: loaded.note,
+            material: try store.restoreMaterial(for: loaded),
+            expectedRevision: nil,
+            expectedModified: nil,
+            allowShared: false
+        )
+        XCTAssertEqual(restored.writeResult.outcome, .verified, restored.writeResult.message ?? "no detail")
+        let readback = try SQLiteNotesStore(refresh: true).note(ref)
+        let image = try XCTUnwrap(readback.attachments.first(where: { $0.id == attachmentID }))
+        XCTAssertEqual(image.ocrText, ocrText)
+        XCTAssertEqual(image.ocrSummaryVersion, 1)
+        XCTAssertEqual(image.imageClassification, labels)
+        XCTAssertEqual(image.imageClassificationSummaryVersion, 4)
     }
 
     func testLiveHandwritingSurvivesHardDeleteAndDrawingRecreation() throws {

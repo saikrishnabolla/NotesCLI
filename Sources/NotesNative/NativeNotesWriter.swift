@@ -4896,6 +4896,14 @@ public final class NativeNotesWriter: NotesNativeWriting {
             var restoredExistingMarkup: [String: SnapshotExistingMarkupRestore] = [:]
             var restoredRecordingMetadata: [String: SnapshotExistingRecordingMetadataRestore] = [:]
             var restoredExistingScans: [String: SnapshotExistingScanRestore] = [:]
+            var preparedExistingScans: [(
+                id: String,
+                restore: SnapshotExistingScanRestore,
+                gallery: NSManagedObject,
+                pageObjects: [String: NSManagedObject],
+                crops: [String: ScanCrop],
+                markups: [String: Data]
+            )] = []
             var recreatedRichLinks: [String: Attachment] = [:]
             var recreatedMaps: [String: Attachment] = [:]
             var recreatedLinkPayloads: [String: (synapseHash: String?, synapseBytes: Int?,
@@ -4979,53 +4987,41 @@ public final class NativeNotesWriter: NotesNativeWriting {
                         guard let gallery = attachmentObjects[planned.id] else {
                             throw NotesError("snapshot_attachment_unavailable", "Scan \(planned.id) disappeared before restore.")
                         }
-                        if restore.unmarkParent { try NCNotesRuntime.unmarkForDeletion(gallery) }
-                        for page in restore.pages where page.unmark {
+                        _ = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+                        var pageObjects: [String: NSManagedObject] = [:]
+                        var crops: [String: ScanCrop] = [:]
+                        var markups: [String: Data] = [:]
+                        for page in restore.pages {
                             guard let object = attachmentObjects[page.id] else {
                                 throw NotesError("snapshot_attachment_unavailable", "Scan page \(page.id) disappeared before restore.")
                             }
-                            try NCNotesRuntime.unmarkForDeletion(object)
-                        }
-                        for (index, pageID) in restore.orderedPageIDs.enumerated() {
-                            let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
-                            if order.indices.contains(index), order[index] != pageID {
-                                try NCNotesRuntime.moveScanPage(pageID, toIndex: UInt(index), gallery: gallery)
-                            }
-                        }
-                        for page in restore.pages {
+                            pageObjects[page.id] = object
                             if let savedCrop = page.crop {
-                                guard let object = attachmentObjects[page.id],
-                                      let fileURL = value(object, "fileURL") as? URL,
+                                guard let fileURL = value(object, "fileURL") as? URL,
                                       let size = Self.scanImagePixelSize(fileURL),
                                       let crop = Self.normalizedScanCrop(
                                         savedCrop, pixelWidth: size.width, pixelHeight: size.height
                                       ) else {
                                     throw NotesError("unsupported_scan_crop", "The saved crop for scan page \(page.id) cannot be mapped safely.")
                                 }
-                                try NCNotesRuntime.setScanCrop(
-                                    bottomLeftX: crop.bottomLeft.x, bottomLeftY: crop.bottomLeft.y,
-                                    bottomRightX: crop.bottomRight.x, bottomRightY: crop.bottomRight.y,
-                                    topLeftX: crop.topLeft.x, topLeftY: crop.topLeft.y,
-                                    topRightX: crop.topRight.x, topRightY: crop.topRight.y,
-                                    pageIdentifier: page.id, gallery: gallery
-                                )
+                                crops[page.id] = crop
                             }
-                            try NCNotesRuntime.applyScanFilter(Int16(page.filter), pageIdentifier: page.id, gallery: gallery)
-                            try NCNotesRuntime.setScanOrientation(page.orientation, pageIdentifier: page.id, gallery: gallery)
                             if let hash = page.markupSHA256, let byteCount = page.markupByteCount {
                                 let data = try Self.verifiedMarkupPayload(
                                     hash: hash, byteCount: byteCount, restoreMaterial: material
                                 )
                                 _ = try FrozenAttachmentMarkup(data: data)
-                                try NCNotesRuntime.setScanMarkupData(data, pageIdentifier: page.id, gallery: gallery)
+                                markups[page.id] = data
                             }
-                            guard let object = attachmentObjects[page.id] else {
-                                throw NotesError("snapshot_attachment_unavailable", "Scan page \(page.id) disappeared during restore.")
-                            }
-                            try NCNotesRuntime.setValue(page.hasEmbeddedMarkup, forKey: "hasMarkupData", of: object)
-                            try NCNotesRuntime.updateChangeCount(of: object, reason: "Restored scan metadata")
                         }
-                        restoredExistingScans[planned.id] = restore
+                        preparedExistingScans.append((
+                            id: planned.id,
+                            restore: restore,
+                            gallery: gallery,
+                            pageObjects: pageObjects,
+                            crops: crops,
+                            markups: markups
+                        ))
                     case .recreateFile, .recreateScan, .recreateRecording, .recreatedByParent, .recreateTable,
                          .restoredByParent, .recreateRichLink, .recreateMap, .recreatePaperDocument,
                          .recreateDrawing, .recreateInline, .refuse:
@@ -5790,6 +5786,81 @@ public final class NativeNotesWriter: NotesNativeWriting {
                         attachmentIDMap[oldID] = newID
                     }
                     recreatedScans[restored.parentID] = pending.scan
+                }
+                if !preparedExistingScans.isEmpty {
+                    try validateBodiesBeforeSave([note])
+                }
+                for preparedScan in preparedExistingScans {
+                    let restore = preparedScan.restore
+                    let gallery = preparedScan.gallery
+                    if restore.unmarkParent {
+                        try NCNotesRuntime.unmarkForDeletion(gallery)
+                    }
+                    for page in restore.pages where page.unmark {
+                        guard let object = preparedScan.pageObjects[page.id] else {
+                            throw NotesError(
+                                "snapshot_attachment_unavailable",
+                                "Scan page \(page.id) disappeared before restore."
+                            )
+                        }
+                        try NCNotesRuntime.unmarkForDeletion(object)
+                    }
+                    func markImmediateScanMutation() {
+                        operation?.committed = true
+                        operation?.noteID = id(note)
+                        operation?.attachmentID = preparedScan.id
+                        operation?.attachmentType = "com.apple.notes.gallery"
+                    }
+                    for (index, pageID) in restore.orderedPageIDs.enumerated() {
+                        let order = try NCNotesRuntime.galleryPageIdentifiers(in: gallery)
+                        if order.indices.contains(index), order[index] != pageID {
+                            markImmediateScanMutation()
+                            try NCNotesRuntime.moveScanPage(pageID, toIndex: UInt(index), gallery: gallery)
+                            try TestFault.check("after_existing_scan_mutation")
+                        }
+                    }
+                    for page in restore.pages {
+                        if let crop = preparedScan.crops[page.id] {
+                            markImmediateScanMutation()
+                            try NCNotesRuntime.setScanCrop(
+                                bottomLeftX: crop.bottomLeft.x, bottomLeftY: crop.bottomLeft.y,
+                                bottomRightX: crop.bottomRight.x, bottomRightY: crop.bottomRight.y,
+                                topLeftX: crop.topLeft.x, topLeftY: crop.topLeft.y,
+                                topRightX: crop.topRight.x, topRightY: crop.topRight.y,
+                                pageIdentifier: page.id, gallery: gallery
+                            )
+                            try TestFault.check("after_existing_scan_mutation")
+                        }
+                        markImmediateScanMutation()
+                        try NCNotesRuntime.applyScanFilter(
+                            Int16(page.filter), pageIdentifier: page.id, gallery: gallery
+                        )
+                        try TestFault.check("after_existing_scan_mutation")
+                        try TestFault.check("after_existing_scan_filter_mutation")
+                        markImmediateScanMutation()
+                        try NCNotesRuntime.setScanOrientation(
+                            page.orientation, pageIdentifier: page.id, gallery: gallery
+                        )
+                        try TestFault.check("after_existing_scan_mutation")
+                        if let markup = preparedScan.markups[page.id] {
+                            markImmediateScanMutation()
+                            try NCNotesRuntime.setScanMarkupData(
+                                markup, pageIdentifier: page.id, gallery: gallery
+                            )
+                            try TestFault.check("after_existing_scan_mutation")
+                        }
+                        guard let object = preparedScan.pageObjects[page.id] else {
+                            throw NotesError(
+                                "snapshot_attachment_unavailable",
+                                "Scan page \(page.id) disappeared during restore."
+                            )
+                        }
+                        try NCNotesRuntime.setValue(
+                            page.hasEmbeddedMarkup, forKey: "hasMarkupData", of: object
+                        )
+                        try NCNotesRuntime.updateChangeCount(of: object, reason: "Restored scan metadata")
+                    }
+                    restoredExistingScans[preparedScan.id] = restore
                 }
                 if pendingScans.isEmpty || context.hasChanges { try save(context, notes: [note]) }
                 paperCleanupCandidates.removeAll()

@@ -236,6 +236,103 @@ final class ScanTests: XCTestCase {
         ).writeResult.outcome, .verified)
     }
 
+    func testLiveExistingScanRestoreFailureIsUnknownAfterImmediateMutation() throws {
+        guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_SNAPSHOT_TESTS"] == "1" else {
+            throw XCTSkip("Set NOTESCLI_LIVE_SNAPSHOT_TESTS=1; this test writes one disposable notescli-test note.")
+        }
+        let runner = OSAScriptRunner()
+        let native = NativeNotesWriter()
+        let scripting = ScriptingNotesWriter(timeout: 20, resolver: { ref in
+            try SQLiteNotesStore(refresh: true).note(ref).summary.id.coreDataID
+        })
+        let title = "notescli-test-scan-restore-failure-\(UUID().uuidString.lowercased())"
+        let create = "function run(argv) { const app = Application('Notes'); const account = app.defaultAccount(); const note = app.make({new: 'note', at: account, withProperties: {name: argv[0], body: '<h1>' + argv[0] + '</h1><p>body</p>'}}); return JSON.stringify(String(note.id())); }"
+        let reply = try runner.run(source: create, language: .javaScript, arguments: [title], timeout: 20)
+        guard !reply.timedOut, reply.status == 0 else {
+            throw NotesError("unknown_write", "Disposable scan fixture creation failed: \(reply.stderr)")
+        }
+        let scriptingID = try JSONDecoder().decode(String.self, from: XCTUnwrap(reply.stdout.data(using: .utf8)))
+        var noteID: String?
+        for attempt in 0..<40 {
+            if attempt > 0 { Thread.sleep(forTimeInterval: 0.25) }
+            noteID = try? SQLiteNotesStore(refresh: true).note(scriptingID).summary.id.uuid
+            if noteID != nil { break }
+        }
+        let ref = try XCTUnwrap(noteID)
+        defer { _ = try? scripting.deleteNote(ref) }
+
+        let inserted = try native.insertScan(
+            ref, pages: [try png(width: 32, height: 20)], position: nil, allowShared: false
+        )
+        XCTAssertEqual(inserted.write.writeResult.outcome, .verified)
+        let parentID = inserted.attachmentID
+        let pageID = try XCTUnwrap(inserted.pageAttachmentIDs.first)
+        let captured = try SQLiteNotesStore(refresh: true).note(ref)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notescli-scan-restore-failure-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SnapshotStore(rootURL: root)
+        let saved = try store.save(captured)
+        let loaded = try store.loadRestorable(ref, snapshot: saved.id)
+
+        XCTAssertEqual(try native.setScanFilter(
+            ref, attachmentID: parentID, pageID: pageID, filter: .grayscale,
+            expectedCurrent: .photo, allowShared: false
+        ).writeResult.outcome, .verified)
+        let expectedRevision = ConcurrencyGuard.revision(try SQLiteNotesStore(refresh: true).note(ref))
+        let guarded = try native.restoreSnapshot(
+            ref,
+            snapshot: loaded.note,
+            material: try store.restoreMaterial(for: loaded),
+            expectedRevision: expectedRevision,
+            expectedModified: nil,
+            allowShared: false
+        )
+        XCTAssertEqual(guarded.writeResult.outcome, .verified, guarded.writeResult.message ?? "no detail")
+        XCTAssertEqual(try native.scanPageState(
+            ref, attachmentID: parentID, pageID: pageID
+        ).filter, .photo)
+        XCTAssertEqual(try native.setScanFilter(
+            ref, attachmentID: parentID, pageID: pageID, filter: .grayscale,
+            expectedCurrent: .photo, allowShared: false
+        ).writeResult.outcome, .verified)
+        defer { unsetenv("NOTESCLI_TEST_FAULT") }
+        setenv("NOTESCLI_TEST_FAULT", "after_existing_scan_filter_mutation", 1)
+        let result = try native.restoreSnapshot(
+            ref,
+            snapshot: loaded.note,
+            material: try store.restoreMaterial(for: loaded),
+            expectedRevision: nil,
+            expectedModified: nil,
+            allowShared: false
+        )
+        XCTAssertEqual(result.writeResult.outcome, .unknown)
+        XCTAssertTrue(result.writeResult.message?.contains("Do not retry") == true)
+        XCTAssertTrue(result.writeResult.message?.contains("after_existing_scan_filter_mutation") == true)
+        unsetenv("NOTESCLI_TEST_FAULT")
+        XCTAssertEqual(try native.scanPageState(
+            ref, attachmentID: parentID, pageID: pageID
+        ).filter, .photo)
+
+        XCTAssertEqual(try native.setScanFilter(
+            ref, attachmentID: parentID, pageID: pageID, filter: .grayscale,
+            expectedCurrent: .photo, allowShared: false
+        ).writeResult.outcome, .verified)
+        setenv("NOTESCLI_TEST_FAULT", "before_restore_save", 1)
+        XCTAssertThrowsError(try native.restoreSnapshot(
+            ref,
+            snapshot: loaded.note,
+            material: try store.restoreMaterial(for: loaded),
+            expectedRevision: nil,
+            expectedModified: nil,
+            allowShared: false
+        ))
+        unsetenv("NOTESCLI_TEST_FAULT")
+        XCTAssertEqual(try native.scanPageState(
+            ref, attachmentID: parentID, pageID: pageID
+        ).filter, .grayscale)
+    }
+
     func testLiveCorruptFileStopsRestoreBeforeScanCommit() throws {
         guard ProcessInfo.processInfo.environment["NOTESCLI_LIVE_SNAPSHOT_TESTS"] == "1" else {
             throw XCTSkip("Set NOTESCLI_LIVE_SNAPSHOT_TESTS=1; this test writes one disposable notescli-test note.")

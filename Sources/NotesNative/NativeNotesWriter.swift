@@ -2112,6 +2112,27 @@ public final class NativeNotesWriter: NotesNativeWriting {
         try performRead { try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: $0) }
     }
 
+    public func detectScanCrop(_ ref: String, attachmentID: String, pageID: String) throws -> ScanCrop {
+        try performRead { context in
+            let state = try scanPageState(ref, attachmentID: attachmentID, pageID: pageID, in: context)
+            guard state.orientation == .upright else {
+                throw NotesError("scan_crop_rotated_unproven", "Edge detection is refused for rotated pages until Notes' orientation transform is proven.")
+            }
+            guard !state.hasMarkup, !state.hasEmbeddedMarkup else {
+                throw NotesError("scan_crop_markup_unproven", "Edge detection is refused for marked-up pages until markup alignment is proven.")
+            }
+            let target = try note(state.noteID, in: context)
+            let pages = try fetch("ICAttachment", predicate: NSPredicate(
+                format: "identifier == %@ AND parentAttachment.identifier == %@ AND parentAttachment.note == %@ AND markedForDeletion == NO",
+                pageID, attachmentID, target), in: context)
+            guard pages.count == 1, let page = pages.first,
+                  let url = value(page, "fileURL") as? URL else {
+                throw NotesError("scan_page_image_unavailable", "The scanned page image is unavailable for edge detection.")
+            }
+            return try ScanCorrection.detectCrop(at: url)
+        }
+    }
+
     fileprivate enum ScanEdit {
         case filter(NativeScanFilter)
         case orientation(NativeScanOrientation)

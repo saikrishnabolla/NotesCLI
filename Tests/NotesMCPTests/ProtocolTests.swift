@@ -138,11 +138,17 @@ final class ProtocolTests: XCTestCase {
         }
         let scanCrop = try XCTUnwrap(nativeTools.first { $0["name"] as? String == "scan_crop" })
         let scanCropProperties = try XCTUnwrap((scanCrop["inputSchema"] as? [String: Any])?["properties"] as? [String: Any])
+        XCTAssertEqual((scanCropProperties["detect_edges"] as? [String: Any])?["type"] as? String, "boolean")
         for name in ["bottom_left_x", "bottom_left_y", "bottom_right_x", "bottom_right_y",
                      "top_left_x", "top_left_y", "top_right_x", "top_right_y"] {
             let coordinate = try XCTUnwrap(scanCropProperties[name] as? [String: Any])
             XCTAssertEqual((coordinate["minimum"] as? NSNumber)?.doubleValue, 0)
             XCTAssertEqual((coordinate["maximum"] as? NSNumber)?.doubleValue, 1)
+        }
+        for name in ["scan_add", "scan_append"] {
+            let input = try XCTUnwrap(nativeTools.first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(input["properties"] as? [String: Any])
+            XCTAssertEqual((properties["perspective_correct"] as? [String: Any])?["type"] as? String, "boolean")
         }
         for name in ["drawing_add", "drawing_create", "drawing_export"] {
             XCTAssertTrue(nativeTools.contains { $0["name"] as? String == name }, name)
@@ -310,7 +316,9 @@ final class ProtocolTests: XCTestCase {
             ("format_inline", ["ref": "welcome", "start": 0, "length": 1, "superscript": true, "subscript": true], "Choose one of superscript, subscript, or clear_script."),
             ("set_default_text_size", ["points": 13], "Invalid points; use 10, 12, 14, 18, or 24."),
             ("scan_crop", negativeCrop, "bottom_left_x must be at least 0"),
-            ("scan_crop", oversizedCrop, "top_right_y must be at most 1")
+            ("scan_crop", oversizedCrop, "top_right_y must be at most 1"),
+            ("scan_crop", ["ref": "welcome", "attachment_id": "gallery", "page_id": "page"], "Provide detect_edges or all eight scan crop coordinates."),
+            ("scan_crop", validCrop.merging(["detect_edges": true]) { _, new in new }, "Choose detect_edges or explicit scan crop coordinates, not both.")
         ]
         for (name, arguments, message) in invalid {
             let response = try request(server, method: "tools/call", params: ["name": name, "arguments": arguments])
@@ -376,6 +384,49 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(recorded["page_sha256"] as? String, sha(first) + "," + sha(second))
         XCTAssertEqual(recorded["page_count"] as? Int, 2)
         XCTAssertNil(recorded["pages"])
+    }
+
+    func testScanEdgeDetectionUsesCropSafetyAndUndoContracts() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-scan-detect-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fake = InMemoryNotes.sample()
+        let noteID = try fake.summary("welcome").id.uuid
+        let previous = ScanCrop(
+            bottomLeft: ScanPoint(x: 0, y: 1), bottomRight: ScanPoint(x: 1, y: 1),
+            topLeft: ScanPoint(x: 0, y: 0), topRight: ScanPoint(x: 1, y: 0))
+        let detected = ScanCrop(
+            bottomLeft: ScanPoint(x: 0.1, y: 0.9), bottomRight: ScanPoint(x: 0.85, y: 0.95),
+            topLeft: ScanPoint(x: 0.15, y: 0.1), topRight: ScanPoint(x: 0.9, y: 0.15))
+        var cropDispatch: [String: Any]?
+        let server = MCPServer(reader: fake, writer: fake, allowNative: true, nativeHandler: { tool, arguments in
+            switch tool {
+            case "scan_page_state":
+                return try MCPNativeResult(value: NativeScanPageState(
+                    noteID: noteID, attachmentID: "gallery", pageID: "page", pageIDs: ["page"],
+                    filter: .photo, orientation: .upright, crop: previous, hasMarkup: false))
+            case "scan_detect_edges":
+                return try MCPNativeResult(value: detected)
+            case "scan_crop":
+                cropDispatch = arguments
+                return try MCPNativeResult(result: WriteResult(outcome: .verified, noteID: NoteID(uuid: noteID)), value: ["ok": true])
+            default:
+                throw NotesError("unexpected_test_dispatch", tool)
+            }
+        }, stateRoot: root)
+
+        let result = try call(server, "scan_crop", [
+            "ref": "welcome", "attachment_id": "gallery", "page_id": "page", "detect_edges": true,
+        ])
+        XCTAssertNotEqual(result["isError"] as? Bool, true, "\(result)")
+        XCTAssertEqual(cropDispatch?["top_left_x"] as? Double, detected.topLeft.x)
+        XCTAssertEqual(cropDispatch?["top_left_y"] as? Double, detected.topLeft.y)
+        XCTAssertEqual(cropDispatch?["bottom_right_x"] as? Double, detected.bottomRight.x)
+        XCTAssertEqual(cropDispatch?["bottom_right_y"] as? Double, detected.bottomRight.y)
+        XCTAssertEqual(cropDispatch?["expected_crop"] as? String, "0.0,1.0;1.0,1.0;0.0,0.0;1.0,0.0")
+
+        let entry = try XCTUnwrap(WriteJournal(url: root.appendingPathComponent("journal.sqlite")).list(limit: 1).first)
+        XCTAssertEqual(try entry.restoreAction(), .scanCrop(
+            noteID: noteID, attachmentID: "gallery", pageID: "page", crop: previous, expectedCurrent: detected))
     }
     func testDiagramSchemaAndValidationUseLiteralNotesDefaults() throws {
         let fake = InMemoryNotes.sample()

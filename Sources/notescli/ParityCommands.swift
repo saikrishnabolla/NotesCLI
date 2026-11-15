@@ -49,17 +49,34 @@ struct ScanMoveCommand: ParsableCommand {
 }
 
 struct ScanCropCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "crop", abstract: "Set a scanned-document page crop using normalized x,y points.")
+    static let configuration = CommandConfiguration(commandName: "crop", abstract: "Set or detect a scanned-document page crop.")
     @OptionGroup var options: GlobalOptions; @OptionGroup var write: WriteOptions
     @Argument var ref: String; @Argument var attachmentID: String; @Argument var pageID: String
-    @Option(help: "Normalized x,y point.") var bottomLeft: ScanPoint
-    @Option(help: "Normalized x,y point.") var bottomRight: ScanPoint
-    @Option(help: "Normalized x,y point.") var topLeft: ScanPoint
-    @Option(help: "Normalized x,y point.") var topRight: ScanPoint
+    @Option(help: "Normalized x,y point.") var bottomLeft: ScanPoint?
+    @Option(help: "Normalized x,y point.") var bottomRight: ScanPoint?
+    @Option(help: "Normalized x,y point.") var topLeft: ScanPoint?
+    @Option(help: "Normalized x,y point.") var topRight: ScanPoint?
+    @Flag(help: "Detect document edges with Vision and store the resulting crop.") var detectEdges = false
+    func validate() throws {
+        let points = [bottomLeft, bottomRight, topLeft, topRight]
+        if detectEdges && points.contains(where: { $0 != nil }) {
+            throw ValidationError("Choose either --detect-edges or all four crop points.")
+        }
+        if !detectEdges && !points.allSatisfy({ $0 != nil }) {
+            throw ValidationError("Provide --detect-edges or all four crop points.")
+        }
+    }
     func run() throws {
+        let crop = bottomLeft.flatMap { bottomLeft in
+            bottomRight.flatMap { bottomRight in
+                topLeft.flatMap { topLeft in
+                    topRight.map { ScanCrop(bottomLeft: bottomLeft, bottomRight: bottomRight,
+                                            topLeft: topLeft, topRight: $0) }
+                }
+            }
+        }
         try UnifiedNative.scanCrop(options, write, ref: ref, attachmentID: attachmentID, pageID: pageID,
-                                   crop: ScanCrop(bottomLeft: bottomLeft, bottomRight: bottomRight,
-                                                  topLeft: topLeft, topRight: topRight))
+                                   crop: crop, detectEdges: detectEdges)
     }
 }
 
@@ -195,6 +212,7 @@ struct ScanAddCommand: ParsableCommand {
     @Argument var ref: String
     @Argument(help: "Image files in page order.") var images: [String] = []
     @Option var position: Int?
+    @Flag(help: "Detect edges and perspective-correct every page before insertion.") var perspectiveCorrect = false
 
     func validate() throws {
         guard (1...NativeNotesWriter.maximumScanPages).contains(images.count) else {
@@ -210,10 +228,14 @@ struct ScanAddCommand: ParsableCommand {
             try InputFile.validated(URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath),
                                     kind: "scan image", maxBytes: FrozenAttachmentInput.maxBytes)
         }
-        let frozen = try paths.map(FrozenAttachmentInput.init(file:))
+        let sourcePages = try paths.map(FrozenAttachmentInput.init(file:))
+        let frozen = perspectiveCorrect ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
         // Hex digests contain no commas, so the joined list stays unambiguous and records no local paths.
-        let arguments = ["ref": note.summary.id.uuid, "image_sha256": frozen.map(\.sha256).joined(separator: ","),
-                         "page_count": String(frozen.count), "position": position.map(String.init) ?? "", "engine": "native"]
+        let arguments = ["ref": note.summary.id.uuid,
+                         "source_image_sha256": sourcePages.map(\.sha256).joined(separator: ","),
+                         "image_sha256": frozen.map(\.sha256).joined(separator: ","),
+                         "page_count": String(frozen.count), "position": position.map(String.init) ?? "",
+                         "perspective_correct": String(perspectiveCorrect), "engine": "native"]
         let plan = DryRunPlan(operation: "scanAdd", target: note.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(note), engine: "native")
         var captured: NativeScanResult?
@@ -245,6 +267,7 @@ struct ScanAppendCommand: ParsableCommand {
     @Argument var ref: String
     @Argument var attachmentID: String
     @Argument(help: "Image files in page order.") var images: [String] = []
+    @Flag(help: "Detect edges and perspective-correct every page before appending.") var perspectiveCorrect = false
 
     func validate() throws {
         guard (1...NativeNotesWriter.maximumScanPages).contains(images.count) else {
@@ -264,10 +287,13 @@ struct ScanAppendCommand: ParsableCommand {
             try InputFile.validated(URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath),
                                     kind: "scan image", maxBytes: FrozenAttachmentInput.maxBytes)
         }
-        let frozen = try paths.map(FrozenAttachmentInput.init(file:))
+        let sourcePages = try paths.map(FrozenAttachmentInput.init(file:))
+        let frozen = perspectiveCorrect ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
         let arguments = ["ref": note.summary.id.uuid, "attachment_id": attachmentID,
+                         "source_image_sha256": sourcePages.map(\.sha256).joined(separator: ","),
                          "image_sha256": frozen.map(\.sha256).joined(separator: ","),
                          "page_count": String(frozen.count),
+                         "perspective_correct": String(perspectiveCorrect),
                          "previous_page_order": previousPageIDs.joined(separator: ","), "engine": "native"]
         let plan = DryRunPlan(operation: "scanAppend", target: note.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(note), engine: "native")

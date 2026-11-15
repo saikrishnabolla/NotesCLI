@@ -36,7 +36,8 @@ let package = Package(
             .linkedFramework("CoreData"), .linkedFramework("AppKit"), .linkedFramework("ImageIO")
         ]),
         .target(name: "NotesNative", dependencies: ["NotesCore", "NotesStore", "NotesNativeObjC"], linkerSettings: [
-            .linkedFramework("AVFoundation"), .linkedFramework("Speech"), .linkedFramework("PencilKit")
+            .linkedFramework("AVFoundation"), .linkedFramework("Speech"), .linkedFramework("PencilKit"),
+            .linkedFramework("Vision"), .linkedFramework("CoreImage"), .linkedFramework("ImageIO")
         ]),
         .target(name: "NotesDiagrams", dependencies: ["NotesCore"], linkerSettings: [
             .linkedFramework("AppKit"), .linkedFramework("CoreGraphics"), .linkedFramework("WebKit")

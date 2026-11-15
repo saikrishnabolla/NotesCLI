@@ -50,10 +50,33 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(help.0, 0, help.2)
         XCTAssertTrue(help.1.contains("Create a native scanned document"))
         XCTAssertTrue(help.1.contains("<images>"))
+        XCTAssertTrue(help.1.contains("--perspective-correct"), help.1)
+
+        let appendHelp = try run(["scan", "append", "--help"])
+        XCTAssertEqual(appendHelp.0, 0, appendHelp.2)
+        XCTAssertTrue(appendHelp.1.contains("--perspective-correct"), appendHelp.1)
+
+        let cropHelp = try run(["scan", "crop", "--help"])
+        XCTAssertEqual(cropHelp.0, 0, cropHelp.2)
+        XCTAssertTrue(cropHelp.1.contains("--detect-edges"), cropHelp.1)
 
         let missing = try run(["--backend", "fake", "scan", "add", "welcome"])
         XCTAssertNotEqual(missing.0, 0)
         XCTAssertTrue(missing.2.contains("Provide between 1 and 100 image pages"), missing.2)
+
+        let mixedCrop = try run([
+            "--backend", "fake", "scan", "crop", "welcome", "gallery", "page", "--detect-edges",
+            "--bottom-left", "0,1", "--bottom-right", "1,1", "--top-left", "0,0", "--top-right", "1,0",
+        ])
+        XCTAssertNotEqual(mixedCrop.0, 0)
+        XCTAssertTrue(mixedCrop.2.contains("Choose either --detect-edges or all four crop points"), mixedCrop.2)
+
+        let crossedCrop = try run([
+            "--backend", "fake", "--engine", "native", "scan", "crop", "welcome", "gallery", "page",
+            "--bottom-left", "0,1", "--bottom-right", "1,0", "--top-left", "0,0", "--top-right", "1,1",
+        ])
+        XCTAssertNotEqual(crossedCrop.0, 0)
+        XCTAssertTrue(crossedCrop.2.contains("unsafe_scan_geometry"), crossedCrop.2)
     }
 
     func testLockedAttachmentExportRequiresStdinPasswordAndSaveDirectory() throws {

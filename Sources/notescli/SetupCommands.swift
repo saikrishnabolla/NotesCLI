@@ -366,10 +366,11 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         }
         let names = arguments["page_names"] as? [String] ?? encoded.indices.map { "page-\($0 + 1).png" }
         guard names.count == encoded.count else { throw NotesError("invalid_scan_page_names", "page_names must match pages.") }
-        let pages = try zip(encoded, names).map { value, name -> FrozenAttachmentInput in
+        let sourcePages = try zip(encoded, names).map { value, name -> FrozenAttachmentInput in
             guard let data = Data(base64Encoded: value) else { throw NotesError("invalid_scan_page", "Every scan page must be valid base64.") }
             return try FrozenAttachmentInput(data: data, suggestedName: name)
         }
+        let pages = boolean("perspective_correct") == true ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
         return try result(writer.insertScan(try ref(), pages: pages, position: integer("position"), allowShared: allowShared))
     case "scan_append":
         guard let encoded = arguments["pages"] as? [String], (1...NativeNotesWriter.maximumScanPages).contains(encoded.count) else {
@@ -377,10 +378,11 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
         }
         let names = arguments["page_names"] as? [String] ?? encoded.indices.map { "page-\($0 + 1).png" }
         guard names.count == encoded.count else { throw NotesError("invalid_scan_page_names", "page_names must match pages.") }
-        let pages = try zip(encoded, names).map { value, name -> FrozenAttachmentInput in
+        let sourcePages = try zip(encoded, names).map { value, name -> FrozenAttachmentInput in
             guard let data = Data(base64Encoded: value) else { throw NotesError("invalid_scan_page", "Every scan page must be valid base64.") }
             return try FrozenAttachmentInput(data: data, suggestedName: name)
         }
+        let pages = boolean("perspective_correct") == true ? try sourcePages.map(ScanCorrection.correctedPage) : sourcePages
         return try result(writer.appendScanPages(
             try ref(), attachmentID: string("attachment_id")!, pages: pages,
             expectedPageIDs: arguments["expected_page_ids"] as? [String], allowShared: allowShared))
@@ -464,6 +466,9 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
                              topLeft: ScanPoint(x: tlx, y: tly), topRight: ScanPoint(x: trx, y: tryValue))
         return try result(writer.setScanCrop(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
                                              crop: value, expectedCurrent: crop("expected_crop"), allowShared: allowShared))
+    case "scan_detect_edges":
+        return try MCPNativeResult(value: writer.detectScanCrop(
+            ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!))
     case "scan_move":
         return try result(writer.moveScanPage(ref(), attachmentID: string("attachment_id")!, pageID: string("page_id")!,
                                               toIndex: integer("to_index")!, expectedPageIDs: arguments["expected_page_ids"] as? [String],

@@ -291,12 +291,14 @@ public final class MCPServer: @unchecked Sendable {
                    "pages": ["type": "array", "minItems": 1, "maxItems": 100,
                              "items": ["type": "string", "contentEncoding": "base64", "minLength": 1, "maxLength": Self.maximumScanEncodedBytes],
                              "description": "Base64 image pages. Total length across all pages must not exceed 4,000,000 characters."],
-                   "page_names": ["type": "array", "maxItems": 100, "items": string], "position": integer], write: true, native: true),
+                   "page_names": ["type": "array", "maxItems": 100, "items": string], "position": integer,
+                   "perspective_correct": bool], write: true, native: true),
                 t("scan_append", "Append 1 to 100 base64-encoded image pages to an existing scanned document. page_id may identify any current page.", ["ref", "attachment_id", "page_id", "pages"],
                   ["ref": string, "attachment_id": string, "page_id": string,
                    "pages": ["type": "array", "minItems": 1, "maxItems": 100,
                              "items": ["type": "string", "contentEncoding": "base64", "minLength": 1, "maxLength": Self.maximumScanEncodedBytes]],
-                   "page_names": ["type": "array", "maxItems": 100, "items": string]], write: true, native: true),
+                   "page_names": ["type": "array", "maxItems": 100, "items": string],
+                   "perspective_correct": bool], write: true, native: true),
                 t("scan_page_state", "Read native filter, orientation, crop, markup, and page order for a scanned-document page.", ["ref", "attachment_id", "page_id"],
                   ["ref": string, "attachment_id": string, "page_id": string], native: true),
                 t("scan_filter", "Apply a native filter to a scanned-document page.", ["ref", "attachment_id", "page_id", "filter"],
@@ -305,10 +307,10 @@ public final class MCPServer: @unchecked Sendable {
                 t("scan_rotate", "Set a scanned-document page orientation.", ["ref", "attachment_id", "page_id", "orientation"],
                   ["ref": string, "attachment_id": string, "page_id": string,
                    "orientation": ["type": "string", "enum": ["upright", "upside-down", "left", "right"]]], write: true, native: true),
-                t("scan_crop", "Set a scanned-document page crop with normalized quadrilateral coordinates.",
-                  ["ref", "attachment_id", "page_id", "bottom_left_x", "bottom_left_y", "bottom_right_x", "bottom_right_y",
-                   "top_left_x", "top_left_y", "top_right_x", "top_right_y"],
+                t("scan_crop", "Set explicit scan crop coordinates or detect document edges with Vision.",
+                  ["ref", "attachment_id", "page_id"],
                   ["ref": string, "attachment_id": string, "page_id": string,
+                   "detect_edges": bool,
                    "bottom_left_x": coordinate, "bottom_left_y": coordinate,
                    "bottom_right_x": coordinate, "bottom_right_y": coordinate,
                    "top_left_x": coordinate, "top_left_y": coordinate,
@@ -734,6 +736,16 @@ public final class MCPServer: @unchecked Sendable {
             }
             if let names = args["page_names"] as? [String], names.count != pages.count {
                 return "page_names must have the same count as pages"
+            }
+        }
+        if tool.name == "scan_crop" {
+            let coordinateKeys = ["bottom_left_x", "bottom_left_y", "bottom_right_x", "bottom_right_y",
+                                  "top_left_x", "top_left_y", "top_right_x", "top_right_y"]
+            let coordinateCount = coordinateKeys.filter { args[$0] != nil }.count
+            let detects = args["detect_edges"] as? Bool == true
+            if detects && coordinateCount > 0 { return "Choose detect_edges or explicit scan crop coordinates, not both." }
+            if !detects && coordinateCount != coordinateKeys.count {
+                return "Provide detect_edges or all eight scan crop coordinates."
             }
         }
         return nil
@@ -1732,16 +1744,34 @@ public final class MCPServer: @unchecked Sendable {
                 dispatchArguments["expected_orientation"] = previous
             case "scan_crop":
                 func coordinate(_ key: String) -> Double? { (arguments[key] as? NSNumber)?.doubleValue }
-                guard let previous = state.crop,
-                      let blx = coordinate("bottom_left_x"), let bly = coordinate("bottom_left_y"),
-                      let brx = coordinate("bottom_right_x"), let bry = coordinate("bottom_right_y"),
-                      let tlx = coordinate("top_left_x"), let tly = coordinate("top_left_y"),
-                      let trx = coordinate("top_right_x"), let tryValue = coordinate("top_right_y") else {
+                guard let previous = state.crop else {
                     throw NotesError("invalid_native_result", "The native engine did not return the scan-crop preimage.")
                 }
-                let target = ScanCrop(
-                    bottomLeft: ScanPoint(x: blx, y: bly), bottomRight: ScanPoint(x: brx, y: bry),
-                    topLeft: ScanPoint(x: tlx, y: tly), topRight: ScanPoint(x: trx, y: tryValue))
+                let target: ScanCrop
+                if arguments["detect_edges"] as? Bool == true {
+                    let detected = try nativeHandler("scan_detect_edges", dispatchArguments)
+                    target = try JSONDecoder().decode(ScanCrop.self, from: detected.value)
+                    dispatchArguments["bottom_left_x"] = target.bottomLeft.x
+                    dispatchArguments["bottom_left_y"] = target.bottomLeft.y
+                    dispatchArguments["bottom_right_x"] = target.bottomRight.x
+                    dispatchArguments["bottom_right_y"] = target.bottomRight.y
+                    dispatchArguments["top_left_x"] = target.topLeft.x
+                    dispatchArguments["top_left_y"] = target.topLeft.y
+                    dispatchArguments["top_right_x"] = target.topRight.x
+                    dispatchArguments["top_right_y"] = target.topRight.y
+                    recordedArguments["edge_detection"] = "vision"
+                } else {
+                    guard let blx = coordinate("bottom_left_x"), let bly = coordinate("bottom_left_y"),
+                          let brx = coordinate("bottom_right_x"), let bry = coordinate("bottom_right_y"),
+                          let tlx = coordinate("top_left_x"), let tly = coordinate("top_left_y"),
+                          let trx = coordinate("top_right_x"), let tryValue = coordinate("top_right_y") else {
+                        throw NotesError("invalid_scan_crop", "All eight scan crop coordinates are required.")
+                    }
+                    target = ScanCrop(
+                        bottomLeft: ScanPoint(x: blx, y: bly), bottomRight: ScanPoint(x: brx, y: bry),
+                        topLeft: ScanPoint(x: tlx, y: tly), topRight: ScanPoint(x: trx, y: tryValue))
+                }
+                try ScanCorrection.validate(target)
                 recordedArguments["previous_crop"] = encode(previous)
                 recordedArguments["crop"] = encode(target)
                 dispatchArguments["expected_crop"] = encode(previous)
@@ -1779,7 +1809,21 @@ public final class MCPServer: @unchecked Sendable {
             }
             recordedArguments.removeValue(forKey: "pages")
             recordedArguments["page_count"] = pages.count
-            recordedArguments["page_sha256"] = decoded.map(FrozenAttachmentInput.hash).joined(separator: ",")
+            let sourceHashes = decoded.map(FrozenAttachmentInput.hash)
+            if arguments["perspective_correct"] as? Bool == true {
+                let names = arguments["page_names"] as? [String] ?? decoded.indices.map { "page-\($0 + 1).png" }
+                let corrected = try zip(decoded, names).map { data, name in
+                    try ScanCorrection.correctedPage(FrozenAttachmentInput(data: data, suggestedName: name))
+                }
+                let correctedData = try corrected.map { try Data(contentsOf: $0.url, options: .mappedIfSafe) }
+                dispatchArguments["pages"] = correctedData.map { $0.base64EncodedString() }
+                dispatchArguments["page_names"] = corrected.map(\.sourceName)
+                dispatchArguments["perspective_correct"] = false
+                recordedArguments["source_page_sha256"] = sourceHashes.joined(separator: ",")
+                recordedArguments["page_sha256"] = correctedData.map(FrozenAttachmentInput.hash).joined(separator: ",")
+            } else {
+                recordedArguments["page_sha256"] = sourceHashes.joined(separator: ",")
+            }
         }
         return try safeWrite(tool: tool, arguments: recordedArguments, note: note, paths: paths, engine: "native", snapshotNotes: targetNotes) {
             let value = try nativeHandler(tool.name, dispatchArguments)

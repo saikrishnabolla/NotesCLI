@@ -460,6 +460,7 @@ public protocol NotesNativeWriting {
     func appendScanPages(_ ref: String, attachmentID: String, pages: [FrozenAttachmentInput],
                          expectedPageIDs: [String]?, allowShared: Bool) throws -> NativeScanResult
     func scanPageState(_ ref: String, attachmentID: String, pageID: String) throws -> NativeScanPageState
+    func detectScanCrop(_ ref: String, attachmentID: String, pageID: String) throws -> ScanCrop
     func setScanFilter(_ ref: String, attachmentID: String, pageID: String, filter: NativeScanFilter,
                        expectedCurrent: NativeScanFilter?, allowShared: Bool) throws -> NativeWriteResult
     func setScanOrientation(_ ref: String, attachmentID: String, pageID: String, orientation: NativeScanOrientation,

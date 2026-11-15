@@ -389,7 +389,7 @@ enum UnifiedNative {
         }
     }
     static func scanCrop(_ o: GlobalOptions, _ w: WriteOptions, ref: String, attachmentID: String,
-                         pageID: String, crop: ScanCrop) throws {
+                         pageID: String, crop: ScanCrop?, detectEdges: Bool = false) throws {
         func encode(_ value: ScanCrop) -> String {
             "\(value.bottomLeft.x),\(value.bottomLeft.y);\(value.bottomRight.x),\(value.bottomRight.y);\(value.topLeft.x),\(value.topLeft.y);\(value.topRight.x),\(value.topRight.y)"
         }
@@ -403,15 +403,28 @@ enum UnifiedNative {
         guard let previousCrop = previous.crop else {
             throw NotesError("scan_crop_unavailable", "The scanned page has no readable crop quadrilateral.")
         }
+        let target: ScanCrop
+        if detectEdges {
+            guard !backend.isFake else {
+                throw NotesError("scan_edge_detection_unavailable", "Edge detection requires the native Apple Notes backend.")
+            }
+            target = try NativeNotesWriter().detectScanCrop(ref, attachmentID: attachmentID, pageID: pageID)
+        } else if let crop {
+            target = crop
+        } else {
+            throw NotesError("invalid_scan_crop", "Provide detected or explicit scan crop coordinates.")
+        }
+        try ScanCorrection.validate(target)
         try noteWrite(options: o, write: w, ref: ref, operation: "scanCrop",
                       arguments: ["attachment_id": attachmentID, "page_id": pageID,
-                                  "crop": encode(crop), "previous_crop": encode(previousCrop)]) { stableRef in
+                                  "crop": encode(target), "previous_crop": encode(previousCrop),
+                                  "edge_detection": detectEdges ? "vision" : "explicit"]) { stableRef in
             if backend.isFake {
                 return NativeActionResult(WriteResult(outcome: .unverified, noteID: NoteID(uuid: stableRef),
                                                       message: "The fake backend does not store scan crops; Apple Notes was not changed."))
             }
             return NativeActionResult(try NativeNotesWriter().setScanCrop(
-                stableRef, attachmentID: attachmentID, pageID: pageID, crop: crop,
+                stableRef, attachmentID: attachmentID, pageID: pageID, crop: target,
                 expectedCurrent: previousCrop, allowShared: w.allowShared))
         }
     }

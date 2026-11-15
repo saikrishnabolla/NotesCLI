@@ -7,7 +7,7 @@ notescli mcp
 notescli mcp install --client tailscale
 ```
 
-The default server exposes 54 tools. Read-only mode exposes 31 read tools. `notescli mcp --allow-native` exposes 135 tools in total.
+The direct server exposes 54 tools, 31 in read-only mode, or 154 with `--allow-native`. Through the capability host it exposes 48, 30, or 140 tools. Host routing omits tools that accept arbitrary local file paths, using the same filesystem boundary as remote Tailscale access. Use direct routing when the client already has the required macOS permissions and needs those file-based tools.
 
 ## Tools
 

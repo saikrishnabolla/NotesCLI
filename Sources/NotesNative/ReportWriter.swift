@@ -63,6 +63,7 @@ enum ReportMarkdownPreprocessor {
             let staged = try stageLocalResource(resource.source)
             markdown = replaceResource(resource.source, with: staged.absoluteString, in: markdown)
         }
+        markdown = addReportSpacing(to: markdown)
         let document = NotesMarkdownDocument(parsing: markdown)
         requested.headings = document.paragraphs.filter { [.heading, .subheading].contains($0.kind) }.count
         requested.tables = document.paragraphs.filter { $0.kind == .table }.count
@@ -216,6 +217,90 @@ enum ReportMarkdownPreprocessor {
         markdown.replacingOccurrences(of: "(\(source))", with: "(<\(replacement)>)")
             .replacingOccurrences(of: "(<\(source)>)", with: "(<\(replacement)>)")
             .replacingOccurrences(of: "(\(source) \"", with: "(<\(replacement)> \"")
+    }
+
+    private static func addReportSpacing(to markdown: String) -> String {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let marker = "<!-- notescli-empty-paragraph:0:0 -->"
+        var output: [String] = []
+        var insideFence = false
+        var seenHeading = false
+
+        func previousContentLine() -> String? {
+            output.reversed().first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        }
+
+        func appendSpacer() {
+            guard previousContentLine() != marker else { return }
+            if output.last?.isEmpty == false { output.append("") }
+            output.append(marker)
+            output.append("")
+        }
+
+        for index in lines.indices {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let fence = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+            if fence {
+                output.append(line)
+                insideFence.toggle()
+                continue
+            }
+            if !insideFence {
+                let heading = isReportHeading(trimmed)
+                let table = isTableStart(lines: lines, at: index)
+                let checklist = isChecklistStart(line)
+                let previous = previousContentLine()
+                if heading {
+                    if seenHeading { appendSpacer() }
+                    seenHeading = true
+                } else if table, previous.map(isParagraphLine) == true {
+                    appendSpacer()
+                } else if checklist, previous.map(isTableRow) == true {
+                    appendSpacer()
+                }
+            }
+            output.append(line)
+        }
+        return output.joined(separator: "\n")
+    }
+
+    private static func isReportHeading(_ line: String) -> Bool {
+        line.range(of: #"^#{2,6}\s+\S"#, options: .regularExpression) != nil
+    }
+
+    private static func isTableStart(lines: [String], at index: Int) -> Bool {
+        guard lines.indices.contains(index + 1), !lines[index].trimmingCharacters(in: .whitespaces).isEmpty else {
+            return false
+        }
+        var delimiter = lines[index + 1].trimmingCharacters(in: .whitespaces)
+        if delimiter.hasPrefix("|") { delimiter.removeFirst() }
+        if delimiter.hasSuffix("|") { delimiter.removeLast() }
+        let cells = delimiter.split(separator: "|", omittingEmptySubsequences: false)
+        return !cells.isEmpty && cells.allSatisfy {
+            $0.trimmingCharacters(in: .whitespaces)
+                .range(of: #"^:?-{3,}:?$"#, options: .regularExpression) != nil
+        }
+    }
+
+    private static func isChecklistStart(_ line: String) -> Bool {
+        line.range(of: #"^\s{0,3}[-+*]\s+\[[ xX]\]\s+"#, options: .regularExpression) != nil
+    }
+
+    private static func isTableRow(_ line: String) -> Bool {
+        let value = line.trimmingCharacters(in: .whitespaces)
+        return value.hasPrefix("|") && value.hasSuffix("|")
+    }
+
+    private static func isParagraphLine(_ line: String) -> Bool {
+        let value = line.trimmingCharacters(in: .whitespaces)
+        guard !value.isEmpty, value != "<!-- notescli-empty-paragraph:0:0 -->",
+              !isReportHeading(value), !isTableRow(value), !isChecklistStart(value),
+              !value.hasPrefix("# "), !value.hasPrefix("- "), !value.hasPrefix("* "),
+              !value.hasPrefix("+ "), !value.hasPrefix(">"), value != "---", value != "***" else {
+            return false
+        }
+        return true
     }
 }
 

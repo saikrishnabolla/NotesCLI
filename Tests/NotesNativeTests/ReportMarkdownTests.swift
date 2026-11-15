@@ -109,6 +109,59 @@ final class ReportMarkdownTests: XCTestCase {
         XCTAssertEqual(plan.requested.dividers, 1)
     }
 
+    func testAddsOneNativeEmptyParagraphAtReportBlockBoundaries() throws {
+        let plan = try ReportMarkdownPreprocessor.prepare(
+            title: "Research brief",
+            markdown: """
+            # Research brief
+
+            ## Summary
+
+            Intro paragraph.
+
+            ## Evidence
+
+            Evidence paragraph.
+
+            | Source | Finding |
+            | --- | --- |
+            | A | B |
+
+            - [ ] Review evidence
+
+              ![Chart](chart.png)
+
+            ### Next section
+
+            Closing paragraph.
+            """,
+            tags: [],
+            downloadImage: { $0 },
+            renderDiagram: { _, _ in URL(fileURLWithPath: "/tmp/unused.png") },
+            stageLocalResource: { _ in URL(fileURLWithPath: "/tmp/chart.png") }
+        )
+
+        let paragraphs = NotesMarkdownDocument(parsing: plan.markdown).paragraphs
+        XCTAssertEqual(paragraphs.map(\.kind), [
+            .heading, .body,
+            .body, .heading, .body,
+            .body, .table,
+            .body, .checklist, .body,
+            .body, .subheading, .body,
+        ])
+        XCTAssertEqual(paragraphs.map(\.plainText), [
+            "Summary", "Intro paragraph.",
+            "", "Evidence", "Evidence paragraph.",
+            "", "Source\tFinding\nA\tB",
+            "", "Review evidence", "Chart",
+            "", "Next section", "Closing paragraph.",
+        ])
+        XCTAssertEqual(paragraphs.first { $0.plainText == "Chart" }?.indent, 1)
+        XCTAssertFalse(zip(paragraphs, paragraphs.dropFirst()).contains {
+            $0.plainText.isEmpty && $1.plainText.isEmpty
+        })
+    }
+
     func testDownloaderByteLimitsDoNotOverflow() {
         XCTAssertTrue(SafeReportDownloader.canAppend(currentCount: 0, incomingCount: 10, maximumBytes: 10))
         XCTAssertTrue(SafeReportDownloader.canAppend(currentCount: 9, incomingCount: 1, maximumBytes: 10))

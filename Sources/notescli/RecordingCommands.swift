@@ -7,9 +7,42 @@ import NotesSafety
 struct RecordingCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "recording",
-        abstract: "Create, transcribe, and read native Apple Notes recordings.",
-        subcommands: [RecordingAdd.self, RecordingCreate.self, RecordingTranscribeFile.self, RecordingTranscribe.self, RecordingTranscriptCommand.self]
+        abstract: "Create, transcribe, read, and edit native Apple Notes recordings.",
+        subcommands: [RecordingAdd.self, RecordingCreate.self, RecordingTranscribeFile.self, RecordingTranscribe.self,
+                      RecordingTranscriptCommand.self, RecordingClearSummary.self]
     )
+}
+
+struct RecordingClearSummary: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear-summary",
+        abstract: "Delete an Apple-generated recording summary without changing the recording or call metadata."
+    )
+    @OptionGroup var options: GlobalOptions
+    @OptionGroup var write: WriteOptions
+    @Argument var ref: String
+    @Argument var attachmentID: String
+
+    func run() throws {
+        let backend = try options.writable()
+        _ = try UnifiedNative.engine(options, scriptingAvailable: false, fake: backend.isFake)
+        guard !backend.isFake else {
+            throw NotesError("native_unavailable", "Recording summary deletion is unavailable with the fake backend.")
+        }
+        try UnifiedNative.noteWrite(
+            options: options,
+            write: write,
+            ref: ref,
+            operation: "recordingSummaryClear",
+            arguments: ["attachment_id": attachmentID]
+        ) { stableRef in
+            NativeActionResult(try NativeNotesWriter().deleteRecordingSummary(
+                stableRef,
+                attachmentID: attachmentID,
+                allowShared: write.allowShared
+            ))
+        }
+    }
 }
 
 struct RecordingAdd: ParsableCommand {

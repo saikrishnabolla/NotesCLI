@@ -438,6 +438,10 @@ private func mcpNativeCall(_ tool: String, _ arguments: [String: Any], reader: a
             }
         }
         return try result(writer.writeRecordingTranscripts(note.summary.id.uuid, transcripts: transcripts, allowShared: allowShared))
+    case "recording_summary_clear":
+        return try result(writer.deleteRecordingSummary(
+            ref(), attachmentID: string("attachment_id")!, allowShared: allowShared
+        ))
     case "create_note":
         let paths = arguments["attachments"] as? [String] ?? []
         let frozen = try paths.map { try FrozenAttachmentInput(file: URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)) }

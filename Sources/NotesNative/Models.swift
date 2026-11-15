@@ -70,6 +70,7 @@ public struct NativeDoctorReport: Codable, Sendable {
         "-[ICDocCamDocumentInfo setMetaData:]",
         "-[ICDocCamDocumentInfo setCurrentFilter:]",
         "-[ICDocCamDocumentInfo setCurrentOrientation:]",
+        "-[ICAttachmentAudioModel deleteSummaryAndReturnError:]",
     ]
     /// Missing selectors that the whole native engine depends on.
     public var missingCore: [String] { missing.filter { !Self.optionalSelectors.contains($0) } }

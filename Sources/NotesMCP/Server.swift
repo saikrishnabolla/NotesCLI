@@ -192,6 +192,9 @@ public final class MCPServer: @unchecked Sendable {
                 t("recording_add", "Add a native Apple Notes recording from an audio file.", ["ref", "path"], ["ref": string, "path": string, "title": string, "transcribe": bool, "locale": string, "transcript_path": string], write: true, native: true),
                 t("recording_create", "Create a note containing a native Apple Notes recording.", ["folder", "title", "path"], ["folder": string, "title": string, "path": string, "transcribe": bool, "locale": string, "transcript_path": string], write: true, native: true),
                 t("recording_transcribe", "Transcribe native recordings that lack a transcript.", ["ref"], ["ref": string, "attachment": string, "locale": string, "transcript_path": string], write: true, native: true),
+                t("recording_summary_clear", "Delete an Apple-generated recording summary without changing recording or call metadata.",
+                  ["ref", "attachment_id"], ["ref": string, "attachment_id": string],
+                  write: true, native: true, destructive: true),
                 // MARK: w9-audio end
                 // MARK: w3-write begin
                 t("attach_pasteboard", "Attach the frozen pasteboard bytes to a note.", ["ref"], ["ref": string, "position": integer, "view": string], write: true, native: true),
@@ -1008,6 +1011,9 @@ public final class MCPServer: @unchecked Sendable {
         let markupTools = Set(["attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear"])
         if markupTools.contains(tool.name), s("engine") == "scripting" {
             throw NotesError("native_required", "Editable attachment markup requires the private native engine.")
+        }
+        if tool.name == "recording_summary_clear", s("engine") == "scripting" {
+            throw NotesError("native_required", "Recording summary deletion requires the private native engine.")
         }
         if ["file_push", "sync_notes"].contains(tool.name), s("engine") == "native" {
             throw NotesError("unsupported_engine", "The native engine is not available for MCP file or folder sync. Use write_markdown for an explicit native body replacement.")

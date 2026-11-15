@@ -103,7 +103,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(readOnlyHint("anchor_list"), true)
         XCTAssertEqual(readOnlyHint("anchor_resolve"), true)
         let nativeTools = (try request(MCPServer(reader: fake, writer: fake, allowNative: true), method: "tools/list")["result"] as! [String: Any])["tools"] as! [[String: Any]]
-        XCTAssertEqual(nativeTools.count, 148)
+        XCTAssertEqual(nativeTools.count, 149)
         for name in ["ocr_set", "image_labels_set", "attachment_markup_inspect", "attachment_markup_export",
                      "attachment_markup_set", "attachment_markup_copy", "attachment_markup_clear",
                      "handwriting_recognize", "handwriting_persist", "handwriting_set", "paper_add", "paper_regenerate_fallback"] {
@@ -117,6 +117,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_create" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_transcribe" })
         XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_transcript" })
+        XCTAssertTrue(nativeTools.contains { $0["name"] as? String == "recording_summary_clear" })
         for name in ["recording_add", "recording_create", "recording_transcribe"] {
             let schema = try XCTUnwrap(nativeTools.first { $0["name"] as? String == name }?["inputSchema"] as? [String: Any])
             let properties = try XCTUnwrap(schema["properties"] as? [String: Any])

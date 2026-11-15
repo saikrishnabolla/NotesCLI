@@ -415,6 +415,7 @@ final class NativeTests: XCTestCase {
         XCTAssertEqual(report.classes["ICHashtagController"]?.selectors["+setShouldAutoConvertToTag:"], true)
         XCTAssertEqual(report.classes["Calculate"]?.selectors["+evaluate:options:error:"], true)
         XCTAssertEqual(report.classes["CalculateResult"]?.selectors["-formattedResult"], true)
+        XCTAssertEqual(report.classes["ICAttachmentAudioModel"]?.selectors["-deleteSummaryAndReturnError:"], true)
         XCTAssertTrue(report.missingCore.isEmpty, report.missingCore.joined(separator: ", "))
         XCTAssertTrue(report.usable)
         if version.majorVersion >= 27 {
@@ -440,6 +441,7 @@ final class NativeTests: XCTestCase {
             "-[ICDocCamScannedDocumentEditor galleryModel]",
             "-[ICAttachmentGalleryModel indexOfSubAttachmentWithIdentifier:]",
             "-[ICAttachmentGalleryModel insertSubAttachment:atIndex:]",
+            "-[ICAttachmentAudioModel deleteSummaryAndReturnError:]",
         ]
         let optional = NativeDoctorReport(frameworkLoaded: true, frameworkPath: "", macOS: "26.7.2", missing: featureSelectors, error: nil, classes: [:])
         XCTAssertTrue(optional.usable)

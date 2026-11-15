@@ -254,6 +254,7 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *NCInstanceSelectors(void
         @"ICTTTodo": @[@"initWithIdentifier:done:", @"todoWithDone:"],
         @"ICAttachment": @[@"markForDeletion", @"attachmentModel", @"updateChangeCountWithReason:", @"setPreferredViewSize:", @"addLocationIfNeeded",
                             @"hasSynapseLink", @"synapseData", @"setOcrSummary:", @"setImageClassificationSummary:"],
+        @"ICAttachmentAudioModel": @[@"deleteSummaryAndReturnError:"],
         @"ICAttachmentGalleryModel": @[@"subAttachmentCount", @"subAttachmentIdentifierAtIndex:",
                                         @"indexOfSubAttachmentWithIdentifier:", @"insertSubAttachment:atIndex:"],
         @"ICDocCamScannedDocumentEditor": @[@"initWithGalleryAttachment:", @"applyFilter:forAttachmentWithIdentifier:",
@@ -902,6 +903,32 @@ static NSString *NCInlineIdentifier(id item, NSString **type, NSString *action, 
     })) return NO;
     if (!applied && error && !*error) *error = NCError(@"Notes could not write recording metadata");
     return applied;
+}
++ (BOOL)deleteRecordingSummaryForAttachment:(NSManagedObject *)attachment error:(NSError **)error {
+    if (!NCRequireObject(attachment, @[@"attachmentModel", @"updateChangeCountWithReason:"],
+                         @"deleting recording summary", error)) return NO;
+    __block id model = nil;
+    if (!NCCatch(@"opening recording summary", error, ^{
+        model = [(id<NCSynced>)attachment attachmentModel];
+    })) return NO;
+    if (!NCRequireObject(model, @[@"deleteSummaryAndReturnError:"], @"deleting recording summary", error)) return NO;
+    __block BOOL deleted = NO;
+    __block NSError *deleteError = nil;
+    if (!NCCatch(@"deleting recording summary", error, ^{
+        deleted = ((BOOL (*)(id, SEL, NSError **))objc_msgSend)(
+            model, NSSelectorFromString(@"deleteSummaryAndReturnError:"), &deleteError
+        );
+    })) return NO;
+    if (!deleted) {
+        if (error) *error = deleteError ?: NCError(@"Notes did not delete the recording summary");
+        return NO;
+    }
+    if (deleteError) {
+        if (error) *error = deleteError;
+        return NO;
+    }
+    [(id<NCSynced>)attachment updateChangeCountWithReason:@"Deleted recording summary"];
+    return YES;
 }
 + (NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note type:(NSString **)type error:(NSError **)error {
     if (!NCRequireObject(note, @[@"addURLAttachmentWithURL:"], @"adding URL preview", error)) return nil;

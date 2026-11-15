@@ -6750,6 +6750,118 @@ public final class NativeNotesWriter: NotesNativeWriting {
         }
     }
 
+    private func recordingSummaryAttachment(_ attachmentID: String, note: NSManagedObject,
+                                            in context: NSManagedObjectContext) throws -> NSManagedObject {
+        let matches = try fetch(
+            "ICAttachment",
+            predicate: NSPredicate(
+                format: "identifier ==[c] %@ AND note == %@ AND markedForDeletion == NO",
+                attachmentID,
+                note
+            ),
+            in: context
+        )
+        guard !matches.isEmpty else {
+            throw NotesError("recording_not_found", "No active recording matches \(attachmentID).")
+        }
+        guard matches.count == 1 else {
+            throw NotesError("ambiguous_attachment", "More than one active attachment matches \(attachmentID).")
+        }
+        let attachment = matches[0]
+        try require(
+            ["identifier", "typeUTI", "markedForDeletion", "subAttachments", "mergeableData",
+             "attachmentModel", "updateChangeCountWithReason:"],
+            of: attachment
+        )
+        guard let children = value(attachment, "subAttachments") as? NSSet, children.count > 0 else {
+            throw NotesError("recording_not_found", "The attachment is not an active recording parent.")
+        }
+        return attachment
+    }
+
+    private func recordingSummaryState(_ attachment: NSManagedObject) throws -> RecordingSummaryDeletionState {
+        guard let data = value(attachment, "mergeableData") as? Data, !data.isEmpty else {
+            throw NotesError("recording_summary_unavailable", "The recording metadata is unavailable.")
+        }
+        do {
+            let decoded = try NotesRecordingDecoder.decode(data)
+            return RecordingSummaryDeletionState(
+                metadata: decoded.metadata,
+                transcript: decoded.words,
+                fragments: decoded.fragments,
+                fragmentMetadata: decoded.fragmentMetadata
+            )
+        } catch {
+            throw NotesError("recording_summary_unavailable", "The recording metadata could not be decoded.")
+        }
+    }
+
+    public func deleteRecordingSummary(_ ref: String, attachmentID: String,
+                                       allowShared: Bool) throws -> NativeWriteResult {
+        try performWrite { context in
+            let target = try note(ref, in: context)
+            try guardWritable(target, allowShared: allowShared)
+            try refreshIfStale(target, protectsBody: false)
+            let attachment = try recordingSummaryAttachment(attachmentID, note: target, in: context)
+            let canonicalAttachmentID = id(attachment)
+            let before = try recordingSummaryState(attachment)
+            try before.requireSummary()
+            operation?.noteID = id(target)
+            operation?.attachmentID = canonicalAttachmentID
+            operation?.attachmentType = value(attachment, "typeUTI") as? String
+            do {
+                try NCNotesRuntime.deleteRecordingSummary(for: attachment)
+                try save(context, notes: [target])
+            } catch {
+                context.rollback()
+                throw (error as? NotesError) ?? nativeError(error)
+            }
+
+            let noteID = id(target)
+            context.reset()
+            let freshNote = try note(noteID, in: context)
+            let freshAttachment = try recordingSummaryAttachment(
+                canonicalAttachmentID,
+                note: freshNote,
+                in: context
+            )
+            let fresh = try recordingSummaryState(freshAttachment)
+            let nativeVerified = fresh.verifiesClear(from: before)
+            let native = [
+                "attachmentID": id(freshAttachment),
+                "summaryPresent": String(fresh.hasSummary),
+                "transcriptSegments": String(fresh.transcript.count),
+                "recordingStatePreserved": String(nativeVerified),
+            ]
+            return result(
+                noteID,
+                native: native,
+                nativeVerified: nativeVerified,
+                sqlite: { note in
+                    let matches = note.attachments.filter {
+                        $0.id.caseInsensitiveCompare(canonicalAttachmentID) == .orderedSame
+                    }
+                    guard matches.count == 1, let actual = matches.first,
+                          actual.childAttachmentIDs?.isEmpty == false else { return nil }
+                    let state = RecordingSummaryDeletionState(
+                        metadata: actual.recording ?? RecordingMetadata(),
+                        transcript: actual.transcriptWords ?? [],
+                        fragments: actual.recordingFragments?.map(\.id) ?? actual.childAttachmentIDs ?? [],
+                        fragmentMetadata: actual.recordingFragments ?? []
+                    )
+                    guard state.verifiesClear(from: before) else { return nil }
+                    return [
+                        "attachmentID": actual.id,
+                        "summaryPresent": String(state.hasSummary),
+                        "transcriptSegments": String(state.transcript.count),
+                        "recordingStatePreserved": "true",
+                    ]
+                },
+                mismatch: "Fresh native or SQLite readback did not confirm summary deletion with recording and call metadata preserved."
+            )
+        }
+    }
+
     private func transcriptRows(_ transcript: [TranscriptWord]) -> [[String: Any]] {
         transcript.map { segment in
             var row: [String: Any] = ["text": segment.text, "start": segment.start ?? 0, "duration": segment.duration ?? 0,

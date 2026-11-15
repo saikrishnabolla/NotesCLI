@@ -90,6 +90,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)applyRecordingMetadata:(NSDictionary<NSString *, id> *)metadata
              toAudioAttachment:(NSManagedObject *)attachment error:(NSError **)error
     NS_SWIFT_NAME(applyRecordingMetadata(_:toAudioAttachment:));
++ (BOOL)deleteRecordingSummaryForAttachment:(NSManagedObject *)attachment error:(NSError **)error
+    NS_SWIFT_NAME(deleteRecordingSummary(for:));
 + (nullable NSString *)addURL:(NSURL *)url toNote:(NSManagedObject *)note
                           type:(NSString *_Nullable *_Nonnull)type error:(NSError **)error
     NS_SWIFT_NAME(addURL(_:to:type:));

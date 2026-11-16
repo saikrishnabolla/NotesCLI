@@ -1,13 +1,13 @@
-# Connect NotesCLI to MCP clients
+# Connect Notes CLI to MCP clients
 
-NotesCLI runs a stdio MCP server and an authenticated HTTPS server over Tailscale:
+Notes CLI runs a stdio MCP server and an authenticated HTTPS server over Tailscale:
 
 ```bash
 notescli mcp
 notescli mcp install --client tailscale
 ```
 
-The direct server exposes 155 tools in write-enabled mode and 31 in read-only mode. Through the capability host it exposes 141 or 30 tools. Host routing omits tools that accept arbitrary local file paths, using the same filesystem boundary as remote Tailscale access. Use direct routing when the client already has the required macOS permissions and needs those file-based tools.
+The direct server exposes 155 tools in write-enabled mode and 31 in read-only mode. Through Notes CLI.app it exposes 141 or 30 tools. App routing omits tools that accept arbitrary local file paths, using the same filesystem boundary as remote Tailscale access. Use direct routing when the client already has the required macOS permissions and needs those file-based tools.
 
 ## Tools
 
@@ -116,11 +116,11 @@ notescli uninstall --dry-run
 notescli uninstall
 ```
 
-Removal touches only entries and files recorded by NotesCLI. The full uninstaller also removes the NotesCLI Tailscale route, LaunchAgents, capability host, socket, and manifest. `--keep-config` keeps onboarding and HTTP configuration.
+Removal touches only entries and files recorded by Notes CLI. The full uninstaller also removes the Notes CLI Tailscale route, app, LaunchAgents, socket, and manifest. `--keep-config` keeps onboarding and HTTP configuration.
 
 ## Use the plugins
 
-The repository includes a Claude Code marketplace in `.claude-plugin/marketplace.json` and a Codex marketplace in `.agents/plugins/marketplace.json`. Both start the installed `notescli mcp` server and include the NotesCLI agent skill.
+The repository includes a Claude Code marketplace in `.claude-plugin/marketplace.json` and a Codex marketplace in `.agents/plugins/marketplace.json`. Both start the installed `notescli mcp` server and include the Notes CLI agent skill.
 
 ## Write safety
 
@@ -129,13 +129,13 @@ Every MCP write tool accepts `dry_run: true`. A real write returns an `outcome`:
 - `verified`: a fresh database snapshot found the change.
 - `unverified`: Notes accepted the write, but the readback did not prove it.
 - `unknown`: the request timed out or lost its response. Read current state and never retry automatically.
-- `rolled_back`: a native create failed after Notes saved the new note, so NotesCLI moved that note to Recently Deleted. Nothing was kept; `noteID` names the removed note. If the move fails, the outcome is `unknown` with the same `noteID`.
+- `rolled_back`: a native create failed after Notes saved the new note, so Notes CLI moved that note to Recently Deleted. Nothing was kept; `noteID` names the removed note. If the move fails, the outcome is `unknown` with the same `noteID`.
 
 Use a folder named `notescli-test` and titles beginning with `notescli-test-` for agent experiments. Delete moves items to Recently Deleted.
 
 Every Notes write uses the folder allowlist, concurrency checks, journal, snapshots, and fresh readback. `--write-folders` sets a hard ceiling for the Tailscale server; `write_folders` on a call can narrow that ceiling but cannot broaden it. Read-only mode hides filesystem write tools as well as Notes write tools.
 
-`history` and `diff` read the exact pre-write snapshots created by NotesCLI. Native `undo` and `revert` can recreate missing scans, recordings, drawings, rich links, maps, tables, table-cell inline objects, Paper documents, and generic files, then verify the restored topology and bytes.
+`history` and `diff` read the exact pre-write snapshots created by Notes CLI. Native `undo` and `revert` can recreate missing scans, recordings, drawings, rich links, maps, tables, table-cell inline objects, Paper documents, and generic files, then verify the restored topology and bytes.
 
 Native tools are available by default on write-enabled servers and stay hidden in read-only mode. `--allow-native` remains accepted for older configurations but is no longer required. Native write results include `engine` and `operationID` when available. They write through Notes' private framework and persistent data store and can break after a macOS update.
 

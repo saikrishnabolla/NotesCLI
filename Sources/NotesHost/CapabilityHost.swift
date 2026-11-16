@@ -17,6 +17,10 @@ public enum CapabilityHostPaths {
     public static var socket: URL { supportDirectory.appendingPathComponent("capability-host.sock") }
     public static var app: URL {
         FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications/Notes CLI.app", isDirectory: true)
+    }
+    public static var legacyApp: URL {
+        FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Applications/NotesCLI Capability Host.app", isDirectory: true)
     }
     public static var launchAgent: URL {
@@ -51,12 +55,12 @@ public struct CapabilityHostRequest: Codable, Sendable {
     func validate(forHostVersion hostVersion: String = notesCLIVersion) throws {
         guard protocolVersion == Self.currentProtocol else {
             throw CapabilityHostError.protocolFailure(
-                "The capability host does not match this NotesCLI version. Run 'notescli onboard' to update it."
+                "The Notes CLI app does not match this command-line version. Run 'notescli onboard' to update it."
             )
         }
         guard clientVersion == hostVersion else {
             throw CapabilityHostError.protocolFailure(
-                "The capability host is NotesCLI \(hostVersion), but the client is \(clientVersion). Run 'notescli onboard' to update it."
+                "The Notes CLI app is version \(hostVersion), but the command-line client is \(clientVersion). Run 'notescli onboard' to update it."
             )
         }
         guard arguments.count <= 512,
@@ -64,7 +68,7 @@ public struct CapabilityHostRequest: Codable, Sendable {
               environment.count <= 16,
               Set(environment.keys).isSubset(of: Self.allowedEnvironmentKeys),
               environment.allSatisfy({ $0.key.utf8.count <= 128 && $0.value.utf8.count <= 4_096 }) else {
-            throw CapabilityHostError.protocolFailure("The capability-host request is not supported.")
+            throw CapabilityHostError.protocolFailure("This Notes CLI request is not supported.")
         }
     }
 }
@@ -236,7 +240,7 @@ public enum CapabilityHostClient {
                            descriptors: [Int32] = [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO]) throws -> Int32 {
         guard descriptors.count == 3 else { throw CapabilityHostError.protocolFailure("Three standard descriptors are required.") }
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else { throw CapabilityHostError.unavailable("Could not create the capability-host socket.") }
+        guard descriptor >= 0 else { throw CapabilityHostError.unavailable("Could not connect to Notes CLI.") }
         defer { close(descriptor) }
         var address = try socketAddress(socketURL.path)
         let connected = withUnsafePointer(to: &address) {
@@ -245,7 +249,7 @@ public enum CapabilityHostClient {
             }
         }
         guard connected == 0 else {
-            throw CapabilityHostError.unavailable("NotesCLI Capability Host is not available. Run 'notescli onboard' to repair it.")
+            throw CapabilityHostError.unavailable("Notes CLI is not running. Open Notes CLI or run 'notescli onboard' to repair it.")
         }
         var data = try JSONEncoder().encode(CapabilityHostRequest(
             arguments: arguments,
@@ -256,12 +260,12 @@ public enum CapabilityHostClient {
         let response = try readReply(socket: descriptor)
         guard response.protocolVersion == CapabilityHostRequest.currentProtocol else {
             throw CapabilityHostError.protocolFailure(
-                "The capability host does not match this NotesCLI version. Run 'notescli onboard' to update it."
+                "The Notes CLI app does not match this command-line version. Run 'notescli onboard' to update it."
             )
         }
         if let error = response.error { throw CapabilityHostError.protocolFailure(error) }
         guard let exitCode = response.exitCode else {
-            throw CapabilityHostError.protocolFailure("The capability host returned no exit status.")
+            throw CapabilityHostError.protocolFailure("Notes CLI returned no exit status.")
         }
         return exitCode
     }
@@ -281,7 +285,7 @@ public enum CapabilityHostClient {
               let input = FileHandle(forReadingAtPath: "/dev/null"),
               let output = FileHandle(forWritingAtPath: outputURL.path),
               let error = FileHandle(forWritingAtPath: errorURL.path) else {
-            throw CapabilityHostError.unavailable("Could not prepare capability-host output capture.")
+            throw CapabilityHostError.unavailable("Could not prepare Notes CLI output capture.")
         }
         defer {
             try? input.close()
@@ -298,7 +302,7 @@ public enum CapabilityHostClient {
 
     private static func sendRequest(_ data: Data, descriptors: [Int32], socket: Int32) throws {
         guard data.count <= CapabilityHostRequest.maximumEncodedBytes else {
-            throw CapabilityHostError.protocolFailure("The capability-host request is too large.")
+            throw CapabilityHostError.protocolFailure("The Notes CLI request is too large.")
         }
         let payloadSize = MemoryLayout<Int32>.size * descriptors.count
         let controlSize = controlHeaderSize + alignedControlSize(payloadSize)
@@ -323,7 +327,7 @@ public enum CapabilityHostClient {
             }
         }
         guard sent > 0 else {
-            throw CapabilityHostError.unavailable("Could not send the command to the capability host.")
+            throw CapabilityHostError.unavailable("Could not send the command to Notes CLI.")
         }
         var offset = sent
         while offset < data.count {
@@ -332,7 +336,7 @@ public enum CapabilityHostClient {
             }
             if count > 0 { offset += count }
             else if count < 0, errno == EINTR { continue }
-            else { throw CapabilityHostError.unavailable("Could not send the command to the capability host.") }
+            else { throw CapabilityHostError.unavailable("Could not send the command to Notes CLI.") }
         }
     }
 
@@ -344,13 +348,13 @@ public enum CapabilityHostClient {
             if count == 0 { break }
             guard count > 0 else {
                 if errno == EINTR { continue }
-                throw CapabilityHostError.unavailable("The capability host disconnected.")
+                throw CapabilityHostError.unavailable("Notes CLI disconnected.")
             }
             data.append(contentsOf: buffer.prefix(count))
             if data.contains(0x0a) { break }
         }
         guard let newline = data.firstIndex(of: 0x0a) else {
-            throw CapabilityHostError.protocolFailure("The capability host returned an invalid reply.")
+            throw CapabilityHostError.protocolFailure("Notes CLI returned an invalid reply.")
         }
         return try JSONDecoder().decode(CapabilityHostReply.self, from: Data(data[..<newline]))
     }
@@ -377,7 +381,7 @@ public final class CapabilityHostServer: @unchecked Sendable {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         if FileManager.default.fileExists(atPath: socketURL.path) {
             if CapabilityHostClient.isAvailable(socketURL: socketURL) {
-                throw CapabilityHostError.unavailable("Another NotesCLI Capability Host is already running.")
+                throw CapabilityHostError.unavailable("Notes CLI is already running.")
             }
             try FileManager.default.removeItem(at: socketURL)
         }
@@ -392,7 +396,7 @@ public final class CapabilityHostServer: @unchecked Sendable {
         guard didBind == 0, chmod(socketURL.path, 0o600) == 0, listen(listener, 32) == 0 else {
             let message = String(cString: strerror(errno))
             stop()
-            throw CapabilityHostError.unavailable("Could not start the capability host: \(message)")
+            throw CapabilityHostError.unavailable("Could not start Notes CLI: \(message)")
         }
         let newSource = DispatchSource.makeReadSource(fileDescriptor: listener, queue: queue)
         newSource.setEventHandler { [weak self] in self?.acceptConnections() }

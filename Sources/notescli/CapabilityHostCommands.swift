@@ -7,7 +7,7 @@ import NotesHost
 struct HostCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "host",
-        abstract: "Manage the signed capability host.",
+        abstract: "Manage the signed Notes CLI app.",
         subcommands: [HostInstall.self, HostStatus.self, HostRestart.self, HostUninstall.self]
     )
 }
@@ -42,9 +42,12 @@ enum HostInstallation {
         guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() else { return nil }
         let root = executable.deletingLastPathComponent()
         let candidates = [
+            root.appendingPathComponent("Notes CLI.app", isDirectory: true),
             root.appendingPathComponent("NotesCLI Capability Host.app", isDirectory: true),
+            root.deletingLastPathComponent().appendingPathComponent("libexec/Notes CLI.app", isDirectory: true),
             root.deletingLastPathComponent().appendingPathComponent("libexec/NotesCLI Capability Host.app", isDirectory: true),
             CapabilityHostPaths.app,
+            CapabilityHostPaths.legacyApp,
         ]
         return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
@@ -64,7 +67,7 @@ enum HostInstallation {
     }
 
     static func launchAgentData() throws -> Data {
-        let executable = CapabilityHostPaths.app.appendingPathComponent("Contents/MacOS/NotesCLI Capability Host").path
+        let executable = CapabilityHostPaths.app.appendingPathComponent("Contents/MacOS/Notes CLI").path
         let object: [String: Any] = [
             "Label": "com.saikrishnabolla.notescli.capability-host",
             "ProgramArguments": [executable],
@@ -107,19 +110,22 @@ enum HostInstallation {
 
     static func install(silent: Bool = false) throws {
         guard let source = sourceApp else {
-            throw NotesError("host_app_missing", "The release does not contain NotesCLI Capability Host.app.")
+            throw NotesError("host_app_missing", "The release does not contain Notes CLI.app.")
         }
         let fileManager = FileManager.default
         let appDirectory = CapabilityHostPaths.app.deletingLastPathComponent()
         try fileManager.createDirectory(at: appDirectory, withIntermediateDirectories: true)
         let staged = appDirectory
-            .appendingPathComponent(".NotesCLI Capability Host-\(UUID().uuidString).app")
+            .appendingPathComponent(".Notes CLI-\(UUID().uuidString).app")
         let appBackup = appDirectory
-            .appendingPathComponent(".NotesCLI Capability Host.backup-\(UUID().uuidString).app")
+            .appendingPathComponent(".Notes CLI.backup-\(UUID().uuidString).app")
+        let legacyAppBackup = appDirectory
+            .appendingPathComponent(".Notes CLI.legacy-backup-\(UUID().uuidString).app")
         let launchAgentDirectory = CapabilityHostPaths.launchAgent.deletingLastPathComponent()
         let launchAgentBackup = launchAgentDirectory
             .appendingPathComponent(".com.saikrishnabolla.notescli.capability-host.backup-\(UUID().uuidString).plist")
         let hadApp = fileManager.fileExists(atPath: CapabilityHostPaths.app.path)
+        let hadLegacyApp = fileManager.fileExists(atPath: CapabilityHostPaths.legacyApp.path)
         let hadLaunchAgent = fileManager.fileExists(atPath: CapabilityHostPaths.launchAgent.path)
         var mutationBegan = false
 
@@ -147,19 +153,20 @@ enum HostInstallation {
         do {
             try fileManager.copyItem(at: source, to: staged)
             guard validSignature(staged) else {
-                throw NotesError("invalid_host_signature", "The capability host is not signed by the NotesCLI developer team.")
+                throw NotesError("invalid_host_signature", "Notes CLI is not signed by the expected developer team.")
             }
             try fileManager.createDirectory(at: launchAgentDirectory, withIntermediateDirectories: true)
             if hadApp { try fileManager.copyItem(at: CapabilityHostPaths.app, to: appBackup) }
+            if hadLegacyApp { try fileManager.copyItem(at: CapabilityHostPaths.legacyApp, to: legacyAppBackup) }
             if hadLaunchAgent { try fileManager.copyItem(at: CapabilityHostPaths.launchAgent, to: launchAgentBackup) }
 
             if serviceLoaded() {
                 guard launchctl(["bootout", "gui/\(getuid())", CapabilityHostPaths.launchAgent.path]) == 0 else {
-                    throw NotesError("host_stop_failed", "The current capability host could not be stopped safely.")
+                    throw NotesError("host_stop_failed", "The current Notes CLI app could not be stopped safely.")
                 }
                 mutationBegan = true
                 guard waitUntilUnloaded() else {
-                    throw NotesError("host_stop_failed", "The current capability host did not stop before replacement.")
+                    throw NotesError("host_stop_failed", "Notes CLI did not stop before replacement.")
                 }
             } else {
                 mutationBegan = true
@@ -171,21 +178,24 @@ enum HostInstallation {
             try launchAgentData().write(to: CapabilityHostPaths.launchAgent, options: .atomic)
             try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: CapabilityHostPaths.launchAgent.path)
             guard launchctl(["bootstrap", "gui/\(getuid())", CapabilityHostPaths.launchAgent.path]) == 0 else {
-                throw NotesError("host_start_failed", "The capability host was installed but launchd could not start it.")
+                throw NotesError("host_start_failed", "Notes CLI was installed, but macOS could not start it.")
             }
             _ = launchctl(["kickstart", "-k", "gui/\(getuid())/com.saikrishnabolla.notescli.capability-host"])
             guard waitUntilReady() else {
-                throw NotesError("host_start_failed", "The capability host was installed but its private socket did not become ready.")
+                throw NotesError("host_start_failed", "Notes CLI was installed, but it did not become ready.")
             }
 
+            if hadLegacyApp { try fileManager.removeItem(at: CapabilityHostPaths.legacyApp) }
             removeIfPresent(appBackup)
+            removeIfPresent(legacyAppBackup)
             removeIfPresent(launchAgentBackup)
-            if !silent { print("Installed NotesCLI Capability Host at \(CapabilityHostPaths.app.path)") }
+            if !silent { print("Installed Notes CLI at \(CapabilityHostPaths.app.path)") }
         } catch {
             let installError = error
             removeIfPresent(staged)
             guard mutationBegan else {
                 removeIfPresent(appBackup)
+                removeIfPresent(legacyAppBackup)
                 removeIfPresent(launchAgentBackup)
                 throw installError
             }
@@ -197,19 +207,23 @@ enum HostInstallation {
             removeIfPresent(CapabilityHostPaths.launchAgent)
             do {
                 if hadApp { try fileManager.moveItem(at: appBackup, to: CapabilityHostPaths.app) }
+                if hadLegacyApp {
+                    removeIfPresent(CapabilityHostPaths.legacyApp)
+                    try fileManager.moveItem(at: legacyAppBackup, to: CapabilityHostPaths.legacyApp)
+                }
                 if hadLaunchAgent { try fileManager.moveItem(at: launchAgentBackup, to: CapabilityHostPaths.launchAgent) }
-                if hadApp, hadLaunchAgent {
+                if (hadApp || hadLegacyApp), hadLaunchAgent {
                     guard launchctl(["bootstrap", "gui/\(getuid())", CapabilityHostPaths.launchAgent.path]) == 0 else {
-                        throw NotesError("host_rollback_failed", "The previous capability host could not be restored in launchd.")
+                        throw NotesError("host_rollback_failed", "The previous Notes CLI app could not be restored in macOS.")
                     }
                     _ = launchctl(["kickstart", "-k", "gui/\(getuid())/com.saikrishnabolla.notescli.capability-host"])
                     guard waitUntilReady() else {
-                        throw NotesError("host_rollback_failed", "The previous capability host was restored but its private socket did not become ready.")
+                        throw NotesError("host_rollback_failed", "The previous Notes CLI app was restored, but it did not become ready.")
                     }
                 }
             } catch {
                 throw NotesError("host_rollback_failed",
-                                 "Capability-host replacement failed (\(installError)). Restoring the previous host also failed (\(error)).")
+                                 "Replacing Notes CLI failed (\(installError)). Restoring the previous app also failed (\(error)).")
             }
             throw installError
         }
@@ -217,7 +231,7 @@ enum HostInstallation {
 
     static func uninstall() throws {
         _ = launchctl(["bootout", "gui/\(getuid())", CapabilityHostPaths.launchAgent.path])
-        for target in [CapabilityHostPaths.launchAgent, CapabilityHostPaths.app]
+        for target in [CapabilityHostPaths.launchAgent, CapabilityHostPaths.app, CapabilityHostPaths.legacyApp]
             where FileManager.default.fileExists(atPath: target.path) {
             try FileManager.default.removeItem(at: target)
         }
@@ -236,7 +250,7 @@ struct HostRestart: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "restart")
     func run() throws {
         guard HostInstallation.launchctl(["kickstart", "-k", "gui/\(getuid())/com.saikrishnabolla.notescli.capability-host"]) == 0 else {
-            throw NotesError("host_restart_failed", "The capability host is not installed or could not restart.")
+            throw NotesError("host_restart_failed", "Notes CLI is not installed or could not restart.")
         }
     }
 }
@@ -245,7 +259,7 @@ struct HostUninstall: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "uninstall")
     @Flag var dryRun = false
     func run() throws {
-        let targets = [CapabilityHostPaths.launchAgent, CapabilityHostPaths.app]
+        let targets = [CapabilityHostPaths.launchAgent, CapabilityHostPaths.app, CapabilityHostPaths.legacyApp]
         if dryRun { targets.forEach { print($0.path) }; return }
         try HostInstallation.uninstall()
     }

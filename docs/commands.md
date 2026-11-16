@@ -1,6 +1,6 @@
 # Command reference
 
-This reference follows `notescli --help` from version 1.1.11.
+This reference follows `notescli --help` from Notes CLI 1.1.11.
 
 `notescli report create --title TITLE --file REPORT.md [--folder FOLDER] [--tags TAGS] [--replace]` creates and verifies one native report. `--replace` updates the report with the same title in the target folder, or creates it on the first run. Markdown may include local or HTTPS images, bare-URL preview cards, native tables, tags, checklists, attachments, citations, and dividers. An `svg` fence or an `html diagram` fence renders as a diagram; a plain `html` fence stays code.
 
@@ -18,7 +18,7 @@ This reference follows `notescli --help` from version 1.1.11.
 
 Use `--json` for scripts and agents. A note reference can be `#123`, a UUID, Core Data ID, short ID such as `n123`, bare numeric ID such as `123`, or an exact title. `#123` and `123` also match a note titled exactly `#123` or `123`; when they match one note by number and another by title, the command fails with `ambiguous_reference` and lists both. Use `id:123` (or `n123`) to match only the note number or ID, and `title:#123` to match only the exact title. Numbers come from Notes' stable `Z_PK` value and appear as `#ID` in human listings and `number` in JSON.
 
-With no command, a terminal shows the NotesCLI home screen and the titles of five recently edited notes. `notescli --no-recent` or `NOTESCLI_HOME_RECENT=0` hides the titles. Redirected output shows plain help. `notescli --json` returns the home data as JSON; each recent note has only its number, title, folder, and modified date.
+With no command, a terminal shows the Notes CLI home screen and the titles of five recently edited notes. `notescli --no-recent` or `NOTESCLI_HOME_RECENT=0` hides the titles. Redirected output shows plain help. `notescli --json` returns the home data as JSON; each recent note has only its number, title, folder, and modified date.
 
 ## Read commands
 

@@ -89,7 +89,7 @@ enum TailscaleMCP {
               value.host == "127.0.0.1", (1...65535).contains(value.port),
               value.path == "/notescli", value.token.utf8.count >= 32,
               !value.tailscaleHostname.isEmpty else {
-            throw NotesError("invalid_http_config", "The NotesCLI MCP HTTP configuration is invalid.")
+            throw NotesError("invalid_http_config", "The Notes CLI MCP HTTP configuration is invalid.")
         }
         return value
     }
@@ -97,7 +97,7 @@ enum TailscaleMCP {
     static func install(executable: String, readOnly: Bool, allowNative: Bool,
                         writeFolders: String?) throws -> MCPHTTPConfiguration {
         guard CapabilityHostClient.isAvailable() else {
-            throw NotesError("capability_host_required", "Install and start NotesCLI Capability Host before publishing MCP.",
+            throw NotesError("capability_host_required", "Install and open Notes CLI before publishing MCP.",
                              hint: "Run 'notescli onboard'.")
         }
         let tailscale = try tailscaleStatus()
@@ -140,10 +140,10 @@ enum TailscaleMCP {
             let result = run(tailscale.binary, ["serve", "--bg", "--https=443", "--set-path=\(config.path)", "http://127.0.0.1:\(config.port)"],
                              environment: ["TAILSCALE_BE_CLI": "1"])
             guard result.status == 0 else {
-                throw NotesError("tailscale_serve_failed", result.output.isEmpty ? "Tailscale could not publish the NotesCLI endpoint." : result.output)
+                throw NotesError("tailscale_serve_failed", result.output.isEmpty ? "Tailscale could not publish the Notes CLI endpoint." : result.output)
             }
             guard try routeTarget(binary: tailscale.binary, path: config.path) == "http://127.0.0.1:\(config.port)" else {
-                throw NotesError("tailscale_route_mismatch", "Tailscale did not install the expected NotesCLI route.")
+                throw NotesError("tailscale_route_mismatch", "Tailscale did not install the expected Notes CLI route.")
             }
             try waitForHealth(config.endpoint + "/health", code: "tailscale_endpoint_unhealthy")
             return config
@@ -171,10 +171,10 @@ enum TailscaleMCP {
                 if target == expected {
                     let removal = run(binary, ["serve", "--https=443", "--set-path=\(path)", "off"], environment: ["TAILSCALE_BE_CLI": "1"])
                     if removal.status != 0, !removal.output.lowercased().contains("not found") {
-                        throw NotesError("tailscale_serve_failed", removal.output.isEmpty ? "Tailscale could not remove the NotesCLI endpoint." : removal.output)
+                        throw NotesError("tailscale_serve_failed", removal.output.isEmpty ? "Tailscale could not remove the Notes CLI endpoint." : removal.output)
                     }
                     guard try routeTarget(binary: binary, path: path) == nil else {
-                        throw NotesError("tailscale_route_mismatch", "Tailscale did not remove the NotesCLI route.")
+                        throw NotesError("tailscale_route_mismatch", "Tailscale did not remove the Notes CLI route.")
                     }
                 } else {
                     result = "kept foreign route"
@@ -317,7 +317,7 @@ enum TailscaleMCP {
         }
         let result = launchctl(["bootstrap", domain, MCPHTTPPaths.launchAgent.path])
         guard result.status == 0 else {
-            throw NotesError("http_service_failed", result.output.isEmpty ? "launchd could not start the NotesCLI MCP endpoint." : result.output)
+            throw NotesError("http_service_failed", result.output.isEmpty ? "launchd could not start the Notes CLI MCP endpoint." : result.output)
         }
     }
 
@@ -348,7 +348,7 @@ enum TailscaleMCP {
             last = result.output
             Thread.sleep(forTimeInterval: 0.25)
         }
-        throw NotesError(code, last.isEmpty ? "The NotesCLI MCP endpoint did not become healthy." : last)
+        throw NotesError(code, last.isEmpty ? "The Notes CLI MCP endpoint did not become healthy." : last)
     }
 
     private static func tailscaleBinary() -> String? {

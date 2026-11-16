@@ -194,9 +194,9 @@ public final class AVCaptureCameraImageSource: NSObject, CameraImageSource, @unc
         }
     }
 
-    private static func accessDenied(_ message: String = "Camera access is denied for NotesCLI Capability Host.") -> NotesError {
+    private static func accessDenied(_ message: String = "Camera access is denied for Notes CLI.") -> NotesError {
         NotesError("camera_access_denied", message,
-                   hint: "Run 'notescli onboard' locally, then allow Camera for NotesCLI Capability Host in System Settings > Privacy & Security > Camera.")
+                   hint: "Run 'notescli onboard' locally, then allow Camera for Notes CLI in System Settings > Privacy & Security > Camera.")
     }
 }
 

@@ -264,7 +264,23 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
     }
 
-    func testOnboardRecognizesArchiveLayoutCapabilityHost() throws {
+    func testOnboardRecognizesInstalledNotesCLIApp() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let app = home.appendingPathComponent("Applications/Notes CLI.app")
+        try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+
+        let result = try run(["--backend", "fake", "onboard", "--check-only", "--json"], environment: environment)
+        XCTAssertEqual(result.0, 0, result.2)
+        let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any])
+        let steps = try XCTUnwrap(report["steps"] as? [[String: Any]])
+        let install = try XCTUnwrap(steps.first { $0["id"] as? String == "host-install" })
+        XCTAssertEqual(install["required"] as? Bool, true)
+        XCTAssertEqual(install["status"] as? String, "pending")
+    }
+
+    func testOnboardRecognizesLegacyAppForMigration() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let app = home.appendingPathComponent("Applications/NotesCLI Capability Host.app")
@@ -340,7 +356,7 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: config), modified)
     }
 
-    func testMCPUninstallAllPreservesCapabilityHostAndNonMCPFiles() throws {
+    func testMCPUninstallAllPreservesNotesCLIAppAndNonMCPFiles() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
@@ -348,7 +364,7 @@ final class CLITests: XCTestCase {
         let installed = try run(["mcp", "install", "--client", "codex"], environment: environment)
         XCTAssertEqual(installed.0, 0, installed.2)
 
-        let app = home.appendingPathComponent("Applications/NotesCLI Capability Host.app")
+        let app = home.appendingPathComponent("Applications/Notes CLI.app")
         try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
         let support = home.appendingPathComponent("Library/Application Support/NotesCLI")
         let onboarding = support.appendingPathComponent("onboarding.json")
@@ -365,7 +381,7 @@ final class CLITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: app.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: onboarding.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: manifest.path))
-        XCTAssertFalse(removed.1.contains("capability_host"), removed.1)
+        XCTAssertFalse(removed.1.contains(app.path), removed.1)
         let config = try String(contentsOf: home.appendingPathComponent(".codex/config.toml"), encoding: .utf8)
         XCTAssertFalse(config.contains("[mcp_servers.notescli]"))
     }

@@ -156,7 +156,7 @@ public enum CapabilityCatalog {
     public static let limitations: [String: [String: CapabilityLimitation]] = [
         "Mentions": ["write": limitation("needs_fixture", "Mention insertion is implemented, but participant notification needs a shared-note fixture and second account.")],
         "Contact cards": ["write": apple("NotesShared and Notes.app expose contact display selectors but no checked contact-card attachment constructor; a public.vcard insert becomes a generic attachment.")],
-        "Camera capture": ["write": limitation("needs_fixture", "Device listing and injected photo and scan writes passed live readback; physical frame capture needs camera permission for the Capability Host.")],
+        "Camera capture": ["write": limitation("needs_fixture", "Device listing and injected photo and scan writes passed live readback; physical frame capture needs camera permission for Notes CLI.")],
         "Scanned documents": ["write": limitation("partial_impl", "Native scan pages, filters, reorder, replacement, and correction are implemented; crop clearing, iPhone Scan Documents, and exported-PDF proof remain.")],
         "Image and PDF markup": ["write": limitation("needs_fixture", "Shape-level add, list, remove, and render pass native readback; select-and-move editing in Notes.app after reload is unverified.")],
         "Recording summaries and call metadata": ["write": limitation("needs_fixture", "Summary deletion is implemented, but this Mac has no recording with an Apple-generated summary.")],
@@ -171,8 +171,8 @@ public enum CapabilityCatalog {
             "read": limitation("needs_fixture", "Raw activity export is implemented, but this Mac has no activity-bearing shared-note fixture."),
             "write": apple("collaboration records are managed by Notes and CloudKit; runtime inspection found no supported mutation contract.")
         ],
-        "Accounts and default location": ["write": apple("NotesCLI can select the default account, but account creation and account settings remain system-owned.")],
-        "Quick Notes": ["write": apple("NotesCLI can target the Quick Notes folder, but hot-corner and capture metadata are owned by Notes.app and system UI.")],
+        "Accounts and default location": ["write": apple("Notes CLI can select the default account, but account creation and account settings remain system-owned.")],
+        "Quick Notes": ["write": apple("Notes CLI can target the Quick Notes folder, but hot-corner and capture metadata are owned by Notes.app and system UI.")],
         "Folder list and gallery views": [
             "read": apple("the only readable value is Notes' last-saved windowStateArchive, not live window state."),
             "write": apple("Notes rewrites windowStateArchive, and the inspected write paths are Notes.app menu and link actions.")
@@ -199,8 +199,8 @@ public enum CapabilityCatalog {
             "write": apple("the remaining settings require account lifecycle, locked-note authentication, or Notes-entitled CloudKit access.")
         ],
         "Version history, diff, undo, and revert": [
-            "read": apple("Apple exposes no complete Notes version-history API for edits made outside NotesCLI."),
-            "write": apple("Apple exposes no complete Notes version-history API for edits made outside NotesCLI.")
+            "read": apple("Apple exposes no complete Notes version-history API for edits made outside Notes CLI."),
+            "write": apple("Apple exposes no complete Notes version-history API for edits made outside Notes CLI.")
         ],
         "Multiple iCloud, local, and IMAP accounts": [
             "read": limitation("partial_impl", "The full-fidelity reader maps ZACCOUNTTYPE 3 to IMAP but opens only NoteStore.sqlite. This Mac also has a separate NotesV7.storedata legacy schema, and no IMAP fixture proves current placement."),

@@ -9,12 +9,13 @@ class Notescli < Formula
 
   def install
     bin.install "notescli"
-    libexec.install "NotesCLI Capability Host.app"
+    libexec.install "Notes CLI.app"
   end
 
   def caveats
     <<~EOS
-      Run `notescli onboard` after installation or upgrade to install the matching capability host.
+      Run `notescli onboard` after installation or upgrade. It installs Notes CLI.app
+      in ~/Applications, starts it, and resumes permission setup.
     EOS
   end
 

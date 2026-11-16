@@ -914,7 +914,7 @@ private func mcpRecordingTranscript(arguments: [String: Any], prepared: URL) thr
 }
 
 struct MCPInstall: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.", discussion: "The agent skill is in skills/notescli/SKILL.md and is included by the NotesCLI Claude and Codex plugins.")
+    static let configuration = CommandConfiguration(commandName: "install", abstract: "Connect notescli to an MCP client.", discussion: "The agent skill is in skills/notescli/SKILL.md and is included by the Notes CLI Claude and Codex plugins.")
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Compatibility flag; native tools are enabled by default for write-enabled clients.")
@@ -960,7 +960,7 @@ struct MCPInstall: ParsableCommand {
         }
         try MCPConfiguration.apply(client: client) { selected in
             if MCPConfiguration.status(selected) == "installed", try !InstallManifest.ownsMCPClient(selected) {
-                return "skipped existing entry (not owned by NotesCLI)"
+                return "skipped existing entry (not owned by Notes CLI)"
             }
             let result = try MCPConfiguration.install(selected, readOnly: resolvedReadOnly, allowNative: resolvedAllowNative)
             if !result.hasPrefix("skipped") {
@@ -972,7 +972,7 @@ struct MCPInstall: ParsableCommand {
             }
             return result
         }
-        print("Agent skill: install the NotesCLI plugin or use skills/notescli/SKILL.md")
+        print("Agent skill: install the Notes CLI plugin or use skills/notescli/SKILL.md")
     }
 }
 
@@ -986,7 +986,7 @@ struct MCPUninstall: ParsableCommand {
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Show exactly what would be removed without changing files.") var dryRun = false
-    @Flag(help: "Keep NotesCLI configuration and onboarding state.") var keepConfig = false
+    @Flag(help: "Keep Notes CLI configuration and onboarding state.") var keepConfig = false
 
     func run() throws {
         try Self.execute(client: client, options: options, dryRun: dryRun, keepConfig: keepConfig)
@@ -1002,7 +1002,7 @@ struct MCPUninstall: ParsableCommand {
                     actions.append(UninstallAction(kind: "mcp_client", target: selected.rawValue, status: "not_recorded"))
                     continue
                 }
-                throw NotesError("uninstall_not_owned", "Refusing to remove the \(selected.label) entry because NotesCLI did not record owning it.")
+                throw NotesError("uninstall_not_owned", "Refusing to remove the \(selected.label) entry because Notes CLI did not record owning it.")
             }
             if dryRun {
                 if selected != .tailscale {
@@ -1057,17 +1057,24 @@ struct MCPUninstall: ParsableCommand {
             }
         }
         if scope == .fullProduct {
-            if FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path) {
-                guard HostInstallation.validSignature(CapabilityHostPaths.app) else {
-                    throw NotesError("uninstall_not_owned", "Refusing to remove a capability host that is not signed by the NotesCLI developer team.")
+            let installedApps = [CapabilityHostPaths.app, CapabilityHostPaths.legacyApp].filter {
+                FileManager.default.fileExists(atPath: $0.path)
+            }
+            if !installedApps.isEmpty {
+                guard installedApps.allSatisfy(HostInstallation.validSignature) else {
+                    throw NotesError("uninstall_not_owned", "Refusing to remove a Notes CLI app that is not signed by the expected developer team.")
                 }
                 if dryRun {
-                    actions.append(UninstallAction(kind: "capability_host", target: CapabilityHostPaths.app.path, status: "would_remove"))
+                    for app in installedApps {
+                        actions.append(UninstallAction(kind: "app", target: app.path, status: "would_remove"))
+                    }
                     actions.append(UninstallAction(kind: "launch_agent", target: CapabilityHostPaths.launchAgent.path, status: "would_remove"))
                     actions.append(UninstallAction(kind: "socket", target: CapabilityHostPaths.socket.path, status: "would_remove"))
                 } else {
                     try HostInstallation.uninstall()
-                    actions.append(UninstallAction(kind: "capability_host", target: CapabilityHostPaths.app.path, status: "removed"))
+                    for app in installedApps {
+                        actions.append(UninstallAction(kind: "app", target: app.path, status: "removed"))
+                    }
                 }
             }
             for file in try InstallManifest.filesToRemove(keepConfig: keepConfig) {
@@ -1088,10 +1095,10 @@ struct MCPUninstall: ParsableCommand {
 }
 
 struct UninstallCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "uninstall", abstract: "Remove every NotesCLI-managed integration and service.")
+    static let configuration = CommandConfiguration(commandName: "uninstall", abstract: "Remove every Notes CLI-managed integration and service.")
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Show exactly what would be removed without changing files.") var dryRun = false
-    @Flag(help: "Keep NotesCLI configuration and onboarding state.") var keepConfig = false
+    @Flag(help: "Keep Notes CLI configuration and onboarding state.") var keepConfig = false
 
     func run() throws {
         try MCPUninstall.execute(client: .all, options: options, dryRun: dryRun, keepConfig: keepConfig,
@@ -1158,7 +1165,7 @@ private struct MCPClientStatusReport: Codable {
 }
 
 struct Setup: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "onboard", abstract: "Resume NotesCLI setup and report readiness.", aliases: ["setup"])
+    static let configuration = CommandConfiguration(commandName: "onboard", abstract: "Resume Notes CLI setup and report readiness.", aliases: ["setup"])
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Report setup state without changing files or requesting permissions.") var checkOnly = false
 
@@ -1170,7 +1177,7 @@ struct Setup: ParsableCommand {
 }
 
 struct Permissions: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Open Full Disk Access and request Notes Automation and Speech Recognition access.")
+    static let configuration = CommandConfiguration(abstract: "Open Full Disk Access and request Notes Automation, Camera, and Speech Recognition access.")
     func run() throws { try PermissionGuide.run() }
 }
 
@@ -1269,7 +1276,7 @@ enum MCPConfiguration {
     static func verifyOwnership(_ client: MCPClient, expected: MCPEntryOwnership) throws {
         let current = try currentOwnership(client)
         guard current == expected else {
-            throw NotesError("uninstall_entry_modified", "Refusing to remove the \(client.label) entry because it no longer exactly matches the entry NotesCLI installed.")
+            throw NotesError("uninstall_entry_modified", "Refusing to remove the \(client.label) entry because it no longer exactly matches the entry Notes CLI installed.")
         }
     }
 
@@ -1497,7 +1504,7 @@ enum PermissionGuide {
 
         do {
             try AVCaptureCameraImageSource.requestAccessForPermissions()
-            info("Camera: authorized for NotesCLI Capability Host.")
+            info("Camera: authorized for Notes CLI.")
         } catch let error as NotesError where error.code == "camera_access_denied" {
             warning("Camera: \(error.message)")
             if let hint = error.hint { warning(hint) }
@@ -1507,13 +1514,13 @@ enum PermissionGuide {
 
         info("Full Disk Access is required for full-fidelity Apple Notes reads.")
         if ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] == "1" {
-            info("Add NotesCLI Capability Host.app. Other terminals and agent apps will use its permission.")
+            info("Add Notes CLI.app. Other terminals and agent apps will use its permission.")
             let reveal = Process()
             reveal.executableURL = URL(fileURLWithPath: "/usr/bin/open")
             reveal.arguments = ["-R", CapabilityHostPaths.app.path]
             if (try? reveal.run()) != nil { reveal.waitUntilExit() }
         } else {
-            info("Add the app that launches notescli, or run 'notescli onboard' to install the shared capability host.")
+            info("Add the app that launches notescli, or run 'notescli onboard' to install Notes CLI.")
         }
         let settings = Process()
         settings.executableURL = URL(fileURLWithPath: "/usr/bin/open")

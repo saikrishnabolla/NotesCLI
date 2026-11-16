@@ -1,6 +1,6 @@
-# NotesCLI
+# Notes CLI
 
-NotesCLI is a macOS command and MCP server for Apple Notes. It reads a private copy of the Notes database. It uses the native Notes engine for writes when that operation is supported and falls back to Notes.app scripting for the rest.
+Notes CLI is a macOS command and MCP server for Apple Notes. It reads a private copy of the Notes database. It uses the native Notes engine for supported writes and Notes.app scripting for the rest.
 
 You need macOS 14 or later. Full-fidelity reads require Full Disk Access. Without it, accounts, folders, lists, search, and note text use a limited Notes Automation reader. Creating or changing notes requires Automation access to Notes.
 
@@ -10,7 +10,7 @@ With Homebrew:
 
 ```bash
 brew install saikrishnabolla/notescli/notescli
-notescli setup
+notescli onboard
 ```
 
 From a release archive:
@@ -19,8 +19,8 @@ From a release archive:
 tar -xzf notescli-1.1.11-macos-universal.tar.gz
 install -m 755 notescli "$HOME/.local/bin/notescli"
 mkdir -p "$HOME/Applications"
-ditto "NotesCLI Capability Host.app" "$HOME/Applications/NotesCLI Capability Host.app"
-notescli setup
+ditto "Notes CLI.app" "$HOME/Applications/Notes CLI.app"
+notescli onboard
 ```
 
 To build from source:
@@ -30,21 +30,20 @@ git clone https://github.com/saikrishnabolla/NotesCLI.git
 cd NotesCLI
 swift build -c release
 install -m 755 .build/release/notescli "$HOME/.local/bin/notescli"
-notescli setup
+notescli onboard
 ```
 
 See [Installation](docs/install.md) for permissions and Gatekeeper notes.
 
-## Permissions
+## First run
 
-Run:
+Run `notescli onboard` after an install or upgrade. It installs or updates `~/Applications/Notes CLI.app`, starts it, and resumes where you left off until required access is ready.
 
 ```bash
-notescli permissions
-notescli doctor
+notescli onboard
 ```
 
-`notescli setup` installs NotesCLI Capability Host.app. Grant Full Disk Access, Automation, and Speech Recognition to that app once. Terminal, Claude, Codex, Cursor, and VS Code send eligible Notes commands through its private socket.
+Grant Full Disk Access, Automation, Camera, and Speech Recognition to **Notes CLI** when prompted. You can open **Notes CLI** from `~/Applications` later to start it. `notescli setup` remains an alias for the same resumable setup, and `notescli permissions` reopens the permission step.
 
 Commands that open or save local files run in the calling app so the host never receives arbitrary paths. Those commands need that app's own file access.
 
@@ -73,7 +72,7 @@ Writes return `verified`, `unverified`, `unknown`, or `rolled_back`, plus the `e
 
 Rich edits such as native checklists, pins, tags, links, highlights, positioned images, maps, scanned documents, tables, table-cell formatting, paragraph styles, range edits, duplication, restore, folder grouping, default style, and folder moves use the native engine by default. Pass `--engine scripting` or set `NOTESCLI_ENGINE=scripting` when you need the scripting path. Native undo and revert verify the title, pin state, decoded text and runs, paragraph and checklist identities, tables and rich cells, attachment topology, private link payloads, and archived media through fresh native and database reads. They recreate missing scans and markup, recordings and fragments, Paper documents, multi-canvas System Paper, modern and classic drawings, rich links, maps, tables, table-cell inline objects, paragraph links, PDFs, images, and files. Explicit native UTI creation also preserves file types that have no canonical extension. Unknown future attachment graphs are refused. The scripting engine refuses native-only snapshots unless you pass `--allow-downgrade`. See the [Apple Notes feature inventory](docs/APPLE-NOTES-FEATURES.md) for all 95 rows.
 
-`show --password-stdin --no-attachments` reads V1 and V1 Neo Notes-password-locked bodies. `attachments --password-stdin --save <directory>` exports their decrypted attachments, including V1 Neo cipher-3 sidecars. Cipher-3 support follows Apple's format and passes Apple-generated fixtures; no real cipher-3 note exists on this Mac. Device-key/passcode V2 protection remains unsupported. NotesCLI never stores the password.
+`show --password-stdin --no-attachments` reads V1 and V1 Neo Notes-password-locked bodies. `attachments --password-stdin --save <directory>` exports their decrypted attachments, including V1 Neo cipher-3 sidecars. Cipher-3 support follows Apple's format and passes Apple-generated fixtures; no real cipher-3 note exists on this Mac. Device-key/passcode V2 protection remains unsupported. Notes CLI never stores the password.
 
 `diagram add` renders self-contained SVG or HTML through WebKit, crops it, and inserts a 2x or 3x PNG. The PNG stores the original source for `diagram export`. See the bundled `notescli-diagrams` skill for the agent workflow.
 
@@ -111,14 +110,14 @@ The repository includes an agent skill at [`skills/notescli/SKILL.md`](skills/no
 
 | Tool | Strength | Tradeoff |
 | --- | --- | --- |
-| NotesCLI | Universal binary, JSON CLI, MCP, snapshots, native rich edits, and checked scripting fallback | Native edits use a private Apple framework that can change with macOS |
+| Notes CLI | Universal binary, JSON CLI, MCP, snapshots, native rich edits, and checked scripting fallback | Native edits use a private Apple framework that can change with macOS |
 | memo | Fast terminal workflow with `fzf` and previews | No MCP server; depends on Python and terminal helpers |
 | notekit | Broad rich-note editing and Markdown sync | Uses private Notes frameworks and has no MCP server |
 | apple-notes-mcp by sweetrb | Large MCP tool set for rich objects, attachments, and diagnostics | Node-based and uses a mix of database, scripting, and helper paths |
 | macnotesapp | Mature Python CLI with exports, selection access, and attachments | No built-in MCP server |
 | apple-mcp by xiaofeng-han | Broad CLI, MCP, agent setup, and rich native objects | Relies on private Apple frameworks that may change with macOS |
 
-NotesCLI uses native writing by default, falls back to scripting where needed, and reports explicit write outcomes.
+Notes CLI uses native writing by default, falls back to scripting where needed, and reports explicit write outcomes.
 
 ## License
 

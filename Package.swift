@@ -11,7 +11,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "notescli", targets: ["notescli"]),
-        .executable(name: "NotesCLI Capability Host", targets: ["NotesCapabilityHost"]),
+        .executable(name: "Notes CLI", targets: ["NotesCapabilityHost"]),
         .library(name: "NotesCore", targets: ["NotesCore"]),
         .library(name: "NotesSync", targets: ["NotesSync"]),
         .library(name: "NotesSafety", targets: ["NotesSafety"]),

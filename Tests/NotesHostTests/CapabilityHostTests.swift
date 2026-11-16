@@ -4,6 +4,11 @@ import Foundation
 import XCTest
 
 final class CapabilityHostTests: XCTestCase {
+    func testPublicAppPathUsesNewNameAndKeepsLegacyMigrationPath() {
+        XCTAssertEqual(CapabilityHostPaths.app.lastPathComponent, "Notes CLI.app")
+        XCTAssertEqual(CapabilityHostPaths.legacyApp.lastPathComponent, "NotesCLI Capability Host.app")
+    }
+
     func testRequestCarriesHostProtocolAndCLIRelease() {
         let request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
         XCTAssertEqual(request.protocolVersion, 2)

@@ -243,6 +243,8 @@ final class CLITests: XCTestCase {
             XCTAssertNotNil(report["available"] as? Bool)
             XCTAssertNotNil(report["connected"] as? Bool)
         }
+        let tailscale = try XCTUnwrap(reports.first { $0["client"] as? String == "tailscale" })
+        XCTAssertNotNil(tailscale["read_only"] as? Bool)
     }
 
     func testOnboardCheckOnlyIsIdempotentAndDoesNotWriteState() throws {

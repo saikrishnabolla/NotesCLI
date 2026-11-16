@@ -10,7 +10,12 @@ import NotesStore
 
 final class ScanTests: XCTestCase {
     func testNotesOwnedScanPageCanBeFrozenOutsidePublicInputRoots() throws {
-        let source = URL(fileURLWithPath: #filePath)
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".notescli-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("scan-page.png")
+        try Data("fixture".utf8).write(to: source)
         XCTAssertThrowsError(try FrozenAttachmentInput(file: source)) { error in
             XCTAssertEqual((error as? NotesError)?.code, "input_path_refused")
         }

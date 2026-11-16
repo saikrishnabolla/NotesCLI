@@ -23,8 +23,9 @@ private func validStaticCode(_ url: URL, identifier: String) -> Bool {
 }
 
 private func verifyOwnSignature() -> Bool {
+    if ProcessInfo.processInfo.environment["NOTESCLI_HOST_ALLOW_UNSIGNED"] == "1" { return true }
     guard Bundle.main.bundleURL.pathExtension == "app" else {
-        return ProcessInfo.processInfo.environment["NOTESCLI_HOST_ALLOW_UNSIGNED"] == "1"
+        return false
     }
     return validStaticCode(Bundle.main.bundleURL, identifier: "com.saikrishnabolla.notescli.capability-host")
 }
@@ -151,11 +152,14 @@ interrupt.setEventHandler(handler: terminateHost)
 termination.resume()
 interrupt.resume()
 
-let server = CapabilityHostServer { request, descriptors, socket in
+let developmentSocket = ProcessInfo.processInfo.environment["NOTESCLI_HOST_ALLOW_UNSIGNED"] == "1"
+    ? ProcessInfo.processInfo.environment["NOTESCLI_HOST_SOCKET_PATH"].map { URL(fileURLWithPath: $0) }
+    : nil
+let server = CapabilityHostServer(socketURL: developmentSocket ?? CapabilityHostPaths.socket) { request, descriptors, socket in
     guard trustedPeer(socket), CapabilityHostPolicy.allows(request.arguments),
           validStaticCode(cli, identifier: "com.saikrishnabolla.notescli") else {
         descriptors.forEach { close($0) }
-        CapabilityHostServer.reply(CapabilityHostReply(error: "The capability-host request was refused."), socket: socket)
+        CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI refused the request."), socket: socket)
         close(socket)
         return
     }
@@ -182,7 +186,7 @@ let server = CapabilityHostServer { request, descriptors, socket in
         if !connected { terminateAndWait(pid) }
         else { CapabilityHostServer.reply(CapabilityHostReply(exitCode: exitCode(status)), socket: socket) }
     } catch {
-        CapabilityHostServer.reply(CapabilityHostReply(error: "The capability host could not run NotesCLI."), socket: socket)
+        CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI could not run the command."), socket: socket)
     }
     close(socket)
 }
@@ -191,5 +195,6 @@ do { try server.start() }
 catch { Darwin.exit(78) }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.prohibited)
+let application = NotesCLIApplication(cliURL: cli)
+app.delegate = application
 app.run()

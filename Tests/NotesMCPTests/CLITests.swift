@@ -214,11 +214,35 @@ final class CLITests: XCTestCase {
         let direct = try XCTUnwrap(access["direct"] as? [String: Any])
         let effective = try XCTUnwrap(access["effective"] as? [String: Any])
         let readiness = try XCTUnwrap(report["readiness"] as? [String: Any])
+        let permissions = try XCTUnwrap(report["permissions"] as? [String: Any])
         XCTAssertNotNil(direct["available"] as? Bool)
         XCTAssertEqual(effective["available"] as? Bool, true)
         XCTAssertEqual(effective["fidelity"] as? String, "full")
         XCTAssertEqual(readiness["ready"] as? Bool, true)
         XCTAssertTrue(access.keys.contains("capabilityHost"))
+        for name in ["fullDiskAccess", "notesAutomation", "speechRecognition", "camera"] {
+            let permission = try XCTUnwrap(permissions[name] as? [String: Any])
+            XCTAssertNotNil(permission["status"] as? String)
+            XCTAssertNotNil(permission["required"] as? Bool)
+        }
+    }
+
+    func testMCPStatusHasStableJSONForTheControlCenter() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let result = try run(["mcp", "status", "--json"], environment: [
+            "HOME": home.path, "CFFIXED_USER_HOME": home.path,
+        ])
+        XCTAssertEqual(result.0, 0, result.2)
+        let reports = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [[String: Any]])
+        XCTAssertEqual(Set(reports.compactMap { $0["client"] as? String }),
+                       ["claude-code", "claude-desktop", "codex", "cursor", "vscode", "tailscale"])
+        for report in reports {
+            XCTAssertNotNil(report["label"] as? String)
+            XCTAssertNotNil(report["status"] as? String)
+            XCTAssertNotNil(report["available"] as? Bool)
+            XCTAssertNotNil(report["connected"] as? Bool)
+        }
     }
 
     func testOnboardCheckOnlyIsIdempotentAndDoesNotWriteState() throws {

@@ -1,4 +1,5 @@
 import ArgumentParser
+import AVFoundation
 import Carbon
 import Foundation
 import NotesAutomation
@@ -53,6 +54,18 @@ struct AgentReadyState: Codable {
     var blockers: [String]
 }
 
+struct PermissionProbe: Codable {
+    var status: String
+    var required: Bool
+}
+
+struct AgentPermissionReadiness: Codable {
+    var fullDiskAccess: PermissionProbe
+    var notesAutomation: PermissionProbe
+    var speechRecognition: PermissionProbe
+    var camera: PermissionProbe
+}
+
 struct AgentDoctorReport: Codable {
     var schemaVersion: Int
     var readiness: AgentReadyState
@@ -60,6 +73,7 @@ struct AgentDoctorReport: Codable {
     var automation: String
     var notesApp: String
     var inventory: [String: Int]?
+    var permissions: AgentPermissionReadiness?
 }
 
 struct Doctor: ParsableCommand {
@@ -172,8 +186,37 @@ struct Doctor: ParsableCommand {
             readiness: AgentReadyState(ready: blockers.isEmpty, blockers: blockers),
             access: AccessReadiness(direct: direct, effective: effective, capabilityHost: capabilityHost),
             automation: automationPermission(), notesApp: notesAppPresent ? "present" : "missing",
-            inventory: inventory
+            inventory: inventory, permissions: permissionReadiness(direct: direct)
         )
+    }
+
+    private func permissionReadiness(direct: AccessProbe) -> AgentPermissionReadiness {
+        AgentPermissionReadiness(
+            fullDiskAccess: PermissionProbe(status: direct.available ? "authorized" : direct.status, required: true),
+            notesAutomation: PermissionProbe(status: automationPermission(), required: true),
+            speechRecognition: PermissionProbe(status: speechStatus(), required: false),
+            camera: PermissionProbe(status: cameraStatus(), required: false)
+        )
+    }
+
+    private func speechStatus() -> String {
+        switch AudioTranscriber.authorizationStatus {
+        case .authorized: "authorized"
+        case .denied: "denied"
+        case .restricted: "restricted"
+        case .notDetermined: "not_determined"
+        @unknown default: "unknown"
+        }
+    }
+
+    private func cameraStatus() -> String {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: "authorized"
+        case .denied: "denied"
+        case .restricted: "restricted"
+        case .notDetermined: "not_determined"
+        @unknown default: "unknown"
+        }
     }
 
     private func capabilityHostAccess() -> (probe: AccessProbe, inventory: [String: Int]?)? {

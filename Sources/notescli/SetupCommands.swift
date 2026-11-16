@@ -1107,19 +1107,44 @@ private struct UninstallAction: Codable {
 
 struct MCPStatus: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "status", abstract: "Show MCP client connections.")
+    @OptionGroup var options: GlobalOptions
     @Option(help: "Client: claude-code, claude-desktop, codex, cursor, vscode, tailscale, or all.") var client: MCPClient = .all
 
     func run() throws {
         let clients = client == .all ? MCPClient.installable : [client]
-        Output.table(["CLIENT", "STATUS"], clients.map { selected in
+        let reports = clients.map { selected -> MCPClientStatusReport in
             if selected == .tailscale {
                 let status = TailscaleMCP.endpointStatus()
-                let ready = status["configured"] as? Bool == true && status["running"] as? Bool == true && status["mounted"] as? Bool == true
-                return [selected.label, ready ? "installed" : "not ready"]
+                let configured = status["configured"] as? Bool == true
+                let running = status["running"] as? Bool == true
+                let mounted = status["mounted"] as? Bool == true
+                let ready = configured && running && mounted
+                return MCPClientStatusReport(client: selected.rawValue, label: selected.label,
+                                             available: true, connected: ready,
+                                             status: ready ? "installed" : "not ready",
+                                             configured: configured, running: running, mounted: mounted,
+                                             endpoint: status["endpoint"] as? String)
             }
-            return [selected.label, MCPConfiguration.status(selected)]
-        })
+            let status = MCPConfiguration.status(selected)
+            return MCPClientStatusReport(client: selected.rawValue, label: selected.label,
+                                         available: !status.hasPrefix("unavailable"),
+                                         connected: status == "installed", status: status)
+        }
+        if options.json { try Output.json(reports) }
+        else { Output.table(["CLIENT", "STATUS"], reports.map { [$0.label, $0.status] }) }
     }
+}
+
+private struct MCPClientStatusReport: Codable {
+    var client: String
+    var label: String
+    var available: Bool
+    var connected: Bool
+    var status: String
+    var configured: Bool?
+    var running: Bool?
+    var mounted: Bool?
+    var endpoint: String?
 }
 
 struct Setup: ParsableCommand {

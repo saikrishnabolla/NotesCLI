@@ -62,6 +62,9 @@ enum Onboarding {
         }
         if !mcpReady() || state.steps["mcp-install"] != "complete" {
             for client in MCPClient.concrete {
+                if state.steps["mcp-install"] == "complete",
+                   try InstallManifest.mcpClientRecord(client) == nil { continue }
+                if !MCPConfiguration.isAvailable(client) { continue }
                 if MCPConfiguration.status(client) == "installed", try !InstallManifest.ownsMCPClient(client) { continue }
                 let result = try MCPConfiguration.install(client, readOnly: options.readOnly, allowNative: !options.readOnly)
                 if !result.hasPrefix("skipped") {
@@ -92,7 +95,8 @@ enum Onboarding {
     }
 
     static func report(options: GlobalOptions, checkOnly: Bool) throws -> OnboardingReport {
-        let clientsReady = mcpReady()
+        let state = try OnboardingStore.load()
+        let clientsReady = state.steps["mcp-install"] == "complete" && mcpReady()
         let access = accessReady(options: options)
         let hostAvailable = HostInstallation.sourceApp != nil || FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path)
         let hostReady = CapabilityHostClient.isAvailable()
@@ -109,8 +113,9 @@ enum Onboarding {
 
     private static func mcpReady() -> Bool {
         MCPClient.concrete.allSatisfy {
+            guard (try? InstallManifest.mcpClientRecord($0)) != nil else { return true }
             let status = MCPConfiguration.status($0)
-            return status == "installed" || status.hasPrefix("unavailable")
+            return status == "installed"
         }
     }
 

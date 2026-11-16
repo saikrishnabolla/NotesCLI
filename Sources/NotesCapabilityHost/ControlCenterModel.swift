@@ -313,13 +313,15 @@ final class ControlCenterModel: ObservableObject {
         """
         try markdown.write(to: markdownURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: markdownURL.path)
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, yyyy 'at' h-mm-ss a"
+        let title = "Notes CLI Sample Research Report – \(formatter.string(from: Date()))"
         _ = try await runner.requireSuccess([
             "report", "create",
             "--json",
-            "--title", "Notes CLI Sample Research Report",
+            "--title", title,
             "--file", markdownURL.path,
             "--tags", "notes-cli,research",
-            "--replace",
             "--attach", attachmentURL.path,
         ])
     }

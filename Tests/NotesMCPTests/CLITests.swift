@@ -260,10 +260,27 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(report["checkOnly"] as? Bool, true)
         XCTAssertNotNil(report["complete"] as? Bool)
         let steps = try XCTUnwrap(report["steps"] as? [[String: Any]])
+        XCTAssertEqual(steps.first { $0["id"] as? String == "mcp-install" }?["status"] as? String, "pending")
         XCTAssertEqual(steps.first { $0["id"] as? String == "host-install" }?["status"] as? String, "not_available")
         XCTAssertEqual(steps.first { $0["id"] as? String == "host-ready" }?["required"] as? Bool, false)
         let state = home.appendingPathComponent("Library/Application Support/NotesCLI/onboarding.json")
         XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
+    }
+
+    func testOnboardKeepsDeliberatelyDisconnectedClientsComplete() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI", isDirectory: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        try Data(#"{"schemaVersion":1,"steps":{"mcp-install":"complete"}}"#.utf8)
+            .write(to: support.appendingPathComponent("onboarding.json"))
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+
+        let result = try run(["--backend", "fake", "onboard", "--check-only", "--json"], environment: environment)
+        XCTAssertEqual(result.0, 0, result.2)
+        let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any])
+        let steps = try XCTUnwrap(report["steps"] as? [[String: Any]])
+        XCTAssertEqual(steps.first { $0["id"] as? String == "mcp-install" }?["status"] as? String, "complete")
     }
 
     func testOnboardRecognizesInstalledNotesCLIApp() throws {

@@ -1136,7 +1136,7 @@ struct MCPStatus: ParsableCommand {
             }
             let status = MCPConfiguration.status(selected)
             return MCPClientStatusReport(client: selected.rawValue, label: selected.label,
-                                         available: !status.hasPrefix("unavailable"),
+                                         available: MCPConfiguration.isAvailable(selected),
                                          connected: status == "installed", status: status)
         }
         if options.json { try Output.json(reports) }
@@ -1195,6 +1195,30 @@ enum MCPConfiguration {
         if value.hasPrefix("/") { return URL(fileURLWithPath: value).standardizedFileURL.path }
         return URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(value).standardizedFileURL.path
+    }
+
+    static func isAvailable(_ client: MCPClient) -> Bool {
+        switch client {
+        case .claudeCode:
+            return findExecutable("claude") != nil
+        case .claudeDesktop:
+            return applicationExists("Claude.app")
+        case .codex:
+            return applicationExists("Codex.app") || findExecutable("codex") != nil
+        case .cursor:
+            return applicationExists("Cursor.app") || findExecutable("cursor") != nil
+        case .vscode:
+            return applicationExists("Visual Studio Code.app") || findExecutable("code") != nil
+        case .tailscale, .all:
+            return true
+        }
+    }
+
+    private static func applicationExists(_ name: String) -> Bool {
+        [
+            URL(fileURLWithPath: "/Applications", isDirectory: true).appendingPathComponent(name),
+            home.appendingPathComponent("Applications", isDirectory: true).appendingPathComponent(name),
+        ].contains { fileManager.fileExists(atPath: $0.path) }
     }
 
     static func apply(client: MCPClient, operation: (MCPClient) throws -> String) throws {

@@ -127,6 +127,30 @@ struct ControlCenterView: View {
                     await model.setTailscale(connected: !model.tailscaleConnected)
                 }
             }
+            Divider()
+            Picker("Access", selection: $model.tailscaleReadOnly) {
+                Text("Read only").tag(true)
+                Text("Read and write").tag(false)
+            }
+            .pickerStyle(.segmented)
+            TextField("Allowed folders, such as Notes > Oracle", text: $model.tailscaleWriteFolders)
+                .disabled(model.tailscaleReadOnly)
+                .textFieldStyle(.roundedBorder)
+            Text(model.tailscaleReadOnly
+                 ? "Remote agents can search and read notes, but cannot change them."
+                 : (model.tailscaleWriteFolders.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "Remote agents can write to any Notes folder."
+                    : "Remote writes are limited to the listed folder trees."))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if model.tailscaleConnected {
+                HStack {
+                    Spacer()
+                    ActionButton(title: "Apply Settings", actionID: "tailscale", model: model) {
+                        await model.applyTailscaleSettings()
+                    }
+                }
+            }
         }
     }
 

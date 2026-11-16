@@ -1123,7 +1123,9 @@ struct MCPStatus: ParsableCommand {
                                              available: true, connected: ready,
                                              status: ready ? "installed" : "not ready",
                                              configured: configured, running: running, mounted: mounted,
-                                             endpoint: status["endpoint"] as? String)
+                                             endpoint: status["endpoint"] as? String,
+                                             readOnly: status["read_only"] as? Bool,
+                                             writeFolders: status["write_folders"] as? String)
             }
             let status = MCPConfiguration.status(selected)
             return MCPClientStatusReport(client: selected.rawValue, label: selected.label,
@@ -1145,6 +1147,14 @@ private struct MCPClientStatusReport: Codable {
     var running: Bool?
     var mounted: Bool?
     var endpoint: String?
+    var readOnly: Bool?
+    var writeFolders: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case client, label, available, connected, status, configured, running, mounted, endpoint
+        case readOnly = "read_only"
+        case writeFolders = "write_folders"
+    }
 }
 
 struct Setup: ParsableCommand {

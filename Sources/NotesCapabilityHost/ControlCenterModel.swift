@@ -56,6 +56,14 @@ private struct MCPStatusReport: Decodable {
     let running: Bool?
     let mounted: Bool?
     let endpoint: String?
+    let readOnly: Bool?
+    let writeFolders: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case client, label, available, connected, status, configured, running, mounted, endpoint
+        case readOnly = "read_only"
+        case writeFolders = "write_folders"
+    }
 }
 
 private struct OnboardingReport: Decodable {
@@ -70,6 +78,8 @@ final class ControlCenterModel: ObservableObject {
     @Published var agents: [AgentStatus] = ControlCenterModel.defaultAgents
     @Published var tailscaleConnected = false
     @Published var tailscaleEndpoint: String?
+    @Published var tailscaleReadOnly = true
+    @Published var tailscaleWriteFolders = ""
     @Published var version = "Checking…"
     @Published var repairNeeded = false
     @Published var isRefreshing = false
@@ -130,8 +140,20 @@ final class ControlCenterModel: ObservableObject {
     func setTailscale(connected: Bool) async {
         await perform("tailscale", success: connected ? "Remote access is ready." : "Remote access was removed.") {
             let command = connected ? "install" : "uninstall"
-            _ = try await runner.requireSuccess(["mcp", command, "--client", "tailscale"])
+            var arguments = ["mcp", command, "--client", "tailscale"]
+            if connected {
+                if tailscaleReadOnly {
+                    arguments.append("--read-only")
+                } else {
+                    arguments.append(contentsOf: ["--write-folders", tailscaleWriteFolders])
+                }
+            }
+            _ = try await runner.requireSuccess(arguments)
         }
+    }
+
+    func applyTailscaleSettings() async {
+        await setTailscale(connected: true)
     }
 
     func repair() async {
@@ -213,6 +235,10 @@ final class ControlCenterModel: ObservableObject {
             if let remote = byID["tailscale"] {
                 tailscaleConnected = remote.connected && (remote.configured ?? true) && (remote.running ?? true) && (remote.mounted ?? true)
                 tailscaleEndpoint = remote.endpoint
+                if remote.configured == true {
+                    tailscaleReadOnly = remote.readOnly ?? true
+                    tailscaleWriteFolders = remote.writeFolders ?? ""
+                }
             }
             return
         }

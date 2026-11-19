@@ -188,7 +188,7 @@ final class ScanCorrectionTests: XCTestCase {
         XCTAssertEqual(Array(pixel(output.width - 3, output.height - 3)), colors[3])
     }
 
-    func testVisionDetectCropUsesUpOrientedDocumentImage() throws {
+    func testVisionDetectsAndCorrectsUpOrientedDocumentImage() throws {
         let url = try temporaryDocumentImage()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let crop = try ScanCorrection.detectCrop(at: url)
@@ -197,6 +197,13 @@ final class ScanCorrectionTests: XCTestCase {
         XCTAssertLessThan(crop.topLeft.x, 0.3)
         XCTAssertGreaterThan(crop.bottomRight.x, 0.7)
         XCTAssertLessThan(crop.bottomRight.x, 0.95)
+
+        let corrected = try ScanCorrection.correctedPage(FrozenAttachmentInput(file: url))
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(corrected.url as CFURL, nil))
+        XCTAssertEqual(CGImageSourceGetType(source) as String?, UTType.png.identifier)
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertGreaterThan(image.width, image.height)
+        XCTAssertGreaterThan(image.width, 400)
     }
 
     private func temporaryImage(width: Int, height: Int, orientation: UInt32) throws -> URL {

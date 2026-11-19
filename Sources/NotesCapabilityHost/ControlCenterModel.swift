@@ -24,6 +24,55 @@ struct PermissionStatus: Identifiable {
     var isGranted: Bool {
         ["authorized", "available", "granted", "full"].contains(status.lowercased())
     }
+
+    var displayStatus: String {
+        if isGranted { return "Allowed" }
+        switch status.lowercased() {
+        case "checking": return "Checking…"
+        case "denied": return "Not allowed"
+        case let value where value.hasPrefix("not determined") || value == "not_determined": return "Not requested"
+        case "restricted": return "Restricted by macOS"
+        default: return "Couldn’t verify"
+        }
+    }
+
+    var purpose: String {
+        switch id {
+        case "fullDiskAccess": "Read note formatting and attachments."
+        case "notesAutomation": "Let Notes CLI ask Apple Notes to perform actions."
+        case "speechRecognition": "Transcribe audio recordings."
+        case "camera": "Take photos and scan documents."
+        default: ""
+        }
+    }
+
+    var settingsURL: URL? {
+        let pane: String
+        switch id {
+        case "fullDiskAccess": pane = "AllFiles"
+        case "notesAutomation": pane = "Automation"
+        case "speechRecognition": pane = "SpeechRecognition"
+        case "camera": pane = "Camera"
+        default: return nil
+        }
+        return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_\(pane)")
+    }
+
+    var requestScope: String? {
+        switch id {
+        case "notesAutomation": "automation"
+        case "speechRecognition": "speech"
+        case "camera": "camera"
+        default: nil
+        }
+    }
+
+    var shouldRequest: Bool {
+        guard requestScope != nil else { return false }
+        let value = status.lowercased()
+        return value == "not_determined" || value.hasPrefix("not determined")
+            || (id == "notesAutomation" && value.hasPrefix("unknown"))
+    }
 }
 
 struct AgentStatus: Identifiable {
@@ -83,6 +132,7 @@ final class ControlCenterModel: ObservableObject {
     @Published var version = "Checking…"
     @Published var repairNeeded = false
     @Published var isRefreshing = false
+    @Published private(set) var hasChecked = false
     @Published var activeAction: String?
     @Published var errorMessage: String?
     @Published var successMessage: String?
@@ -98,7 +148,10 @@ final class ControlCenterModel: ObservableObject {
         guard !isRefreshing else { return }
         isRefreshing = true
         errorMessage = nil
-        defer { isRefreshing = false }
+        defer {
+            hasChecked = true
+            isRefreshing = false
+        }
 
         async let doctorResult = runner.run(["doctor", "--for-agent", "--json"])
         async let statusResult = runner.run(["mcp", "status", "--json"])
@@ -124,14 +177,17 @@ final class ControlCenterModel: ObservableObject {
         }
     }
 
-    func requestPermissions() async {
-        await perform("permissions", success: "Permission settings opened.") {
-            _ = try await runner.requireSuccess(["permissions"])
+    func requestPermission(_ permission: PermissionStatus) async {
+        guard let scope = permission.requestScope else { return }
+        await perform(permission.id, success: "Checked \(permission.name) access.") {
+            _ = try await runner.requireSuccess(["permissions", "--only", scope])
         }
     }
 
     func setAgent(_ agent: AgentStatus, connected: Bool) async {
-        await perform("agent-\(agent.id)", success: connected ? "Connected \(agent.name)." : "Disconnected \(agent.name).") {
+        await perform("agent-\(agent.id)", success: connected
+                      ? "Connected \(agent.name). Restart it to start using Notes CLI."
+                      : "Disconnected \(agent.name).") {
             let command = connected ? "install" : "uninstall"
             _ = try await runner.requireSuccess(["mcp", command, "--client", agent.id])
         }
@@ -158,7 +214,7 @@ final class ControlCenterModel: ObservableObject {
 
     func repair() async {
         await perform("repair", success: "Notes CLI is repaired.") {
-            _ = try await runner.requireSuccess(["onboard", "--json"])
+            _ = try await runner.requireSuccess(["onboard", "--json", "--skip-permission-guide"])
         }
     }
 
@@ -180,7 +236,7 @@ final class ControlCenterModel: ObservableObject {
         refreshAfterward: Bool = true,
         operation: () async throws -> Void
     ) async {
-        guard activeAction == nil else { return }
+        guard activeAction == nil, !isRefreshing else { return }
         activeAction = action
         errorMessage = nil
         successMessage = nil

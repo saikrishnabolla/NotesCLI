@@ -1,24 +1,76 @@
 import SwiftUI
 
 struct ControlCenterView: View {
+    private enum Page: String, CaseIterable, Identifiable {
+        case overview = "Overview"
+        case permissions = "Permissions"
+        case connections = "Connections"
+        case settings = "Settings"
+
+        var id: Self { self }
+        var detail: String {
+            switch self {
+            case .overview: "Use Apple Notes from your terminal and AI tools."
+            case .permissions: "Manage what Notes CLI can access."
+            case .connections: "Connect AI tools on this Mac or another device."
+            case .settings: "Manage this installation of Notes CLI."
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .overview: "square.grid.2x2"
+            case .permissions: "lock.shield"
+            case .connections: "link"
+            case .settings: "gearshape"
+            }
+        }
+    }
+
     @ObservedObject var model: ControlCenterModel
+    @Environment(\.openURL) private var openURL
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+    @State private var page: Page = .overview
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header
-                messages
-                permissions
-                agents
-                remoteAccess
-                sampleReport
-                maintenance
+        HStack(spacing: 0) {
+            sidebar
+            VStack(spacing: 0) {
+                pageHeader
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 22) {
+                        switch page {
+                        case .overview: overview
+                        case .permissions: permissions
+                        case .connections: connections
+                        case .settings: maintenance
+                        }
+                    }
+                    .frame(maxWidth: 640, alignment: .leading)
+                    .padding(.horizontal, 38)
+                    .padding(.top, 3)
+                    .padding(.bottom, 28)
+                    .frame(maxWidth: .infinity)
+                }
+                .id(page)
+                feedback
             }
-            .padding(28)
-            .frame(maxWidth: 820, alignment: .leading)
+            .background(ControlCenterPalette.canvas)
+            .clipShape(.rect(cornerRadius: 20))
+            .overlay { RoundedRectangle(cornerRadius: 20).strokeBorder(ControlCenterPalette.separator, lineWidth: 0.5) }
+            .padding([.top, .trailing, .bottom], 8)
         }
-        .frame(minWidth: 680, minHeight: 620)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background {
+            if reduceTransparency || contrast == .increased {
+                ControlCenterPalette.sidebar
+            } else {
+                ControlCenterChrome()
+            }
+        }
+        .ignoresSafeArea(.container, edges: .top)
+        .font(ControlCenterType.body)
+        .buttonStyle(ControlCenterButtonStyle())
+        .tint(.primary)
         .task { await model.refresh() }
         .alert("Uninstall Notes CLI?", isPresented: $model.showUninstallConfirmation) {
             Button("Cancel", role: .cancel) {}
@@ -28,200 +80,362 @@ struct ControlCenterView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 16) {
-            Image(systemName: model.readiness.symbol)
-                .font(.system(size: 34))
-                .foregroundStyle(readinessColor)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Notes CLI")
-                    .font(.largeTitle.weight(.semibold))
-                Text(model.readiness.rawValue)
-                    .font(.title3.weight(.medium))
-                Text(model.readinessDetail)
-                    .foregroundStyle(.secondary)
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 32, height: 32)
+                    .accessibilityHidden(true)
+                Text("Notes CLI").font(ControlCenterType.brand)
             }
-            Spacer()
-            Button {
-                Task { await model.refresh() }
-            } label: {
-                if model.isRefreshing { ProgressView().controlSize(.small) }
-                else { Label("Refresh", systemImage: "arrow.clockwise") }
+            .padding(.horizontal, 4)
+            .padding(.bottom, 16)
+
+            VStack(spacing: 2) {
+                ForEach(Page.allCases.filter { $0 != .settings }) { destination in
+                    navigationRow(destination)
+                }
             }
-            .disabled(model.isRefreshing || model.activeAction != nil)
+            Spacer(minLength: 12)
+            navigationRow(.settings)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 52)
+        .padding(.bottom, 12)
+        .frame(width: 218)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Navigation")
+    }
+
+    private func navigationRow(_ destination: Page) -> some View {
+        Button {
+            page = destination
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: destination.symbol)
+                    .font(.system(size: 14, weight: page == destination ? .semibold : .medium))
+                    .frame(width: 20)
+                    .accessibilityHidden(true)
+                Text(destination.rawValue)
+                    .font(page == destination ? ControlCenterType.section : ControlCenterType.control)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(ControlCenterNavigationStyle(selected: page == destination))
+        .accessibilityAddTraits(page == destination ? .isSelected : [])
+    }
+
+    private var pageHeader: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 12) {
+                Text(page.rawValue)
+                    .font(ControlCenterType.title)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 0)
+                Button {
+                    Task { await model.refresh() }
+                } label: {
+                    if model.isRefreshing {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(ControlCenterButtonStyle(iconOnly: true))
+                .accessibilityLabel("Refresh")
+                .disabled(model.isRefreshing || model.activeAction != nil)
+                .help("Check permissions and connections again")
+            }
+            Text(page.detail)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+        .padding(.horizontal, 38)
+        .padding(.top, 28)
+        .padding(.bottom, 22)
+    }
+
+    @ViewBuilder private var feedback: some View {
+        if let message = model.errorMessage ?? model.successMessage {
+            Divider()
+            Label(message, systemImage: model.errorMessage == nil ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(model.errorMessage == nil ? Color.green : Color.orange)
+                .textSelection(.enabled)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    @ViewBuilder private var messages: some View {
-        if let error = model.errorMessage {
-            Label(error, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-                .textSelection(.enabled)
-        } else if let success = model.successMessage {
-            Label(success, systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+    private var requiredPermissions: [PermissionStatus] { model.permissions.filter(\.required) }
+    private var missingPermissions: [PermissionStatus] { requiredPermissions.filter { !$0.isGranted } }
+    private var connectedCount: Int { model.agents.filter(\.connected).count }
+
+    private var overview: some View {
+        Group {
+            SettingsGroup("Notes access") {
+                SettingsLine(
+                    symbol: model.hasChecked ? model.readiness.symbol : "clock",
+                    title: overviewTitle, detail: overviewDetail
+                ) {
+                    if model.hasChecked {
+                        Button(overviewAction) {
+                            page = model.readiness == .ready ? .connections
+                                : (missingPermissions.isEmpty ? .settings : .permissions)
+                        }
+                        .buttonStyle(ControlCenterButtonStyle(prominent: true))
+                    }
+                }
+            }
+            SettingsGroup("Try it") {
+                SettingsLine(symbol: "doc.text", title: "Sample report",
+                             detail: model.readiness == .ready
+                             ? "Preview a table, checklist, diagram, and attachments in Notes."
+                             : "Finish setup to create a formatted sample report in Notes.") {
+                    ActionButton(title: "Create in Notes", actionID: "report", model: model,
+                                 disabled: model.readiness != .ready) { await model.createSampleReport() }
+                }
+            }
         }
+    }
+
+    private var overviewTitle: String {
+        if !model.hasChecked { return "Checking access…" }
+        if model.readiness == .ready { return "Ready to use" }
+        if model.errorMessage != nil { return "Couldn’t check access" }
+        return missingPermissions.isEmpty ? "Check your setup" : "Finish setup"
+    }
+
+    private var overviewDetail: String {
+        if !model.hasChecked {
+            return "Looking for Notes access and agent connections."
+        }
+        if model.readiness == .ready {
+            return connectedCount == 0 ? "Notes access is ready. Connect an agent to get started."
+                : "\(connectedCount) agent \(connectedCount == 1 ? "connection" : "connections") configured on this Mac."
+        }
+        if let next = missingPermissions.first, model.errorMessage == nil {
+            return "Allow \(next.name) for Notes CLI."
+        }
+        return "Notes access could not be verified. Check permissions or refresh to try again."
+    }
+
+    private var overviewAction: String {
+        if model.readiness == .ready { return connectedCount == 0 ? "Connect an agent" : "Manage connections" }
+        return missingPermissions.isEmpty ? "Check settings" : "Set up permissions"
     }
 
     private var permissions: some View {
-        SectionBox(title: "Permissions", subtitle: "Grant access once so terminals and agents do not each need separate permission.") {
-            ForEach(model.permissions) { permission in
-                StatusRow(
-                    symbol: permission.isGranted ? "checkmark.circle.fill" : "exclamationmark.circle.fill",
-                    symbolColor: permission.isGranted ? .green : .orange,
-                    title: permission.name,
-                    detail: permission.status.capitalized + (permission.required ? " · Required" : " · Optional")
-                )
-                if permission.id != model.permissions.last?.id { Divider() }
+        Group {
+            SettingsGroup("Required access", footnote: model.hasChecked && !missingPermissions.isEmpty
+                          ? "After granting access in System Settings, click Refresh here." : nil) {
+                ForEach(requiredPermissions) { permission in
+                    permissionRow(permission)
+                    if permission.id != requiredPermissions.last?.id { Divider() }
+                }
             }
-            HStack {
-                Spacer()
-                ActionButton(title: "Review Permissions", actionID: "permissions", model: model) {
-                    await model.requestPermissions()
+            SettingsGroup("Optional access") {
+                let optional = model.permissions.filter { !$0.required }
+                ForEach(optional) { permission in
+                    permissionRow(permission)
+                    if permission.id != optional.last?.id { Divider() }
                 }
             }
         }
     }
 
-    private var agents: some View {
-        SectionBox(title: "Agents", subtitle: "Connect Notes CLI to the tools installed on this Mac.") {
-            ForEach(model.agents) { agent in
-                HStack(spacing: 12) {
-                    Image(systemName: agent.connected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(agent.connected ? .green : .secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(agent.name)
-                        Text(agent.detected ? agent.detail : "Not detected")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+    private func permissionRow(_ permission: PermissionStatus) -> some View {
+        let symbol = switch permission.id {
+        case "fullDiskAccess": "internaldrive"
+        case "notesAutomation": "note.text"
+        case "speechRecognition": "waveform"
+        case "camera": "camera"
+        default: "lock.shield"
+        }
+        return SettingsLine(symbol: symbol, title: permission.name, detail: permission.purpose) {
+            if permission.isGranted {
+                Label("Allowed", systemImage: "checkmark.circle")
+                    .font(ControlCenterType.detail)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .trailing, spacing: 4) {
+                    if model.hasChecked && permission.status != "Checking" {
+                        if permission.shouldRequest {
+                            ActionButton(title: "Allow Access…", actionID: permission.id, model: model) {
+                                await model.requestPermission(permission)
+                            }
+                        } else {
+                            Button("Open Settings…") {
+                                if let url = permission.settingsURL { openURL(url) }
+                            }
+                            .disabled(model.activeAction != nil || model.isRefreshing || permission.settingsURL == nil)
+                        }
                     }
-                    Spacer()
-                    ActionButton(
-                        title: agent.connected ? "Disconnect" : "Connect",
-                        actionID: "agent-\(agent.id)",
-                        model: model,
-                        disabled: !agent.detected && !agent.connected
-                    ) {
-                        await model.setAgent(agent, connected: !agent.connected)
-                    }
+                    Text(permission.displayStatus)
+                        .font(ControlCenterType.detail)
+                        .foregroundStyle(.secondary)
                 }
-                if agent.id != model.agents.last?.id { Divider() }
+            }
+        }
+    }
+
+    private var connections: some View {
+        let available = model.agents.filter { $0.detected || $0.connected }
+        let missing = model.agents.filter { !$0.detected && !$0.connected }
+        return Group {
+            SettingsGroup("AI tools", footnote: missing.isEmpty
+                          ? nil : "Not found on this Mac: " + missing.map(\.name).joined(separator: ", ")) {
+                if available.isEmpty {
+                    SettingsLine(symbol: "link", title: "No supported tools found",
+                                 detail: "Install a supported tool, then click Refresh.") { EmptyView() }
+                }
+                ForEach(available) { agent in
+                    agentRow(agent)
+                    if agent.id != available.last?.id { Divider() }
+                }
+            }
+            remoteAccess
+        }
+    }
+
+    private func agentRow(_ agent: AgentStatus) -> some View {
+        SettingsLine(symbol: agent.connected ? "checkmark.circle" : "app",
+                     title: agent.name,
+                     detail: agent.connected ? (agent.detected ? "Configured" : "Configured · App not found") : "Not connected") {
+            ActionButton(title: agent.connected ? "Disconnect" : "Connect", actionID: "agent-\(agent.id)", model: model) {
+                await model.setAgent(agent, connected: !agent.connected)
             }
         }
     }
 
     private var remoteAccess: some View {
-        SectionBox(title: "Remote access", subtitle: "Use Tailscale to reach Notes CLI privately from another machine.") {
-            HStack(spacing: 12) {
-                Image(systemName: model.tailscaleConnected ? "network.badge.shield.half.filled" : "network")
-                    .foregroundStyle(model.tailscaleConnected ? .green : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.tailscaleConnected ? "Connected" : "Not connected")
-                    if let endpoint = model.tailscaleEndpoint {
-                        Text(endpoint).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                    }
-                }
-                Spacer()
+        SettingsGroup("Remote access") {
+            SettingsLine(symbol: "network", title: "Tailscale",
+                         detail: model.tailscaleConnected
+                         ? model.tailscaleEndpoint ?? "Connected"
+                         : "Not connected. Reach Notes CLI privately from another device.",
+                         selectableDetail: model.tailscaleConnected) {
                 ActionButton(title: model.tailscaleConnected ? "Remove" : "Set Up", actionID: "tailscale", model: model) {
                     await model.setTailscale(connected: !model.tailscaleConnected)
                 }
             }
             Divider()
-            Picker("Access", selection: $model.tailscaleReadOnly) {
-                Text("Read only").tag(true)
-                Text("Read and write").tag(false)
-            }
-            .pickerStyle(.segmented)
-            TextField("Allowed folders, such as Notes > Oracle", text: $model.tailscaleWriteFolders)
-                .disabled(model.tailscaleReadOnly)
-                .textFieldStyle(.roundedBorder)
-            Text(model.tailscaleReadOnly
-                 ? "Remote agents can search and read notes, but cannot change them."
-                 : (model.tailscaleWriteFolders.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? "Remote agents can write to any Notes folder."
-                    : "Remote writes are limited to the listed folder trees."))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if model.tailscaleConnected {
-                HStack {
-                    Spacer()
-                    ActionButton(title: "Apply Settings", actionID: "tailscale", model: model) {
-                        await model.applyTailscaleSettings()
+            VStack(alignment: .leading, spacing: 8) {
+                SettingsLine(symbol: "lock", title: "Agent access",
+                             detail: model.tailscaleReadOnly ? "Search and read notes."
+                             : (model.tailscaleWriteFolders.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                ? "Write to any folder unless you set a limit."
+                                : "Write only to the folders below.")) {
+                    Picker("Agent access", selection: $model.tailscaleReadOnly) {
+                        Text("Read only").tag(true)
+                        Text("Read and write").tag(false)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 216)
+                    .disabled(model.activeAction != nil || model.isRefreshing)
+                }
+                if !model.tailscaleReadOnly {
+                    TextField("Allowed folders, such as Notes > Oracle", text: $model.tailscaleWriteFolders)
+                        .textFieldStyle(.roundedBorder)
+                        .padding(.leading, 34)
+                }
+                if model.tailscaleConnected {
+                    HStack {
+                        Spacer()
+                        ActionButton(title: "Apply Settings", actionID: "tailscale", model: model) {
+                            await model.applyTailscaleSettings()
+                        }
                     }
                 }
             }
-        }
-    }
-
-    private var sampleReport: some View {
-        SectionBox(title: "Try Notes CLI", subtitle: "Create a polished research note with headings, a table, links, an image, a diagram, tags, a checklist, and an attachment.") {
-            HStack {
-                Label("Sample research report", systemImage: "doc.text.image")
-                Spacer()
-                ActionButton(title: "Create in Notes", actionID: "report", model: model) {
-                    await model.createSampleReport()
-                }
-            }
+            .padding(.bottom, model.tailscaleConnected || !model.tailscaleReadOnly ? 12 : 0)
         }
     }
 
     private var maintenance: some View {
-        SectionBox(title: "Maintenance", subtitle: "Version \(model.version)") {
-            HStack {
-                Label(model.repairNeeded ? "Repair recommended" : "Installation is current", systemImage: model.repairNeeded ? "wrench.and.screwdriver" : "checkmark.seal")
-                Spacer()
-                ActionButton(title: "Repair", actionID: "repair", model: model, disabled: !model.repairNeeded) {
+        SettingsGroup("Installation") {
+            SettingsLine(symbol: "shippingbox", title: "Notes CLI", detail: model.version, selectableDetail: true) {
+                ActionButton(title: "Repair Setup", actionID: "repair", model: model, disabled: !model.repairNeeded) {
                     await model.repair()
                 }
-                Button("Uninstall…", role: .destructive) { model.showUninstallConfirmation = true }
-                    .disabled(model.activeAction != nil)
             }
-        }
-    }
-
-    private var readinessColor: Color {
-        switch model.readiness {
-        case .ready: .green
-        case .limited: .orange
-        case .needsAttention: .red
+            Divider()
+            SettingsLine(symbol: "trash", title: "Remove Notes CLI",
+                         detail: "Removes managed connections. Your notes stay in place.") {
+                Button("Uninstall…", role: .destructive) { model.showUninstallConfirmation = true }
+                    .disabled(model.activeAction != nil || model.isRefreshing)
+            }
         }
     }
 }
 
-private struct SectionBox<Content: View>: View {
+private struct SettingsGroup<Content: View>: View {
     let title: String
-    let subtitle: String
+    let footnote: String?
     @ViewBuilder let content: Content
 
+    init(_ title: String, footnote: String? = nil, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.footnote = footnote
+        self.content = content()
+    }
+
     var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 12) { content }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 4)
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.headline)
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(ControlCenterType.section).accessibilityAddTraits(.isHeader)
+            VStack(spacing: 0) { content }
+                .padding(.horizontal, 14)
+                .background(ControlCenterPalette.raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 13))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 13)
+                        .strokeBorder(ControlCenterPalette.separator, lineWidth: 0.5)
+                        .allowsHitTesting(false)
+                }
+            if let footnote {
+                Text(footnote).font(ControlCenterType.detail).foregroundStyle(.secondary)
             }
-            .padding(.bottom, 4)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-private struct StatusRow: View {
+private struct SettingsLine<Trailing: View>: View {
     let symbol: String
-    let symbolColor: Color
     let title: String
     let detail: String
+    var selectableDetail = false
+    @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: symbol).foregroundStyle(symbolColor)
-            Text(title)
-            Spacer()
-            Text(detail).foregroundStyle(.secondary)
+            Image(systemName: symbol)
+                .font(ControlCenterType.control)
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(ControlCenterType.control).foregroundStyle(.primary)
+                if selectableDetail {
+                    Text(detail).textSelection(.enabled)
+                } else {
+                    Text(detail)
+                }
+            }
+            .font(ControlCenterType.detail)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
+            Spacer(minLength: 0)
+            trailing().fixedSize(horizontal: true, vertical: false)
         }
+        .padding(.vertical, 12)
     }
 }
 
@@ -242,6 +456,6 @@ private struct ActionButton: View {
                 Text(title)
             }
         }
-        .disabled(disabled || model.activeAction != nil)
+        .disabled(disabled || model.activeAction != nil || model.isRefreshing)
     }
 }

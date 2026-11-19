@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.12
+
+### Changed
+
+- Redesigned the Mac app’s Overview, Permissions, Connections, and Settings screens.
+- Added a folded-note app icon and matching menu bar icon.
+- The app requests camera, speech recognition, and Notes Automation access separately.
+
 ## 1.1.11
 
 ### Fixed

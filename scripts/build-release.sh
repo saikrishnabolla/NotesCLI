@@ -2,17 +2,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${NOTESCLI_VERSION:-1.1.11}"
+VERSION="${NOTESCLI_VERSION:-1.1.12}"
 IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bolla (GXKRUPGJVF)}"
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
 HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"
 ENTITLEMENTS="$ROOT/packaging/macos/notescli.entitlements"
-ICON_SOURCE="$ROOT/packaging/macos/generate-app-icon.swift"
+ICON_SOURCE="$ROOT/packaging/macos/AppIcon.png"
+ICON_GENERATOR="$ROOT/packaging/macos/generate-app-icon.swift"
 OUTPUT_DIR="${NOTESCLI_RELEASE_DIR:-$ROOT/dist}"
 NOTARY_PROFILE="${NOTESCLI_NOTARY_PROFILE:-}"
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "build-release.sh requires macOS." >&2; exit 1; }
-[[ -f "$INFO_PLIST" && -f "$HOST_INFO_PLIST" && -f "$ENTITLEMENTS" && -f "$ICON_SOURCE" ]] || { echo "Release metadata is missing." >&2; exit 1; }
+[[ -f "$INFO_PLIST" && -f "$HOST_INFO_PLIST" && -f "$ENTITLEMENTS" && -f "$ICON_SOURCE" && -f "$ICON_GENERATOR" ]] || { echo "Release metadata is missing." >&2; exit 1; }
 if [[ "$IDENTITY" != "-" && -z "$NOTARY_PROFILE" ]]; then
     echo "NOTESCLI_NOTARY_PROFILE is required for Developer ID releases." >&2
     exit 1
@@ -31,7 +32,7 @@ cp "$HOST_INFO_PLIST" "$HOST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$HOST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$HOST_APP/Contents/Info.plist"
 ICONSET="$STAGING/AppIcon.iconset"
-xcrun swift "$ICON_SOURCE" "$ICONSET"
+xcrun swift "$ICON_GENERATOR" "$ICON_SOURCE" "$ICONSET"
 iconutil -c icns "$ICONSET" -o "$HOST_APP/Contents/Resources/AppIcon.icns"
 [[ -s "$HOST_APP/Contents/Resources/AppIcon.icns" ]] || { echo "Could not build AppIcon.icns." >&2; exit 1; }
 

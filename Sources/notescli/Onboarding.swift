@@ -47,7 +47,7 @@ enum OnboardingStore {
 }
 
 enum Onboarding {
-    static func run(options: GlobalOptions, checkOnly: Bool) throws -> OnboardingReport {
+    static func run(options: GlobalOptions, checkOnly: Bool, skipPermissionGuide: Bool = false) throws -> OnboardingReport {
         if checkOnly { return try report(options: options, checkOnly: true) }
 
         var state = try OnboardingStore.load()
@@ -82,7 +82,7 @@ enum Onboarding {
         if accessReady(options: options) {
             state.steps["access-ready"] = "complete"
             try OnboardingStore.save(state)
-        } else if state.steps["permission-guide"] != "shown" {
+        } else if !skipPermissionGuide, state.steps["permission-guide"] != "shown" {
             if CapabilityHostClient.isAvailable() {
                 _ = try CapabilityHostClient.run(arguments: ["permissions"])
             } else {

@@ -1168,17 +1168,23 @@ struct Setup: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "onboard", abstract: "Resume Notes CLI setup and report readiness.", aliases: ["setup"])
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Report setup state without changing files or requesting permissions.") var checkOnly = false
+    @Flag(help: "Check access without opening settings or requesting permissions.") var skipPermissionGuide = false
 
     func run() throws {
-        let report = try Onboarding.run(options: options, checkOnly: checkOnly)
+        let report = try Onboarding.run(options: options, checkOnly: checkOnly, skipPermissionGuide: skipPermissionGuide)
         if options.json { try Output.json(report) }
         else { Output.table(["STEP", "STATUS", "REQUIRED"], report.steps.map { [$0.id, $0.status, $0.required ? "yes" : "no"] }) }
     }
 }
 
+enum PermissionScope: String, ExpressibleByArgument {
+    case automation, camera, speech
+}
+
 struct Permissions: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Open Full Disk Access and request Notes Automation, Camera, and Speech Recognition access.")
-    func run() throws { try PermissionGuide.run() }
+    @Option(help: "Request only automation, camera, or speech access.") var only: PermissionScope?
+    func run() throws { try PermissionGuide.run(only: only) }
 }
 
 enum MCPConfiguration {
@@ -1512,57 +1518,70 @@ enum MCPConfiguration {
 }
 
 enum PermissionGuide {
-    static func run(silent: Bool = false) throws {
+    static func run(silent: Bool = false, only: PermissionScope? = nil) throws {
         func info(_ message: String) { if !silent { print(message) } }
         func warning(_ message: String) { if !silent { Output.error(message) } }
-        let speech = AudioTranscriber.authorizationStatus == .notDetermined
-            ? try AudioTranscriber.requestAuthorizationBlocking()
-            : AudioTranscriber.authorizationStatus
-        switch speech {
-        case .authorized: info("Speech Recognition: authorized.")
-        case .denied: warning("Speech Recognition: denied. Open System Settings > Privacy & Security > Speech Recognition.")
-        case .restricted: warning("Speech Recognition: restricted by system policy.")
-        case .notDetermined: warning("Speech Recognition: no decision was recorded.")
-        @unknown default: warning("Speech Recognition: unknown status.")
+        if only == nil || only == .speech {
+            let speech = AudioTranscriber.authorizationStatus == .notDetermined
+                ? try AudioTranscriber.requestAuthorizationBlocking()
+                : AudioTranscriber.authorizationStatus
+            if only != nil, speech != .authorized {
+                throw NotesError("speech_not_authorized", "Speech Recognition is not allowed. Check System Settings.")
+            }
+            switch speech {
+            case .authorized: info("Speech Recognition: authorized.")
+            case .denied: warning("Speech Recognition: denied. Open System Settings > Privacy & Security > Speech Recognition.")
+            case .restricted: warning("Speech Recognition: restricted by system policy.")
+            case .notDetermined: warning("Speech Recognition: no decision was recorded.")
+            @unknown default: warning("Speech Recognition: unknown status.")
+            }
         }
 
-        do {
-            try AVCaptureCameraImageSource.requestAccessForPermissions()
-            info("Camera: authorized for Notes CLI.")
-        } catch let error as NotesError where error.code == "camera_access_denied" {
-            warning("Camera: \(error.message)")
-            if let hint = error.hint { warning(hint) }
-        } catch {
-            warning("Camera permission could not be checked: \(error.localizedDescription)")
+        if only == nil || only == .camera {
+            do {
+                try AVCaptureCameraImageSource.requestAccessForPermissions()
+                info("Camera: authorized for Notes CLI.")
+            } catch let error as NotesError where error.code == "camera_access_denied" {
+                if only != nil { throw error }
+                warning("Camera: \(error.message)")
+                if let hint = error.hint { warning(hint) }
+            } catch {
+                if only != nil { throw error }
+                warning("Camera permission could not be checked: \(error.localizedDescription)")
+            }
         }
 
-        info("Full Disk Access is required for full-fidelity Apple Notes reads.")
-        if ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] == "1" {
-            info("Add Notes CLI.app. Other terminals and agent apps will use its permission.")
-            let reveal = Process()
-            reveal.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            reveal.arguments = ["-R", CapabilityHostPaths.app.path]
-            if (try? reveal.run()) != nil { reveal.waitUntilExit() }
-        } else {
-            info("Add the app that launches notescli, or run 'notescli onboard' to install Notes CLI.")
-        }
-        let settings = Process()
-        settings.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        settings.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
-        try settings.run()
-        settings.waitUntilExit()
-        if settings.terminationStatus != 0 { warning("Could not open the Full Disk Access pane.") }
-
-        info("Requesting Automation access for Notes. No note content is read.")
-        do {
-            try ensureNotesIsRunning()
-            try NotesAutomationPermission.request()
-            info("Automation: authorized for Notes.")
-        } catch {
-            warning("Automation was not authorized: \(error)")
-            warning("Open System Settings > Privacy & Security > Automation and allow Notes for the same terminal or MCP host app.")
+        if only == nil {
+            info("Full Disk Access is required for full-fidelity Apple Notes reads.")
+            if ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] == "1" {
+                info("Add Notes CLI.app. Other terminals and agent apps will use its permission.")
+                let reveal = Process()
+                reveal.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                reveal.arguments = ["-R", CapabilityHostPaths.app.path]
+                if (try? reveal.run()) != nil { reveal.waitUntilExit() }
+            } else {
+                info("Add the app that launches notescli, or run 'notescli onboard' to install Notes CLI.")
+            }
+            let settings = Process()
+            settings.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            settings.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
+            try settings.run()
+            settings.waitUntilExit()
+            if settings.terminationStatus != 0 { warning("Could not open the Full Disk Access pane.") }
         }
 
+        if only == nil || only == .automation {
+            info("Requesting Automation access for Notes. No note content is read.")
+            do {
+                try ensureNotesIsRunning()
+                try NotesAutomationPermission.request()
+                info("Automation: authorized for Notes.")
+            } catch {
+                if only != nil { throw error }
+                warning("Automation was not authorized: \(error)")
+                warning("Open System Settings > Privacy & Security > Automation and allow Notes for the same terminal or MCP host app.")
+            }
+        }
     }
 
     private static func ensureNotesIsRunning() throws {

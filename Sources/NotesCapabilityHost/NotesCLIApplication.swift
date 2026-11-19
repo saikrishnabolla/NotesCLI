@@ -40,12 +40,17 @@ final class NotesCLIApplication: NSObject, NSApplicationDelegate {
     private func controlCenterWindow() -> NSWindow {
         if let window { return window }
         let controller = NSHostingController(rootView: ControlCenterView(model: model))
+        // The window owns its size; changing pages should not resize it.
+        controller.sizingOptions = []
         let window = NSWindow(contentViewController: controller)
         window.title = "Notes CLI"
-        window.setContentSize(NSSize(width: 760, height: 760))
-        window.minSize = NSSize(width: 680, height: 620)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.setContentSize(NSSize(width: 840, height: 540))
+        window.contentMinSize = NSSize(width: 720, height: 510)
         window.isReleasedWhenClosed = false
         window.center()
         self.window = window
@@ -54,7 +59,8 @@ final class NotesCLIApplication: NSObject, NSApplicationDelegate {
 
     private func installMenuBarItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: "Notes CLI")
+        item.button?.image = NotesMenuBarIcon.make()
+        item.button?.setAccessibilityLabel("Notes CLI")
         let menu = NSMenu()
         let open = NSMenuItem(title: "Open Notes CLI", action: #selector(showControlCenter), keyEquivalent: "")
         open.target = self

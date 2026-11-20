@@ -8,7 +8,7 @@ import ObjectiveC.runtime
 import SQLite3
 
 public enum NativeContractFeature: String, Codable, CaseIterable, Sendable {
-    case core, tags, tables, scans, markup, links, recordings, paper
+    case core, tags, tables, scans, markup, links, recordings, paper, dividers, sectionLinks
 }
 
 public enum NativeContractFailureKind: String, Codable, Sendable {

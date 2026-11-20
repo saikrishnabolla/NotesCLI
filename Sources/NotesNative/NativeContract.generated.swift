@@ -2,7 +2,7 @@
 import Foundation
 
 extension NativeContractManifest {
-    static let generatedHash = "7111598eeb75cf2b9c6663d8042909ad4bdf3bdbb57307a8f78a56800d391b86"
+    static let generatedHash = "195cf4f8bc23612afc17522a74a370eee9537111821bf78b0dbabe907fca86ed"
     static let generatedSelectorFeatures: [String: Set<NativeContractFeature>] = [
         "UUID": [.markup],
         "UUIDString": [.markup],
@@ -115,7 +115,7 @@ extension NativeContractManifest {
         "moveObjectWithIdentifier:toIndex:": [.scans],
         "moveToPoint:": [.markup],
         "newCalculateGraphExpressionAttachmentWithIdentifier:altText:note:parentAttachment:rightToLeft:": [.core],
-        "newDividerLineAttachmentWithIdentifier:note:parentAttachment:": [.core],
+        "newDividerLineAttachmentWithIdentifier:note:parentAttachment:": [.dividers],
         "newDrawingFromMergeableData": [.paper],
         "newEmptyNoteInFolder:": [.core],
         "newHashtagAttachmentWithIdentifier:hashtagText:creatingHashtagIfNecessary:note:parentAttachment:": [.tags],
@@ -348,7 +348,7 @@ extension NativeContractManifest {
         .init(classNames: ["ICDocCamScannedDocumentEditor"], selector: "moveObjectWithIdentifier:toIndex:", isClassMethod: false, feature: .scans),
         .init(classNames: ["NSBezierPath"], selector: "moveToPoint:", isClassMethod: false, feature: .markup),
         .init(classNames: ["ICInlineAttachment"], selector: "newCalculateGraphExpressionAttachmentWithIdentifier:altText:note:parentAttachment:rightToLeft:", isClassMethod: true, feature: .core),
-        .init(classNames: ["ICInlineAttachment"], selector: "newDividerLineAttachmentWithIdentifier:note:parentAttachment:", isClassMethod: true, feature: .core),
+        .init(classNames: ["ICInlineAttachment"], selector: "newDividerLineAttachmentWithIdentifier:note:parentAttachment:", isClassMethod: true, feature: .dividers),
         .init(classNames: ["ICAttachmentInlineDrawingModel"], selector: "newDrawingFromMergeableData", isClassMethod: false, feature: .paper),
         .init(classNames: ["ICNote"], selector: "newEmptyNoteInFolder:", isClassMethod: true, feature: .core),
         .init(classNames: ["ICInlineAttachment"], selector: "newHashtagAttachmentWithIdentifier:hashtagText:creatingHashtagIfNecessary:note:parentAttachment:", isClassMethod: true, feature: .tags),
@@ -499,7 +499,7 @@ extension NativeContractManifest {
         "ICGalleryAttachmentUtilities": [.scans],
         "ICHashtag": [.scans, .tags],
         "ICHashtagController": [.tags],
-        "ICInlineAttachment": [.core, .links, .tags],
+        "ICInlineAttachment": [.core, .dividers, .links, .tags],
         "ICMentionsController": [.core, .tags],
         "ICNote": [.core, .links, .paper, .recordings, .scans, .tables],
         "ICNoteContext": [.core, .links, .scans],
@@ -620,7 +620,7 @@ extension NativeContractManifest {
         "summary": [.links],
         "summaryVersion": [.recordings],
         "supportsCustomNoteSortType": [.core],
-        "supportsSectionLinks": [.core],
+        "supportsSectionLinks": [.sectionLinks],
         "synapseData": [.links, .markup],
         "text": [.recordings],
         "timestamp": [.recordings],

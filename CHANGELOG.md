@@ -8,6 +8,10 @@
 - Added a folded-note app icon and matching menu bar icon.
 - The app requests camera, speech recognition, and Notes Automation access separately.
 
+### Fixed
+
+- Missing divider or section-link support no longer blocks unrelated native writes.
+
 ## 1.1.11
 
 ### Fixed

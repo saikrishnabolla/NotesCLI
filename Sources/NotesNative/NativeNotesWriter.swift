@@ -1217,7 +1217,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     public func insertNoteLink(_ ref: String, target: String, text: String?, paragraphID: String? = nil,
                                paragraphName: String? = nil, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite(features: [.links]) { context in
+        try performWrite(features: paragraphID == nil ? [.links] : [.links, .sectionLinks]) { context in
         let source = try note(ref, in: context), destination = try note(target, in: context); try guardWritable(source, allowShared: allowShared); try refreshIfStale(source)
         if paragraphID == nil {
             guard paragraphName == nil else { throw NotesError("invalid_paragraph_name", "paragraph_name requires paragraph_id.") }
@@ -1272,7 +1272,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
     }
 
     fileprivate func insertInlineObject(_ ref: String, request: InlineObjectRequest, position: Int?, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite(features: [.core]) { context in
+        let features: Set<NativeContractFeature>
+        if case .divider = request { features = [.dividers] } else { features = [.core] }
+        return try performWrite(features: features) { context in
         let note = try note(ref, in: context); try guardWritable(note, allowShared: allowShared); try refreshIfStale(note)
         var resolvedRequest = request
         if case .mention = resolvedRequest {
@@ -1480,7 +1482,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
     public func setParagraphStyle(_ ref: String, range: UTF16Range, style: NativeParagraphStyle, indent: Int?,
                                   alignment: NativeParagraphAlignment? = nil, writingDirection: NativeWritingDirection? = nil,
                                   collapsed: Bool? = nil, allowShared: Bool) throws -> NativeWriteResult {
-        try performWrite(features: [.core]) { context in
+        try performWrite(features: collapsed == nil ? [.core] : [.sectionLinks]) { context in
         let (note, after) = try mutateBody(ref, context: context, allowShared: allowShared) { note, editor, original in
             let target = try self.valid(range, length: original.length, allowEmpty: false)
             var runs: [(NSRange, [NSAttributedString.Key: Any])] = []
@@ -3166,7 +3168,8 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 try NCNotesRuntime.setValue(title, forKey: "title", of: note)
                 let editor = try NCBodyEditor(note: note)
                 try editor.prepare(["insert"])
-                let built = try MarkdownNativeWriter(owner: self).attributed(markdown: "# " + title, note: note,
+                let built = try MarkdownNativeWriter(owner: self).attributed(
+                    markdown: markdownSourceWithLiteralTitle(title, body: ""), note: note,
                     context: context, editor: editor, existing: [:]).0
                 var kind: NSString?
                 attachmentID = try NCNotesRuntime.addSystemPaperDrawing(drawing as AnyObject, to: note, type: &kind)
@@ -3712,6 +3715,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
         if systemPaper { features.insert(.paper) }
         for paragraph in prepared.document.paragraphs {
             if paragraph.kind == .table { features.insert(.tables) }
+            if paragraph.kind == .divider { features.insert(.dividers) }
             let runs = paragraph.runs + (paragraph.table ?? []).flatMap { $0 }.flatMap(\.runs)
             if runs.contains(where: { $0.nativeTag != nil }) { features.insert(.tags) }
             if runs.contains(where: { $0.link != nil || $0.richLinkURL != nil }) { features.insert(.links) }
@@ -3725,6 +3729,7 @@ public final class NativeNotesWriter: NotesNativeWriting {
             if value == "tables" { features.insert(.tables) }
             if value == "tags" { features.insert(.tags) }
             if value.contains("link") { features.insert(.links) }
+            if value == "collapsible headings" { features.insert(.sectionLinks) }
         }
         func collect(_ attachment: Attachment) {
             switch attachment.kind {
@@ -5293,6 +5298,16 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 existing: existing
             )
             guard plan.canRestore else { throw Self.restorePlanError(plan) }
+            var recreationFeatures: Set<NativeContractFeature> = []
+            for planned in plan.attachments {
+                guard case .recreateInline(let request) = planned.action else { continue }
+                switch request {
+                case .divider: recreationFeatures.insert(.dividers)
+                case .noteLink(_, .some, _, _): recreationFeatures.insert(.sectionLinks)
+                default: break
+                }
+            }
+            if !recreationFeatures.isEmpty { try requireContract(recreationFeatures) }
             try preflightSnapshotDocument(snapshot.document!)
             var selfParagraphLinkIDs: Set<String> = []
             for planned in plan.attachments {
@@ -7582,8 +7597,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
                 try NCNotesRuntime.setValue(title, forKey: "title", of: note)
                 let editor = try NCBodyEditor(note: note)
                 try editor.prepare(["insert"])
-                let built = try MarkdownNativeWriter(owner: self).attributed(markdown: "# " + title, note: note, context: context,
-                                                                              editor: editor, existing: [:]).0
+                let built = try MarkdownNativeWriter(owner: self).attributed(
+                    markdown: markdownSourceWithLiteralTitle(title, body: ""), note: note,
+                    context: context, editor: editor, existing: [:]).0
                 attachmentID = try NCNotesRuntime.addFile(frozen.url, to: note, title: frozen.sourceName, type: &kind)
                 try TestFault.check("after_attachment")
                 operation?.attachmentID = attachmentID

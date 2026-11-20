@@ -100,6 +100,25 @@ final class NativeContractTests: XCTestCase {
         ])
     }
 
+    func testCoreDoesNotRequireOptionalDividerAndSectionLinkSupport() throws {
+        let dividerSelector = "newDividerLineAttachmentWithIdentifier:note:parentAttachment:"
+        let requirements = NativeContractManifest.requirements.filter { requirement in
+            switch requirement {
+            case .selector(_, _, let selector, _, _): selector == dividerSelector
+            case .kvc(_, let key): key == "supportsSectionLinks"
+            default: false
+            }
+        }
+        let report = NativeContractProbe.evaluate(
+            requirements: requirements, runtime: FakeNativeContractRuntime(classes: ["ICInlineAttachment"])
+        )
+
+        XCTAssertNoThrow(try report.require(.core))
+        XCTAssertNoThrow(try report.require(.links))
+        XCTAssertThrowsError(try report.require(.dividers))
+        XCTAssertThrowsError(try report.require(.sectionLinks))
+    }
+
     func testMissingEntityAttributeFailsClosed() {
         let requirement = NativeContractRequirement.attribute(
             feature: .recordings,
@@ -189,6 +208,11 @@ final class NativeContractTests: XCTestCase {
             case .links:
                 operation = { _ = try writer.insertNoteLink("note", target: "target", text: nil,
                                                              position: nil, allowShared: false) }
+            case .dividers:
+                operation = { _ = try writer.insertDivider("note", position: nil, allowShared: false) }
+            case .sectionLinks:
+                operation = { _ = try writer.insertNoteLink("note", target: "target", text: nil,
+                                                            paragraphID: UUID().uuidString, position: nil, allowShared: false) }
             case .recordings:
                 operation = { _ = try writer.writeRecordingTranscripts("note", transcripts: ["audio": []], allowShared: false) }
             case .paper:
@@ -207,6 +231,7 @@ final class NativeContractTests: XCTestCase {
         for (feature, markdown) in [
             (NativeContractFeature.tables, "| A |\n| - |\n| B |"),
             (NativeContractFeature.tags, "[#hardening](notescli-tag:hardening)"),
+            (NativeContractFeature.dividers, "First\n\n---\n\nSecond"),
         ] {
             let counter = StoreByteCounter()
             let writer = NativeNotesWriter(

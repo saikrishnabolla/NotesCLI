@@ -34,6 +34,8 @@ PROTOCOL_OWNERS = {
 }
 
 FEATURE_OWNER_CLASSES = {
+    "dividers": ["ICInlineAttachment"],
+    "sectionLinks": ["ICTTParagraphStyle"],
     "core": ["ICNote", "ICNoteContext", "ICAttachment", "ICFolder", "ICInlineAttachment",
              "ICTTMergeableAttributedString", "NSMutableAttributedString", "SYContentItem"],
     "tags": ["ICHashtag", "ICHashtagController", "ICInlineAttachment", "ICNote", "ICTagSelection"],
@@ -100,6 +102,11 @@ SELECTOR_OWNER_OVERRIDES: dict[tuple[str, str], tuple[list[str], bool | None] | 
 
 def feature(text: str) -> str:
     value = text.lower()
+    if value.startswith(("newdividerlineattachmentwithidentifier:",
+                         "icinlineattachmentnewdividerlineattachmentwithidentifier:")):
+        return "dividers"
+    if value.startswith("supportssectionlinks"):
+        return "sectionLinks"
     if any(word in value for word in ("annotation", "markup", "muimage")):
         return "markup"
     if any(word in value for word in ("synapse", "richlink", "linkattachment", "urlattachment", "linkpreview")):

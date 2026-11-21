@@ -2,6 +2,22 @@ import AppKit
 import CoreGraphics
 import Dispatch
 
+enum PermissionStripStep: Equatable {
+    case addApp
+    case enableAccess
+
+    var instruction: String {
+        switch self {
+        case .addApp: "Drag Notes CLI into the list"
+        case .enableAccess: "Turn on Notes CLI in System Settings"
+        }
+    }
+
+    func afterDrop(_ operation: NSDragOperation) -> Self {
+        operation.contains(.copy) ? .enableAccess : self
+    }
+}
+
 @MainActor
 internal enum PermissionStrip {
     private static var running = false
@@ -49,10 +65,10 @@ internal enum PermissionStrip {
 @MainActor
 private final class StripSession: NSObject {
     private static let settingsBundleID = "com.apple.systempreferences"
-    private static let size = CGSize(width: 342, height: 48)
     private static let gap: CGFloat = 8
 
     private let panel: NSPanel
+    private let content: PermissionStripContent
     private let check: StripProbe
     private var timer: Timer?
     private var startedAt: TimeInterval = 0
@@ -62,9 +78,9 @@ private final class StripSession: NSObject {
     private(set) var result: Bool?
 
     init(app: URL, probe: @escaping @Sendable () -> Bool) {
-        let frame = NSRect(origin: .zero, size: Self.size)
-        panel = NSPanel(
-            contentRect: frame,
+        content = PermissionStripContent(app: app)
+        panel = StripPanel(
+            contentRect: content.frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -81,41 +97,10 @@ private final class StripSession: NSObject {
         panel.hidesOnDeactivate = false
         panel.isExcludedFromWindowsMenu = true
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
-
-        let background = NSVisualEffectView(frame: frame)
-        background.material = .hudWindow
-        background.blendingMode = .behindWindow
-        background.state = .active
-        background.wantsLayer = true
-        background.layer?.cornerRadius = 12
-        background.layer?.masksToBounds = true
-        background.layer?.borderWidth = 1
-        background.layer?.borderColor = NSColor.separatorColor.cgColor
-        panel.contentView = background
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.contentView = content
         panel.invalidateShadow()
-
-        let drag = StripDragView(app: app, frame: NSRect(x: 0, y: 0, width: 70, height: 48))
-        background.addSubview(drag)
-
-        let label = NSTextField(labelWithString: "Drag into Full Disk Access")
-        label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .labelColor
-        label.sizeToFit()
-        label.frame.origin = NSPoint(x: 73, y: (frame.height - label.frame.height) / 2)
-        background.addSubview(label)
-
-        let dismiss = StripDismissButton(frame: NSRect(x: 304, y: 8, width: 30, height: 32))
-        dismiss.isBordered = false
-        dismiss.imagePosition = .imageOnly
-        dismiss.image = NSImage(
-            systemSymbolName: "xmark",
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
-        dismiss.contentTintColor = .secondaryLabelColor
-        dismiss.setAccessibilityLabel("Dismiss")
-        dismiss.target = self
-        dismiss.action = #selector(dismissStrip)
-        background.addSubview(dismiss)
+        content.onDismiss = { [weak self] in self?.finish(false) }
     }
 
     func start() {
@@ -133,10 +118,6 @@ private final class StripSession: NSObject {
         timer = nil
         check.cancel()
         panel.close()
-    }
-
-    @objc private func dismissStrip() {
-        finish(false)
     }
 
     private func finish(_ value: Bool?) {
@@ -177,7 +158,7 @@ private final class StripSession: NSObject {
 
         if let settings,
            let bounds = Self.settingsWindow(pid: settings.processIdentifier),
-           let frame = Self.placement(for: bounds) {
+           let frame = Self.placement(for: bounds, size: content.preferredSize) {
             if panel.frame != frame { panel.setFrame(frame, display: true) }
             if !panel.isVisible { panel.orderFrontRegardless() }
             shown = shown || panel.isVisible
@@ -213,7 +194,7 @@ private final class StripSession: NSObject {
         rect.isNull ? 0 : rect.width * rect.height
     }
 
-    private static func placement(for window: CGRect) -> CGRect? {
+    private static func placement(for window: CGRect, size: CGSize) -> CGRect? {
         guard let screen = NSScreen.screens.max(by: {
             area($0.frame.intersection(window)) < area($1.frame.intersection(window))
         }), area(screen.frame.intersection(window)) > 0 else { return nil }
@@ -231,6 +212,123 @@ private final class StripSession: NSObject {
             visible.contains($0)
         }
     }
+}
+
+@MainActor
+private final class StripPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+@MainActor
+final class PermissionStripContent: NSVisualEffectView {
+    private let app: URL
+    private let drag: StripDragView
+    private let tint = NSView()
+    private let instruction = NSTextField(labelWithString: "")
+    private let finder = StripButton(title: "Show in Finder", target: nil, action: nil)
+    private let alreadyAdded = StripButton(title: "Already added?", target: nil, action: nil)
+    private let dismiss = StripButton(frame: .zero)
+    private(set) var step = PermissionStripStep.addApp
+    var onDismiss: (() -> Void)?
+    var onReveal: (URL) -> Void = { NSWorkspace.shared.activateFileViewerSelecting([$0]) }
+
+    var preferredSize: CGSize {
+        CGSize(width: step == .addApp ? 514 : 368, height: 54)
+    }
+
+    init(app: URL) {
+        self.app = app
+        drag = StripDragView(app: app, frame: .zero)
+        super.init(frame: NSRect(x: 0, y: 0, width: 514, height: 54))
+        material = .popover
+        blendingMode = .behindWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 15
+        layer?.masksToBounds = true
+        tint.wantsLayer = true
+        tint.setAccessibilityElement(false)
+
+        instruction.font = .systemFont(ofSize: 15, weight: .semibold)
+        instruction.textColor = .labelColor
+        instruction.lineBreakMode = .byTruncatingTail
+
+        for (button, action) in [(finder, #selector(revealApp)), (alreadyAdded, #selector(showEnableStep))] {
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            button.target = self
+            button.action = action
+        }
+        dismiss.isBordered = false
+        dismiss.imagePosition = .imageOnly
+        dismiss.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        dismiss.contentTintColor = .secondaryLabelColor
+        dismiss.setAccessibilityLabel("Dismiss")
+        dismiss.target = self
+        dismiss.action = #selector(dismissGuide)
+
+        drag.onDrop = { [weak self] operation in
+            guard let self else { return }
+            setStep(step.afterDrop(operation))
+        }
+        for view in [tint, drag, instruction, finder, alreadyAdded, dismiss] { addSubview(view) }
+        nextKeyView = alreadyAdded
+        alreadyAdded.nextKeyView = finder
+        finder.nextKeyView = dismiss
+        dismiss.nextKeyView = alreadyAdded
+        setStep(.addApp)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            tint.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.82).cgColor
+        }
+        tint.frame = bounds
+        let width = bounds.width
+        dismiss.frame = NSRect(x: width - 36, y: 11, width: 28, height: 32)
+        if step == .addApp {
+            drag.frame = NSRect(x: 4, y: 0, width: 65, height: 54)
+            finder.frame = NSRect(x: width - 137, y: 14, width: 99, height: 25)
+            alreadyAdded.frame = NSRect(x: width - 238, y: 14, width: 98, height: 25)
+            instruction.frame = NSRect(x: 70, y: 18, width: width - 318, height: 19)
+        } else {
+            drag.frame = NSRect(x: 4, y: 0, width: 46, height: 54)
+            instruction.frame = NSRect(x: 54, y: 18, width: width - 96, height: 19)
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsLayout = true
+    }
+
+    private func setStep(_ value: PermissionStripStep) {
+        step = value
+        let adding = value == .addApp
+        instruction.stringValue = value.instruction
+        drag.showsGrip = adding
+        drag.toolTip = adding ? "Drag Notes CLI into Full Disk Access" : "Drag again if Notes CLI is not in the list"
+        drag.menu = adding ? nil : retryMenu()
+        alreadyAdded.isHidden = !adding
+        finder.isHidden = !adding
+        needsLayout = true
+    }
+
+    private func retryMenu() -> NSMenu {
+        let menu = NSMenu()
+        let retry = menu.addItem(withTitle: "Back to adding Notes CLI", action: #selector(showAddStep), keyEquivalent: "")
+        retry.target = self
+        return menu
+    }
+
+    @objc private func showAddStep() { setStep(.addApp) }
+    @objc private func showEnableStep() { setStep(.enableAccess) }
+    @objc private func revealApp() { onReveal(app) }
+    @objc private func dismissGuide() { onDismiss?() }
 }
 
 private final class StripProbe: @unchecked Sendable {
@@ -276,7 +374,7 @@ private final class StripProbe: @unchecked Sendable {
 }
 
 @MainActor
-private final class StripDismissButton: NSButton {
+private final class StripButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -284,23 +382,24 @@ private final class StripDismissButton: NSButton {
 private final class StripDragView: NSView, NSDraggingSource {
     private let app: URL
     private let icon: NSImage
+    private let grip = NSImageView(frame: NSRect(x: 46, y: 19, width: 14, height: 16))
     private var startPoint: NSPoint?
+    var onDrop: ((NSDragOperation) -> Void)?
+    var showsGrip = true { didSet { grip.isHidden = !showsGrip } }
 
     init(app: URL, frame: NSRect) {
         self.app = app
         icon = NSWorkspace.shared.icon(forFile: app.path)
         super.init(frame: frame)
 
-        let image = NSImageView(frame: NSRect(x: 12, y: 9, width: 30, height: 30))
+        let image = NSImageView(frame: NSRect(x: 10, y: 11, width: 32, height: 32))
         image.image = icon
         image.imageScaling = .scaleProportionallyDown
         addSubview(image)
 
-        let grip = NSImageView(frame: NSRect(x: 49, y: 16, width: 16, height: 16))
         grip.image = NSImage(systemSymbolName: "circle.grid.3x3.fill", accessibilityDescription: nil)
-        grip.contentTintColor = .tertiaryLabelColor
+        grip.contentTintColor = .secondaryLabelColor
         addSubview(grip)
-
     }
 
     required init?(coder: NSCoder) { nil }
@@ -337,5 +436,10 @@ private final class StripDragView: NSView, NSDraggingSource {
         sourceOperationMaskFor context: NSDraggingContext
     ) -> NSDragOperation {
         .copy
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        // A drop can be accepted without permission being granted.
+        onDrop?(operation)
     }
 }

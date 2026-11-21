@@ -74,6 +74,9 @@ public struct CapabilityHostRequest: Codable, Sendable {
 }
 
 public enum CapabilityHostPolicy {
+    // A fixed-path permission check handled inside the signed host, not a CLI subcommand.
+    public static let notesAccessProbeArguments = ["__notes-access-probe"]
+
     private static let allowedCommands: Set<String> = [
         "accounts", "folders", "list", "show", "search", "tags", "recent", "pinned", "capabilities", "help",
         "add", "append", "rename", "move", "delete", "folder", "open", "watch", "engine", "ocr", "image-labels", "map", "scan", "camera", "recording", "quick-note", "settings", "checklist", "pin",
@@ -91,6 +94,7 @@ public enum CapabilityHostPolicy {
     private static let localMCPActions: Set<String> = ["install", "uninstall", "status", "token", "config", "remove"]
 
     public static func allows(_ arguments: [String]) -> Bool {
+        if arguments == notesAccessProbeArguments { return true }
         guard let index = commandIndex(arguments) else { return allowsHome(arguments) }
         let command = arguments[index]
         if command == "doctor" { return arguments == ["doctor", "--for-agent", "--json"] }
@@ -167,6 +171,21 @@ public enum CapabilityHostPolicy {
     }
 }
 
+public enum HostNotesAccess {
+    public static func canReadStoreHeader() -> Bool {
+        let file = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
+        return canReadStoreHeader(at: file)
+    }
+
+    static func canReadStoreHeader(at file: URL) -> Bool {
+        let sqliteHeader = Data("SQLite format 3\0".utf8)
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: sqliteHeader.count)) == sqliteHeader
+    }
+}
+
 public struct CapabilityHostReply: Codable, Sendable {
     public var protocolVersion: Int
     public var exitCode: Int32?
@@ -237,11 +256,17 @@ public enum CapabilityHostClient {
     }
 
     public static func run(arguments: [String], socketURL: URL = CapabilityHostPaths.socket,
-                           descriptors: [Int32] = [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO]) throws -> Int32 {
+                           descriptors: [Int32] = [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO],
+                           replyTimeoutSeconds: Int? = nil) throws -> Int32 {
         guard descriptors.count == 3 else { throw CapabilityHostError.protocolFailure("Three standard descriptors are required.") }
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { throw CapabilityHostError.unavailable("Could not connect to Notes CLI.") }
         defer { close(descriptor) }
+        if let seconds = replyTimeoutSeconds {
+            var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+            guard setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size)) == 0
+            else { throw CapabilityHostError.unavailable("Could not set the Notes CLI probe timeout.") }
+        }
         var address = try socketAddress(socketURL.path)
         let connected = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -268,6 +293,18 @@ public enum CapabilityHostClient {
             throw CapabilityHostError.protocolFailure("Notes CLI returned no exit status.")
         }
         return exitCode
+    }
+
+    public static func notesAccessReady(socketURL: URL = CapabilityHostPaths.socket) -> Bool? {
+        guard let null = FileHandle(forUpdatingAtPath: "/dev/null") else { return nil }
+        defer { try? null.close() }
+        let status = try? run(arguments: CapabilityHostPolicy.notesAccessProbeArguments, socketURL: socketURL,
+                              descriptors: Array(repeating: null.fileDescriptor, count: 3), replyTimeoutSeconds: 2)
+        switch status {
+        case 0: return true
+        case 1: return false
+        default: return nil
+        }
     }
 
     public static func capture(arguments: [String], socketURL: URL = CapabilityHostPaths.socket) throws -> CapturedCommand {

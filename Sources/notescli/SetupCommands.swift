@@ -1168,12 +1168,17 @@ struct Setup: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "onboard", abstract: "Resume Notes CLI setup and report readiness.", aliases: ["setup"])
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Report setup state without changing files or requesting permissions.") var checkOnly = false
-    @Flag(help: "Check access without opening System Settings.") var skipPermissionGuide = false
+    @Flag(help: "Check access without opening Finder or System Settings.") var skipPermissionGuide = false
 
     func run() throws {
         let report = try Onboarding.run(options: options, checkOnly: checkOnly, skipPermissionGuide: skipPermissionGuide)
-        if options.json { try Output.json(report) }
-        else { Output.table(["STEP", "STATUS", "REQUIRED"], report.steps.map { [$0.id, $0.status, $0.required ? "yes" : "no"] }) }
+        if options.json {
+            try Output.json(report)
+        } else if checkOnly || skipPermissionGuide || (!report.complete && !report.needsFullDiskAccess) {
+            Output.table(["STEP", "STATUS", "REQUIRED"], report.steps.map { [$0.id, $0.status, $0.required ? "yes" : "no"] })
+        } else if report.complete {
+            print("Notes CLI is ready. Try 'notescli list'.")
+        }
     }
 }
 
@@ -1518,15 +1523,47 @@ enum MCPConfiguration {
 }
 
 enum PermissionGuide {
-    static func openFullDiskAccess(for app: String, silent: Bool = false) throws {
-        if !silent { print("In Full Disk Access, allow \(app), then rerun notescli onboard.") }
-        let settings = Process()
-        settings.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        settings.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
-        try settings.run()
-        settings.waitUntilExit()
-        if settings.terminationStatus != 0, !silent {
-            Output.error("Open System Settings > Privacy & Security > Full Disk Access.")
+    private static let settingsArguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
+
+    static func openSettings() -> Bool { open(settingsArguments) }
+
+    static func openFullDiskAccess(revealing app: URL?, silent: Bool = false,
+                                   launch: ([String]) -> Bool = open, show: (String) -> Void = { print($0) }) {
+        let openedSettings = launch(settingsArguments)
+        let revealedInFinder = app.map { launch(["-R", $0.path]) } ?? false
+        guard !silent else { return }
+
+        if !openedSettings {
+            show("Open System Settings > Privacy & Security > Full Disk Access.")
+        }
+        if app != nil {
+            show("Turn on Notes CLI in the Full Disk Access list so it can read your notes.")
+            if revealedInFinder {
+                show("Don't see Notes CLI in the list? Drag it from the Finder window into the list, then turn it on.")
+            } else {
+                show("""
+                    Don't see Notes CLI in the list? Run this to find it, then drag it into the list:
+                      open -R "$HOME/Applications/Notes CLI.app"
+                    """)
+            }
+        } else {
+            show("In the Full Disk Access list, turn on the app you're running this command from (for example, Terminal).")
+        }
+        show("Then run 'notescli onboard' again.")
+    }
+
+    private static func open(_ arguments: [String]) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus == 0
+        } catch {
+            return false
         }
     }
 

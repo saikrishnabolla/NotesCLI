@@ -53,9 +53,12 @@ enum HostInstallation {
     }
 
     static var requiresInstallOrUpgrade: Bool {
-        guard FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path),
-              validSignature(CapabilityHostPaths.app) else { return sourceApp != nil }
-        return bundleVersion(CapabilityHostPaths.app) != [notesCLIVersion, notesCLIVersion]
+        sourceApp != nil && !isCurrentInstall
+    }
+
+    static var isCurrentInstall: Bool {
+        let app = CapabilityHostPaths.app
+        return bundleVersion(app) == [notesCLIVersion, notesCLIVersion] && validSignature(app)
     }
 
     private static func bundleVersion(_ app: URL) -> [String] {
@@ -142,12 +145,20 @@ enum HostInstallation {
             }
             return !serviceLoaded()
         }
-        func waitUntilReady() -> Bool {
-            for _ in 0..<40 {
+        func waitUntilReady(attempts: Int = 40) -> Bool {
+            for _ in 0..<attempts {
                 if CapabilityHostClient.isAvailable() { return true }
                 Thread.sleep(forTimeInterval: 0.1)
             }
             return CapabilityHostClient.isAvailable()
+        }
+
+        func waitForBootstrappedHost() -> Bool {
+            // The generated LaunchAgent already uses RunAtLoad. Don't kill and
+            // relaunch the process that may already be verifying its signature.
+            if waitUntilReady(attempts: 5) { return true }
+            _ = launchctl(["kickstart", "gui/\(getuid())/com.saikrishnabolla.notescli.capability-host"])
+            return waitUntilReady()
         }
 
         do {
@@ -180,8 +191,7 @@ enum HostInstallation {
             guard launchctl(["bootstrap", "gui/\(getuid())", CapabilityHostPaths.launchAgent.path]) == 0 else {
                 throw NotesError("host_start_failed", "Notes CLI was installed, but macOS could not start it.")
             }
-            _ = launchctl(["kickstart", "-k", "gui/\(getuid())/com.saikrishnabolla.notescli.capability-host"])
-            guard waitUntilReady() else {
+            guard waitForBootstrappedHost() else {
                 throw NotesError("host_start_failed", "Notes CLI was installed, but it did not become ready.")
             }
 
@@ -216,8 +226,7 @@ enum HostInstallation {
                     guard launchctl(["bootstrap", "gui/\(getuid())", CapabilityHostPaths.launchAgent.path]) == 0 else {
                         throw NotesError("host_rollback_failed", "The previous Notes CLI app could not be restored in macOS.")
                     }
-                    _ = launchctl(["kickstart", "-k", "gui/\(getuid())/com.saikrishnabolla.notescli.capability-host"])
-                    guard waitUntilReady() else {
+                    guard waitForBootstrappedHost() else {
                         throw NotesError("host_rollback_failed", "The previous Notes CLI app was restored, but it did not become ready.")
                     }
                 }

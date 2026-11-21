@@ -156,14 +156,19 @@ let developmentSocket = ProcessInfo.processInfo.environment["NOTESCLI_HOST_ALLOW
     ? ProcessInfo.processInfo.environment["NOTESCLI_HOST_SOCKET_PATH"].map { URL(fileURLWithPath: $0) }
     : nil
 let server = CapabilityHostServer(socketURL: developmentSocket ?? CapabilityHostPaths.socket) { request, descriptors, socket in
-    guard trustedPeer(socket), CapabilityHostPolicy.allows(request.arguments),
-          validStaticCode(cli, identifier: "com.saikrishnabolla.notescli") else {
-        descriptors.forEach { close($0) }
+    defer { descriptors.forEach { close($0) }; close(socket) }
+    guard trustedPeer(socket), CapabilityHostPolicy.allows(request.arguments) else {
         CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI refused the request."), socket: socket)
-        close(socket)
         return
     }
-    defer { descriptors.forEach { close($0) } }
+    if request.arguments == CapabilityHostPolicy.notesAccessProbeArguments {
+        CapabilityHostServer.reply(CapabilityHostReply(exitCode: HostNotesAccess.canReadStoreHeader() ? 0 : 1), socket: socket)
+        return
+    }
+    guard validStaticCode(cli, identifier: "com.saikrishnabolla.notescli") else {
+        CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI refused the request."), socket: socket)
+        return
+    }
     var environment = request.environment
     for key in ["HOME", "TMPDIR", "USER", "LOGNAME"] {
         if let value = ProcessInfo.processInfo.environment[key] { environment[key] = value }
@@ -188,7 +193,6 @@ let server = CapabilityHostServer(socketURL: developmentSocket ?? CapabilityHost
     } catch {
         CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI could not run the command."), socket: socket)
     }
-    close(socket)
 }
 
 do { try server.start() }

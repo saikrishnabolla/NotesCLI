@@ -368,6 +368,16 @@ final class CLITests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex/config.toml").path))
     }
 
+    func testOnboardShowsPlainLanguageWhenReady() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let result = try run(["--backend", "fake", "onboard"],
+                             environment: ["HOME": home.path, "CFFIXED_USER_HOME": home.path])
+        XCTAssertEqual(result.0, 0, result.2)
+        XCTAssertEqual(result.1.trimmingCharacters(in: .whitespacesAndNewlines),
+                       "Notes CLI is ready. Try 'notescli list'.")
+    }
+
     func testOnboardRecognizesInstalledNotesCLIApp() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -813,7 +823,7 @@ final class CLITests: XCTestCase {
         let json = try run(["--backend", "fake", "--json"])
         XCTAssertEqual(json.0, 0, json.2)
         let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
-        XCTAssertEqual(home["version"] as? String, "1.1.13")
+        XCTAssertEqual(home["version"] as? String, "1.1.14")
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },

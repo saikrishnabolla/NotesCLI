@@ -4,6 +4,47 @@ import Foundation
 import XCTest
 
 final class CapabilityHostTests: XCTestCase {
+    func testPermissionProbeAcceptsNoOptionsOrFilePath() {
+        let command = CapabilityHostPolicy.notesAccessProbeArguments
+        XCTAssertTrue(CapabilityHostPolicy.allows(command))
+        XCTAssertFalse(CapabilityHostPolicy.allows(command + ["/tmp/other.sqlite"]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["--json"] + command))
+    }
+
+    func testPermissionProbeRequiresSQLiteHeader() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("NoteStore.sqlite")
+        XCTAssertFalse(HostNotesAccess.canReadStoreHeader(at: file))
+        for (bytes, expected) in [
+            (Data(), false),
+            (Data("SQLite format 3".utf8), false),
+            (Data("SQLite format 3\0extra bytes".utf8), true),
+        ] {
+            try bytes.write(to: file)
+            XCTAssertEqual(HostNotesAccess.canReadStoreHeader(at: file), expected)
+        }
+    }
+
+    func testPermissionProbeDistinguishesDenialFromUnavailableHost() throws {
+        for (code, expected): (Int32, Bool?) in [(0, true), (1, false), (2, nil)] {
+            let root = URL(fileURLWithPath: "/tmp/nch-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let socket = root.appendingPathComponent("host.sock")
+            let server = CapabilityHostServer(socketURL: socket) { request, descriptors, connection in
+                defer { descriptors.forEach { close($0) }; close(connection) }
+                XCTAssertEqual(request.arguments, CapabilityHostPolicy.notesAccessProbeArguments)
+                CapabilityHostServer.reply(CapabilityHostReply(exitCode: code), socket: connection)
+            }
+            try server.start()
+            XCTAssertEqual(CapabilityHostClient.notesAccessReady(socketURL: socket), expected)
+            server.stop()
+            XCTAssertNil(CapabilityHostClient.notesAccessReady(socketURL: socket))
+        }
+    }
+
     func testPublicAppPathUsesNewNameAndKeepsLegacyMigrationPath() {
         XCTAssertEqual(CapabilityHostPaths.app.lastPathComponent, "Notes CLI.app")
         XCTAssertEqual(CapabilityHostPaths.legacyApp.lastPathComponent, "NotesCLI Capability Host.app")
@@ -12,7 +53,7 @@ final class CapabilityHostTests: XCTestCase {
     func testRequestCarriesHostProtocolAndCLIRelease() {
         let request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
         XCTAssertEqual(request.protocolVersion, 2)
-        XCTAssertEqual(request.clientVersion, "1.1.13")
+        XCTAssertEqual(request.clientVersion, "1.1.14")
     }
 
     func testVersionMismatchExplainsHowToUpgradeTheHost() {

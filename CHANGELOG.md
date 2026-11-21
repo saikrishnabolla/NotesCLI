@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.14
+
+- Onboarding puts a draggable Notes CLI icon next to Full Disk Access, with Finder as a fallback.
+- Onboarding checks access without waiting for Apple Notes to respond and avoids restarting the app twice during setup.
+
 ## 1.1.13
 
 - Import Markdown and HTML with inline files, a preview, and checks for changed sources and duplicate imports.

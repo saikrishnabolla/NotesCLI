@@ -100,11 +100,9 @@ struct NotesCLI: ParsableCommand {
         }
         if let command = CapabilityHostPolicy.commandIndex(arguments).map({ arguments[$0] }),
            command == "doctor" || command == "capabilities" { return false }
+        guard arguments != CapabilityHostPolicy.notesAccessProbeArguments,
+              CapabilityHostPolicy.allows(arguments) else { return false }
         if route == .auto, HostInstallation.requiresInstallOrUpgrade { return false }
-        guard CapabilityHostPolicy.commandIndex(arguments) != nil else {
-            return CapabilityHostPolicy.allows(arguments) && (route == .force || CapabilityHostClient.isAvailable())
-        }
-        guard CapabilityHostPolicy.allows(arguments) else { return false }
         return route == .force || CapabilityHostClient.isAvailable()
     }
 

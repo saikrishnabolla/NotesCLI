@@ -20,8 +20,8 @@ After `brew upgrade notescli`, run `notescli onboard` to update Notes CLI.app an
 Download the `.tar.gz` file and its `.sha256` file from the same release. Check the archive, then install it on your `PATH`:
 
 ```bash
-grep 'tar.gz$' notescli-1.1.13-macos-universal.sha256 | shasum -a 256 -c -
-tar -xzf notescli-1.1.13-macos-universal.tar.gz
+grep 'tar.gz$' notescli-1.1.14-macos-universal.sha256 | shasum -a 256 -c -
+tar -xzf notescli-1.1.14-macos-universal.tar.gz
 mkdir -p "$HOME/.local/bin" "$HOME/Applications"
 install -m 755 notescli "$HOME/.local/bin/notescli"
 ditto "Notes CLI.app" "$HOME/Applications/Notes CLI.app"
@@ -49,7 +49,7 @@ A local source build is not notarized and does not include Notes CLI.app. It run
 notescli onboard
 ```
 
-Onboarding starts `~/Applications/Notes CLI.app` in the background. If access is missing, it opens Full Disk Access in System Settings. Allow **Notes CLI**, then rerun `notescli onboard`.
+Onboarding starts Notes CLI in the background. If access is missing, it opens Full Disk Access in System Settings. Drag the **Notes CLI** icon from the strip into the list and turn it on. If the strip can’t appear, Finder shows you the app instead. If macOS asks you to quit and reopen, follow its prompt. The strip closes when Notes CLI confirms access; if you dismiss it first, run `notescli onboard` to resume.
 
 Grant Automation, Camera, or Speech Recognition when a feature asks for it. Onboarding does not configure AI tools or remote access.
 

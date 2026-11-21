@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import NotesCore
 import NotesHost
@@ -20,6 +21,16 @@ struct OnboardingReport: Codable {
     var complete: Bool
     var resumable: Bool
     var steps: [OnboardingStepReport]
+
+    var needsFullDiskAccess: Bool { steps.contains { $0.id == "access-ready" && $0.status == "pending" } }
+}
+
+enum OnboardingInteraction {
+    static func canShowPermissionGuide(json: Bool, stdinIsTTY: Bool, stdoutIsTTY: Bool,
+                                       environment: [String: String]) -> Bool {
+        !json && stdinIsTTY && stdoutIsTTY && environment["SSH_CONNECTION"] == nil &&
+            environment["SSH_TTY"] == nil && environment["NOTESCLI_HOST_ACTIVE"] != "1"
+    }
 }
 
 enum OnboardingStore {
@@ -50,57 +61,81 @@ enum Onboarding {
         if checkOnly { return try report(options: options, checkOnly: true) }
 
         var state = try OnboardingStore.load()
-        if HostInstallation.sourceApp != nil {
-            if HostInstallation.requiresInstallOrUpgrade || !CapabilityHostClient.isAvailable() {
-                try HostInstallation.install(silent: options.json)
+        let app = CapabilityHostPaths.app
+        let hostSource = HostInstallation.sourceApp
+        var hostInstalled = hostSource != nil && HostInstallation.isCurrentInstall
+        var hostReady = hostInstalled && CapabilityHostClient.isAvailable()
+        if hostSource != nil {
+            if !hostInstalled || !hostReady {
+                try HostInstallation.install(silent: true)
+                hostInstalled = true
+                hostReady = true
             }
             state.steps["host-install"] = "complete"
-            state.steps["host-ready"] = CapabilityHostClient.isAvailable() ? "complete" : "pending"
+            state.steps["host-ready"] = "complete"
             try InstallManifest.recordFile(CapabilityHostPaths.launchAgent, category: .runtime)
             try OnboardingStore.save(state)
         }
-        if accessReady(options: options) {
+        var status = statusReport(options: options, checkOnly: false, hostAvailable: hostSource != nil,
+                                  hostInstalled: hostInstalled, hostReady: hostReady)
+        if !skipPermissionGuide && status.needsFullDiskAccess {
+            let installedApp = hostInstalled ? app : nil
+            if OnboardingInteraction.canShowPermissionGuide(json: options.json, stdinIsTTY: isatty(STDIN_FILENO) == 1,
+                stdoutIsTTY: isatty(STDOUT_FILENO) == 1, environment: ProcessInfo.processInfo.environment) {
+                if let app = installedApp, hostReady, Thread.isMainThread,
+                   let granted = MainActor.assumeIsolated({
+                       PermissionStrip.run(app: app, openSettings: PermissionGuide.openSettings,
+                                           probe: { CapabilityHostClient.notesAccessReady() == true })
+                   }) {
+                    if granted {
+                        status = statusReport(options: options, checkOnly: false, hostAvailable: true,
+                                              hostInstalled: true, hostReady: true, verifiedAccess: true)
+                    } else {
+                        print("Full Disk Access is still pending. Run 'notescli onboard' to resume.")
+                    }
+                } else {
+                    PermissionGuide.openFullDiskAccess(revealing: installedApp)
+                }
+            } else if !options.json {
+                print("Full Disk Access is still pending. Run 'notescli onboard' in Terminal to finish setup.")
+            }
+        } else if !options.json, status.steps.contains(where: { $0.id == "access-ready" && $0.status == "unavailable" }) {
+            print("Could not check Full Disk Access. Run 'notescli host status', then retry 'notescli onboard'.")
+        }
+        if status.complete {
             state.steps["access-ready"] = "complete"
             try OnboardingStore.save(state)
-        } else if !skipPermissionGuide {
-            try PermissionGuide.openFullDiskAccess(
-                for: CapabilityHostClient.isAvailable() ? "Notes CLI" : "the app that runs notescli",
-                silent: options.json
-            )
         }
-        return try report(options: options, checkOnly: false)
+        return status
     }
 
     static func report(options: GlobalOptions, checkOnly: Bool) throws -> OnboardingReport {
-        let access = accessReady(options: options)
-        let hostAvailable = HostInstallation.sourceApp != nil || FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path)
-        let hostReady = CapabilityHostClient.isAvailable()
-        let hostInstalled = FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path) && !HostInstallation.requiresInstallOrUpgrade
+        let hostAvailable = HostInstallation.sourceApp != nil
+        let hostInstalled = hostAvailable && HostInstallation.isCurrentInstall
+        return statusReport(options: options, checkOnly: checkOnly, hostAvailable: hostAvailable,
+                            hostInstalled: hostInstalled, hostReady: hostInstalled && CapabilityHostClient.isAvailable())
+    }
+
+    private static func statusReport(options: GlobalOptions, checkOnly: Bool, hostAvailable: Bool, hostInstalled: Bool,
+                                     hostReady: Bool, verifiedAccess: Bool = false) -> OnboardingReport {
+        let access = verifiedAccess ? true : accessReady(options: options, hostAvailable: hostAvailable, hostReady: hostReady)
         let steps = [
             OnboardingStepReport(id: "host-install", status: hostAvailable ? (hostInstalled ? "complete" : "pending") : "not_available", required: hostAvailable),
             OnboardingStepReport(id: "host-ready", status: hostAvailable ? (hostReady ? "complete" : "pending") : "not_available", required: hostAvailable),
-            OnboardingStepReport(id: "access-ready", status: access ? "complete" : "pending", required: true),
+            OnboardingStepReport(id: "access-ready", status: access.map { $0 ? "complete" : "pending" } ?? "unavailable", required: true),
         ]
         return OnboardingReport(schemaVersion: 1, checkOnly: checkOnly,
-                                complete: access && (!hostAvailable || hostReady), resumable: true, steps: steps)
+                                complete: access == true && (!hostAvailable || (hostInstalled && hostReady)),
+                                resumable: true, steps: steps)
     }
 
-    private static func accessReady(options: GlobalOptions) -> Bool {
+    private static func accessReady(options: GlobalOptions, hostAvailable: Bool, hostReady: Bool) -> Bool? {
         if (options.backend ?? ProcessInfo.processInfo.environment["NOTESCLI_BACKEND"]) == "fake" {
             return (try? options.backends().reader.accounts()) != nil
         }
-        if CapabilityHostClient.isAvailable(),
-           let captured = try? CapabilityHostClient.capture(arguments: ["doctor", "--for-agent", "--json"]),
-           captured.exitCode == 0,
-           let report = try? JSONDecoder().decode(AgentDoctorReport.self, from: captured.stdout) {
-            return report.access.effective.available && report.access.effective.fidelity == "full"
+        if hostAvailable {
+            return hostReady ? CapabilityHostClient.notesAccessReady() : nil
         }
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
-        if let handle = try? FileHandle(forReadingFrom: path) {
-            defer { try? handle.close() }
-            if (try? handle.read(upToCount: 16)) != nil { return true }
-        }
-        return false
+        return HostNotesAccess.canReadStoreHeader()
     }
 }

@@ -357,12 +357,14 @@ public final class WriteJournal: @unchecked Sendable {
         }
     }
 
-    public func list(limit: Int = 100) throws -> [JournalEntry] {
+    public func list(limit: Int = 100, operation: String? = nil) throws -> [JournalEntry] {
         try lock.withLock {
             var statement: OpaquePointer?
-            try prepare("SELECT id,operation,arguments_hash,arguments,idempotency_key,started,outcome,note_id,result,message FROM operations ORDER BY started DESC LIMIT ?", &statement)
+            let filter = operation == nil ? "" : " WHERE operation = ?"
+            try prepare("SELECT id,operation,arguments_hash,arguments,idempotency_key,started,outcome,note_id,result,message FROM operations\(filter) ORDER BY started DESC LIMIT ?", &statement)
             defer { sqlite3_finalize(statement) }
-            sqlite3_bind_int(statement, 1, Int32(max(0, limit)))
+            if let operation { bind(operation, 1, statement) }
+            sqlite3_bind_int(statement, operation == nil ? 1 : 2, Int32(clamping: max(0, limit)))
             var items: [JournalEntry] = []
             while sqlite3_step(statement) == SQLITE_ROW { items.append(try decode(statement)) }
             return items

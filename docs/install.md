@@ -47,9 +47,9 @@ A local source build is not notarized and does not include Notes CLI.app. It run
 notescli onboard
 ```
 
-Onboarding installs and starts `~/Applications/Notes CLI.app`. Add **Notes CLI** under **System Settings > Privacy & Security > Full Disk Access**, then return to the command. It saves progress, so rerunning `notescli onboard` continues at the unfinished step.
+Onboarding starts `~/Applications/Notes CLI.app` in the background. If access is missing, it opens Full Disk Access in System Settings. Allow **Notes CLI**, then rerun `notescli onboard`.
 
-The command also triggers the Automation prompt without reading note content. Allow **Notes CLI** to control Notes. Grant Camera or Speech Recognition when you first use those features. `notescli setup` runs the same flow; `notescli permissions` reopens its permission step.
+Grant Automation, Camera, or Speech Recognition when a feature asks for it. Onboarding does not configure AI tools or remote access.
 
 Check access:
 

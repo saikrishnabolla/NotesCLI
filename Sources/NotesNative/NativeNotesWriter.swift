@@ -3773,11 +3773,21 @@ public final class NativeNotesWriter: NotesNativeWriting {
         let source = markdownSourceWithLiteralTitle(title, body: input.source)
         let prepared = try MarkdownNativeWriter(owner: self).prepare(
             NativeMarkdownInput(source: source, assetBaseDirectory: input.assetBaseDirectory,
-                                trailingAttachments: input.trailingAttachments)
+                                trailingAttachments: input.trailingAttachments,
+                                expectedAssetHashes: input.expectedAssetHashes,
+                                importDestination: input.importDestination)
         )
         let write = try performWrite(features: Self.contractFeatures(for: prepared, systemPaper: systemPaper)) { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
+            if let expected = input.importDestination {
+                let folders = try SQLiteNotesStore(refresh: true).folders(account: nil)
+                guard id(destination) == expected.folderID,
+                      folders.contains(where: { $0.id == expected.folderID && $0.path == expected.folderPath
+                          && !$0.isRecentlyDeleted && !$0.isSmartFolder }) else {
+                    throw NotesError("import_plan_changed", "The destination folder changed during import.")
+                }
+            }
             if systemPaper {
                 guard let account = value(destination, "account") as? NSManagedObject else {
                     throw NotesError("account_not_found", "The Quick Note folder has no account.")
@@ -7904,6 +7914,7 @@ final class MarkdownNativeWriter {
         var document: NotesMarkdownDocument
         var resources: [FrozenAttachmentInput?]
         var trailingAttachments: [FrozenAttachmentInput]
+        var importDestination: NativeImportDestination?
     }
 
     fileprivate struct RenderedInput {
@@ -7939,11 +7950,19 @@ final class MarkdownNativeWriter {
                     )
                 }
                 let file = try localResourceURL(resource.source, baseDirectory: input.assetBaseDirectory)
-                resources.append(try FrozenAttachmentInput(file: file))
+                let frozen = try FrozenAttachmentInput(file: file)
+                if let expected = input.expectedAssetHashes,
+                   expected[file.resolvingSymlinksInPath().path] != frozen.sha256 {
+                    throw NotesError("import_source_changed", "An inline file changed after import preview. Preview again.")
+                }
+                resources.append(frozen)
             }
         }
+        if let hashes = input.expectedAssetHashes, Set(hashes.values) != Set(resources.compactMap { $0?.sha256 }) {
+            throw NotesError("import_source_changed", "The rendered inline assets did not match the import preview.")
+        }
         return PreparedInput(document: document, resources: resources,
-                             trailingAttachments: input.trailingAttachments)
+                             trailingAttachments: input.trailingAttachments, importDestination: input.importDestination)
     }
 
     private func localResourceURL(_ source: String, baseDirectory: URL?) throws -> URL {
@@ -8098,6 +8117,14 @@ final class MarkdownNativeWriter {
         try owner.guardWritable(note, allowShared: allowShared)
         try owner.refreshIfStale(note)
         let before = try SQLiteNotesStore(refresh: true).note(owner.id(note))
+        if let expected = prepared.importDestination {
+            guard let folder = owner.value(note, "folder") as? NSManagedObject,
+                  owner.id(folder) == expected.folderID,
+                  before.summary.folderID == expected.folderID, before.summary.folderPath == expected.folderPath,
+                  expected.noteRevision == NoteRevision.importValue(before) else {
+                throw NotesError("import_plan_changed", "The note or its destination changed during import.")
+            }
+        }
         let expectedFeatures = NativeOnlyFeatures.detect(in: before)
         let editor = try NCBodyEditor(note: note)
         try editor.prepare(["replace"])
@@ -8204,13 +8231,16 @@ final class MarkdownNativeWriter {
         try editor.finish()
         try owner.save(context, notes: [note])
         let noteID = owner.id(note), nativeBody = try owner.body(try owner.note(noteID, in: context))
+        let filesMatch = renderedInput.fileAttachmentSHA256.allSatisfy { id, hash in
+            owner.storedAttachmentHash(noteID: noteID, attachmentID: id, expected: hash) == hash
+        }
         return owner.result(noteID, native: ["utf16Length": "\(nativeBody.length)", "preservedFeatures": expectedFeatures.joined(separator: ",")],
-                            nativeVerified: nativeBody.string == expectedText &&
+                            nativeVerified: filesMatch && nativeBody.string == expectedText &&
                                 NativeVerificationRules.exactMarkerPlacements(
                                     expectedPlacements, owner.attachmentPlacements(nativeBody)
                                 ), sqlite: { after in
             let features = NativeOnlyFeatures.detect(in: after)
-            guard after.document?.text == expectedText,
+            guard filesMatch, after.document?.text == expectedText,
                   NativeVerificationRules.exactMarkerPlacements(
                       expectedPlacements, self.owner.attachmentPlacements(after.document)
                   ),

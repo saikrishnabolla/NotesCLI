@@ -43,7 +43,7 @@ Run `notescli onboard` after an install or upgrade. It installs or updates `~/Ap
 notescli onboard
 ```
 
-Grant Full Disk Access, Automation, Camera, and Speech Recognition to **Notes CLI** when prompted. You can open **Notes CLI** from `~/Applications` later to start it. `notescli setup` remains an alias for the same resumable setup, and `notescli permissions` reopens the permission step.
+Grant Full Disk Access to **Notes CLI** in System Settings. The helper runs in the background with no window or menu bar item. Grant Automation, Camera, or Speech Recognition only when you need those features.
 
 Commands that open or save local files run in the calling app so the host never receives arbitrary paths. Those commands need that app's own file access.
 

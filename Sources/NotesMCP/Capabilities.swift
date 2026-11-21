@@ -127,7 +127,7 @@ public enum CapabilityCatalog {
         FeatureDefinition(feature: "Handwriting recognition", read: "Done", write: "Done"),
         FeatureDefinition(feature: "PDF text search", read: "Done", write: "Not possible"),
         FeatureDefinition(feature: "Audio transcript search", read: "Done", write: "Not possible"),
-        FeatureDefinition(feature: "Import plain text, HTML, and Markdown", read: "Done", write: "Done"),
+        FeatureDefinition(feature: "Import plain text, HTML, and Markdown", read: "Done", write: "Partial"),
         FeatureDefinition(feature: "Export Markdown and HTML", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Export JSON, NDJSON, and SQLite", read: "Done", write: "Done"),
         FeatureDefinition(feature: "Export PDF, DOCX, RTF, and EPUB", read: "Done", write: "Done"),
@@ -185,6 +185,9 @@ public enum CapabilityCatalog {
         "Print": [
             "read": apple("Notes.app exposes print-panel UI actions but no headless NotesShared print contract."),
             "write": apple("Notes.app exposes print-panel UI actions but no headless NotesShared print contract.")
+        ],
+        "Import plain text, HTML, and Markdown": [
+            "write": limitation("partial_impl", "Static HTML, Markdown, and text import with native Notes formatting. Browser styling, interactive content, and remote image embeds do not carry over.")
         ],
         "Widgets": [
             "read": apple("widget state lives in system UI extensions and NotesShared exposes no widget state property."),

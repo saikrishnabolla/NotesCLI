@@ -48,7 +48,7 @@ let package = Package(
         ]),
         .target(name: "NotesHost", dependencies: ["NotesCore"]),
         .executableTarget(name: "NotesCapabilityHost", dependencies: ["NotesHost"], linkerSettings: [
-            .linkedFramework("AppKit"), .linkedFramework("Security")
+            .linkedFramework("Security")
         ]),
         // MCP server over stdio, same operations as the CLI.
         // Write journal, snapshots/undo, and the write-folder allowlist.

@@ -1,0 +1,44 @@
+{
+  "fill" : {
+    "solid" : "srgb:0.97647,0.96078,0.93725,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "Fold.svg",
+          "name" : "Paper fold"
+        },
+        {
+          "image-name" : "Header.svg",
+          "name" : "Yellow header"
+        },
+        {
+          "fill-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "srgb:0.97647,0.96078,0.93725,1.00000"
+              }
+            }
+          ],
+          "image-name" : "Prompt.svg",
+          "name" : "Terminal prompt"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0
+      },
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

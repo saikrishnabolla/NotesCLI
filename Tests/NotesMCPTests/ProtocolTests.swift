@@ -272,7 +272,7 @@ final class ProtocolTests: XCTestCase {
                               feature["feature"] as? String ?? "")
             }
         }
-        XCTAssertEqual(reasonCounts, ["apple_blocked": 20, "needs_fixture": 8, "partial_impl": 2, "not_applicable": 4])
+        XCTAssertEqual(reasonCounts, ["apple_blocked": 20, "needs_fixture": 8, "partial_impl": 3, "not_applicable": 4])
 
         let blocked = try call(server, "get_capabilities", ["write": "Print"])
         let error = try XCTUnwrap(try structured(blocked)["error"] as? [String: Any])

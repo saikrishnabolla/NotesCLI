@@ -1,5 +1,4 @@
 import Foundation
-import NotesAutomation
 import NotesCore
 import NotesHost
 
@@ -60,63 +59,30 @@ enum Onboarding {
             try InstallManifest.recordFile(CapabilityHostPaths.launchAgent, category: .runtime)
             try OnboardingStore.save(state)
         }
-        if !mcpReady() || state.steps["mcp-install"] != "complete" {
-            for client in MCPClient.concrete {
-                if state.steps["mcp-install"] == "complete",
-                   try InstallManifest.mcpClientRecord(client) == nil { continue }
-                if !MCPConfiguration.isAvailable(client) { continue }
-                if MCPConfiguration.status(client) == "installed", try !InstallManifest.ownsMCPClient(client) { continue }
-                let result = try MCPConfiguration.install(client, readOnly: options.readOnly, allowNative: !options.readOnly)
-                if !result.hasPrefix("skipped") {
-                    guard let entry = try MCPConfiguration.currentOwnership(client) else {
-                        throw NotesError("mcp_entry_missing", "The \(client.label) entry could not be verified after installation.")
-                    }
-                    try InstallManifest.recordMCPClient(client, readOnly: options.readOnly,
-                                                        allowNative: !options.readOnly, entry: entry)
-                }
-            }
-            state.steps["mcp-install"] = "complete"
-            try OnboardingStore.save(state)
-        }
-
         if accessReady(options: options) {
             state.steps["access-ready"] = "complete"
             try OnboardingStore.save(state)
-        } else if !skipPermissionGuide, state.steps["permission-guide"] != "shown" {
-            if CapabilityHostClient.isAvailable() {
-                _ = try CapabilityHostClient.run(arguments: ["permissions"])
-            } else {
-                try PermissionGuide.run(silent: options.json)
-            }
-            state.steps["permission-guide"] = "shown"
-            try OnboardingStore.save(state)
+        } else if !skipPermissionGuide {
+            try PermissionGuide.openFullDiskAccess(
+                for: CapabilityHostClient.isAvailable() ? "Notes CLI" : "the app that runs notescli",
+                silent: options.json
+            )
         }
         return try report(options: options, checkOnly: false)
     }
 
     static func report(options: GlobalOptions, checkOnly: Bool) throws -> OnboardingReport {
-        let state = try OnboardingStore.load()
-        let clientsReady = state.steps["mcp-install"] == "complete" && mcpReady()
         let access = accessReady(options: options)
         let hostAvailable = HostInstallation.sourceApp != nil || FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path)
         let hostReady = CapabilityHostClient.isAvailable()
         let hostInstalled = FileManager.default.fileExists(atPath: CapabilityHostPaths.app.path) && !HostInstallation.requiresInstallOrUpgrade
         let steps = [
-            OnboardingStepReport(id: "mcp-install", status: clientsReady ? "complete" : "pending", required: true),
             OnboardingStepReport(id: "host-install", status: hostAvailable ? (hostInstalled ? "complete" : "pending") : "not_available", required: hostAvailable),
             OnboardingStepReport(id: "host-ready", status: hostAvailable ? (hostReady ? "complete" : "pending") : "not_available", required: hostAvailable),
             OnboardingStepReport(id: "access-ready", status: access ? "complete" : "pending", required: true),
         ]
         return OnboardingReport(schemaVersion: 1, checkOnly: checkOnly,
-                                complete: clientsReady && access && (!hostAvailable || hostReady), resumable: true, steps: steps)
-    }
-
-    private static func mcpReady() -> Bool {
-        MCPClient.concrete.allSatisfy {
-            guard (try? InstallManifest.mcpClientRecord($0)) != nil else { return true }
-            let status = MCPConfiguration.status($0)
-            return status == "installed"
-        }
+                                complete: access && (!hostAvailable || hostReady), resumable: true, steps: steps)
     }
 
     private static func accessReady(options: GlobalOptions) -> Bool {
@@ -127,7 +93,7 @@ enum Onboarding {
            let captured = try? CapabilityHostClient.capture(arguments: ["doctor", "--for-agent", "--json"]),
            captured.exitCode == 0,
            let report = try? JSONDecoder().decode(AgentDoctorReport.self, from: captured.stdout) {
-            return report.access.effective.available
+            return report.access.effective.available && report.access.effective.fidelity == "full"
         }
         let path = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Group Containers/group.com.apple.notes/NoteStore.sqlite")
@@ -135,6 +101,6 @@ enum Onboarding {
             defer { try? handle.close() }
             if (try? handle.read(upToCount: 16)) != nil { return true }
         }
-        return (try? ScriptingNotesReader().accounts()) != nil
+        return false
     }
 }

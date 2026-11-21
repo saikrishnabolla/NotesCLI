@@ -9,12 +9,47 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
     public let byteCount: Int
     private let directory: URL
 
-    public static let maxBytes = 200 * 1024 * 1024
+    public static let maxBytes = 512 * 1024 * 1024
 
-    public convenience init(file source: URL) throws {
+    public init(file source: URL) throws {
         let resolved = try InputFile.validated(source, kind: "attachment", maxBytes: Self.maxBytes)
-        let data = try InputFile.read(resolved, kind: "attachment", maxBytes: Self.maxBytes)
-        try self.init(data: data, suggestedName: resolved.lastPathComponent)
+        guard try resolved.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+            throw NotesError("invalid_file", "The attachment must be a regular file.")
+        }
+        let manager = FileManager.default
+        let directory = manager.temporaryDirectory
+            .appendingPathComponent("notescli-attachment-" + UUID().uuidString, isDirectory: true)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: false,
+                                    attributes: [.posixPermissions: 0o700])
+        let name = Self.safeName(resolved.lastPathComponent)
+        let url = directory.appendingPathComponent(name)
+        do {
+            guard manager.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                throw NotesError("attachment_freeze_failed", "Could not create a private copy of the attachment.")
+            }
+            let input = try InputFile.openRegularSource(resolved, kind: "attachment", maxBytes: Self.maxBytes)
+            defer { try? input.close() }
+            let output = try FileHandle(forWritingTo: url)
+            defer { try? output.close() }
+            var count = 0
+            var hash = SHA256()
+            while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+                count += chunk.count
+                guard count <= Self.maxBytes else { throw Self.tooLarge() }
+                hash.update(data: chunk)
+                try output.write(contentsOf: chunk)
+            }
+            guard count > 0 else { throw NotesError("empty_attachment", "The attachment has no bytes.") }
+            try output.synchronize()
+            self.directory = directory
+            self.url = url
+            self.sourceName = name
+            self.sha256 = hash.finalize().map { String(format: "%02x", $0) }.joined()
+            self.byteCount = count
+        } catch {
+            try? manager.removeItem(at: directory)
+            throw error
+        }
     }
 
     public convenience init(data: Data, suggestedName: String) throws {
@@ -47,7 +82,7 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
 
     private init(data: Data, suggestedName: String, verifiedSHA256: String?) throws {
         guard !data.isEmpty else { throw NotesError("empty_attachment", "The attachment has no bytes.") }
-        guard data.count <= Self.maxBytes else { throw NotesError("attachment_too_large", "Attachments are limited to 200 MB.") }
+        guard data.count <= Self.maxBytes else { throw Self.tooLarge() }
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory.appendingPathComponent("notescli-attachment-" + UUID().uuidString, isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -75,8 +110,22 @@ public final class FrozenAttachmentInput: @unchecked Sendable {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    public static func hash(file: URL) throws -> String {
-        hash(try Data(contentsOf: file, options: .mappedIfSafe))
+    public static func hash(file: URL, maxBytes: Int? = nil) throws -> String {
+        let input = try maxBytes.map { try InputFile.openRegularSource(file, kind: "attachment", maxBytes: $0) }
+            ?? FileHandle(forReadingFrom: file)
+        defer { try? input.close() }
+        var hash = SHA256()
+        var count = 0
+        while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            count += chunk.count
+            if let maxBytes, count > maxBytes { throw tooLarge() }
+            hash.update(data: chunk)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func tooLarge() -> NotesError {
+        NotesError("attachment_too_large", "Attachments are limited to \(InputFile.byteText(maxBytes)).")
     }
 
     private static func safeName(_ name: String) -> String {

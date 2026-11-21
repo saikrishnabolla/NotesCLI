@@ -166,7 +166,7 @@ struct Doctor: ParsableCommand {
             } catch {
                 effective = unavailableProbe(error)
             }
-        } else {
+        } else if automationPermission() == "authorized" {
             do {
                 let reader = ScriptingNotesReader()
                 inventory = try counts(reader)
@@ -176,6 +176,8 @@ struct Doctor: ParsableCommand {
             } catch {
                 effective = unavailableProbe(error)
             }
+        } else {
+            effective = direct
         }
 
         var blockers: [String] = []

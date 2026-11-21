@@ -1,5 +1,5 @@
-import AppKit
 import Darwin
+import Dispatch
 import Foundation
 import NotesHost
 import Security
@@ -194,7 +194,4 @@ let server = CapabilityHostServer(socketURL: developmentSocket ?? CapabilityHost
 do { try server.start() }
 catch { Darwin.exit(78) }
 
-let app = NSApplication.shared
-let application = NotesCLIApplication(cliURL: cli)
-app.delegate = application
-app.run()
+dispatchMain()

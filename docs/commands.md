@@ -171,6 +171,18 @@ notescli write <ref> [--body <body> | --stdin | --file <file>] [--backup]
 
 Settings commands read and write Notes' container preference files and verify the stored value. `settings view` reads the list or gallery mode Notes last saved for its main window; it cannot change it.
 
+## Import
+
+In the Notes CLI app, open **Import**, drop files or folders, choose a destination, and preview before writing. Use **Selected note** to add original files below a note's title.
+
+```sh
+notescli import --dry-run --json --folder "Careers > Systems" --mode combined -- ~/Desktop/guide.html ~/Desktop/guide.pdf
+notescli import --json --folder "Careers > Systems" --mode combined --expect-plan "$import_token" --wait-sync -- ~/Desktop/guide.html ~/Desktop/guide.pdf
+notescli import --dry-run --json --folder "Careers > Systems" --into '#7356' -- ~/Desktop/guide.pdf
+```
+
+Set `import_token` to the preview's `token`. The token prevents writing a changed plan. Use `--mode separate` for one note per file. If a previous import is unchanged, its exact repeat is skipped; possible overlaps require preview and do not replace existing notes. HTML imports are static; remote images stay links. Folder imports skip hidden files, symlinks, and app packages. Attachments can be up to 512 MB each, subject to Notes and iCloud limits. A verified local write is not proof of iCloud sync.
+
 ## Diagrams
 
 ```text

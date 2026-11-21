@@ -333,7 +333,10 @@ private extension NotesMarkdownDocument {
             let resource = NotesMarkdownResource(source: source, alt: alt, title: image.title)
             return [NotesMarkdownRun(text: "", resource: resource)]
         }
-        if let html = markup as? InlineHTML { return [run(html.rawHTML, style)] }
+        if let html = markup as? InlineHTML {
+            if html.rawHTML.range(of: #"(?i)^<br\s*/?>$"#, options: .regularExpression) != nil { return [run("\n", style)] }
+            return [run(html.rawHTML, style)]
+        }
         return inlines(markup, style: style)
     }
 

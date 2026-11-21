@@ -110,12 +110,29 @@ public struct NativeMarkdownInput: Sendable {
     public var source: String
     public var assetBaseDirectory: URL?
     public var trailingAttachments: [FrozenAttachmentInput]
+    public var expectedAssetHashes: [String: String]?
+    public var importDestination: NativeImportDestination?
 
     public init(source: String, assetBaseDirectory: URL? = nil,
-                trailingAttachments: [FrozenAttachmentInput] = []) {
+                trailingAttachments: [FrozenAttachmentInput] = [], expectedAssetHashes: [String: String]? = nil,
+                importDestination: NativeImportDestination? = nil) {
         self.source = source
         self.assetBaseDirectory = assetBaseDirectory
         self.trailingAttachments = trailingAttachments
+        self.expectedAssetHashes = expectedAssetHashes
+        self.importDestination = importDestination
+    }
+}
+
+public struct NativeImportDestination: Sendable {
+    public var folderID: String
+    public var folderPath: [String]
+    public var noteRevision: String?
+
+    public init(folderID: String, folderPath: [String], noteRevision: String? = nil) {
+        self.folderID = folderID
+        self.folderPath = folderPath
+        self.noteRevision = noteRevision
     }
 }
 

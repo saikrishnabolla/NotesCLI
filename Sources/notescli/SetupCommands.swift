@@ -1168,7 +1168,7 @@ struct Setup: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "onboard", abstract: "Resume Notes CLI setup and report readiness.", aliases: ["setup"])
     @OptionGroup var options: GlobalOptions
     @Flag(help: "Report setup state without changing files or requesting permissions.") var checkOnly = false
-    @Flag(help: "Check access without opening settings or requesting permissions.") var skipPermissionGuide = false
+    @Flag(help: "Check access without opening System Settings.") var skipPermissionGuide = false
 
     func run() throws {
         let report = try Onboarding.run(options: options, checkOnly: checkOnly, skipPermissionGuide: skipPermissionGuide)
@@ -1518,6 +1518,18 @@ enum MCPConfiguration {
 }
 
 enum PermissionGuide {
+    static func openFullDiskAccess(for app: String, silent: Bool = false) throws {
+        if !silent { print("In Full Disk Access, allow \(app), then rerun notescli onboard.") }
+        let settings = Process()
+        settings.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        settings.arguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
+        try settings.run()
+        settings.waitUntilExit()
+        if settings.terminationStatus != 0, !silent {
+            Output.error("Open System Settings > Privacy & Security > Full Disk Access.")
+        }
+    }
+
     static func run(silent: Bool = false, only: PermissionScope? = nil) throws {
         func info(_ message: String) { if !silent { print(message) } }
         func warning(_ message: String) { if !silent { Output.error(message) } }

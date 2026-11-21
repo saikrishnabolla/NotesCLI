@@ -45,6 +45,90 @@ final class CLITests: XCTestCase {
         return try Data(contentsOf: url)
     }
 
+    func testImportPreviewAndWriteRejectChangedSource() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let file = home.appendingPathComponent("report.html")
+        try """
+        <h1>Import Preview Test</h1><p>A readable paragraph.</p>
+        <table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>
+        <script>throw new Error("should not run")</script>
+        """.write(to: file, atomically: true, encoding: .utf8)
+        let args = ["import", "--backend", "fake", "--json", "--folder", "fake-folder"]
+        let preview = try run(args + ["--dry-run", "--", file.path], environment: environment)
+        XCTAssertEqual(preview.0, 0, preview.2)
+        let plan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(preview.1.utf8)) as? [String: Any])
+        let token = try XCTUnwrap(plan["token"] as? String)
+        let item = try XCTUnwrap((plan["items"] as? [[String: Any]])?.first)
+        XCTAssertEqual(item["title"] as? String, "Import Preview Test")
+        XCTAssertEqual(item["tableCount"] as? Int, 1)
+        XCTAssertFalse((item["warnings"] as? [String] ?? []).isEmpty)
+        let support = home.appendingPathComponent("Library/Application Support/NotesCLI/journal.sqlite")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: support.path))
+        let write = try run(args + ["--expect-plan", token, "--", file.path], environment: environment)
+        XCTAssertEqual(write.0, 0, write.2 + write.1)
+        let receipt = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(write.1.utf8)) as? [String: Any])
+        XCTAssertEqual((receipt["notes"] as? [[String: Any]])?.first?["localVerification"] as? String, "verified")
+        try "<h1>Changed</h1>".write(to: file, atomically: true, encoding: .utf8)
+        let stale = try run(args + ["--expect-plan", token, "--", file.path], environment: environment)
+        XCTAssertNotEqual(stale.0, 0)
+        XCTAssertTrue(stale.2.contains("import_plan_changed"), stale.2)
+    }
+
+    func testImportPreviewMarksSameTitleAndRequiresReview() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let file = home.appendingPathComponent("source.md")
+        try "# Welcome\n\nIndependent content".write(to: file, atomically: true, encoding: .utf8)
+        let args = ["import", "--backend", "fake", "--json", "--folder", "fake-folder"]
+        let preview = try run(args + ["--dry-run", "--", file.path], environment: environment)
+        XCTAssertEqual(preview.0, 0, preview.2)
+        XCTAssertTrue(preview.1.contains("Possible overlap"), preview.1)
+        let write = try run(args + ["--", file.path], environment: environment)
+        XCTAssertNotEqual(write.0, 0)
+        XCTAssertTrue(write.2.contains("import_overlap_review_required"), write.2)
+    }
+
+    func testImportDoesNotRetryUnverifiedWriteAfterNewPreview() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let file = home.appendingPathComponent("source.md")
+        try "# New report\n\nContent to import.".write(to: file, atomically: true, encoding: .utf8)
+        let args = ["import", "--backend", "fake", "--json", "--folder", "fake-folder"]
+        let write = try run(args + ["--", file.path], environment: environment)
+        XCTAssertEqual(write.0, 0, write.2)
+        let journal = try WriteJournal(url: home.appendingPathComponent("Library/Application Support/NotesCLI/journal.sqlite"))
+        let operation = try XCTUnwrap(journal.list(operation: "importDocument").first)
+        try journal.finish(operation.id, outcome: .unverified)
+        let preview = try run(args + ["--dry-run", "--", file.path], environment: environment)
+        let plan = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(preview.1.utf8)) as? [String: Any])
+        XCTAssertEqual((plan["items"] as? [[String: Any]])?.first?["blocked"] as? Bool, true)
+        let token = try XCTUnwrap(plan["token"] as? String)
+        let retry = try run(args + ["--expect-plan", token, "--", file.path], environment: environment)
+        XCTAssertNotEqual(retry.0, 0)
+        XCTAssertTrue(retry.2.contains("import_previous_write_unverified"), retry.2)
+        XCTAssertEqual(try journal.list(operation: "importDocument").count, 1)
+    }
+
+    func testCombinedImportRefusesToSwallowLaterDocumentsInAnOpenFence() throws {
+        let home = try temporaryHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let a = home.appendingPathComponent("first.md")
+        let b = home.appendingPathComponent("second.md")
+        try "# First\n\n```sh\nexample\n".write(to: a, atomically: true, encoding: .utf8)
+        try "# Second\n\nOrdinary text.".write(to: b, atomically: true, encoding: .utf8)
+        let options = ["import", "--backend", "fake", "--json", "--folder", "fake-folder", "--dry-run"]
+        let combined = try run(options + ["--", a.path, b.path], environment: environment)
+        XCTAssertNotEqual(combined.0, 0)
+        XCTAssertTrue(combined.2.contains("import_document_boundary"), combined.2)
+        let separate = try run(options + ["--mode", "separate", "--", a.path, b.path], environment: environment)
+        XCTAssertEqual(separate.0, 0, separate.2)
+    }
+
     func testAppendRecordsSnapshotAndJournalPreimage() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
@@ -227,7 +311,7 @@ final class CLITests: XCTestCase {
         }
     }
 
-    func testMCPStatusHasStableJSONForTheControlCenter() throws {
+    func testMCPStatusHasStableJSON() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let result = try run(["mcp", "status", "--json"], environment: [
@@ -260,27 +344,28 @@ final class CLITests: XCTestCase {
         XCTAssertEqual(report["checkOnly"] as? Bool, true)
         XCTAssertNotNil(report["complete"] as? Bool)
         let steps = try XCTUnwrap(report["steps"] as? [[String: Any]])
-        XCTAssertEqual(steps.first { $0["id"] as? String == "mcp-install" }?["status"] as? String, "pending")
+        XCTAssertFalse(steps.contains { $0["id"] as? String == "mcp-install" })
         XCTAssertEqual(steps.first { $0["id"] as? String == "host-install" }?["status"] as? String, "not_available")
         XCTAssertEqual(steps.first { $0["id"] as? String == "host-ready" }?["required"] as? Bool, false)
         let state = home.appendingPathComponent("Library/Application Support/NotesCLI/onboarding.json")
         XCTAssertFalse(FileManager.default.fileExists(atPath: state.path))
     }
 
-    func testOnboardKeepsDeliberatelyDisconnectedClientsComplete() throws {
+    func testOnboardDoesNotConfigureClients() throws {
         let home = try temporaryHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let support = home.appendingPathComponent("Library/Application Support/NotesCLI", isDirectory: true)
-        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        try Data(#"{"schemaVersion":1,"steps":{"mcp-install":"complete"}}"#.utf8)
-            .write(to: support.appendingPathComponent("onboarding.json"))
-        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path]
+        let executable = home.appendingPathComponent("codex")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let environment = ["HOME": home.path, "CFFIXED_USER_HOME": home.path, "PATH": "\(home.path):/usr/bin:/bin"]
 
-        let result = try run(["--backend", "fake", "onboard", "--check-only", "--json"], environment: environment)
+        let result = try run(["--backend", "fake", "onboard", "--skip-permission-guide", "--json"], environment: environment)
         XCTAssertEqual(result.0, 0, result.2)
         let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any])
         let steps = try XCTUnwrap(report["steps"] as? [[String: Any]])
-        XCTAssertEqual(steps.first { $0["id"] as? String == "mcp-install" }?["status"] as? String, "complete")
+        XCTAssertEqual(report["complete"] as? Bool, true)
+        XCTAssertFalse(steps.contains { $0["id"] as? String == "mcp-install" })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex/config.toml").path))
     }
 
     func testOnboardRecognizesInstalledNotesCLIApp() throws {

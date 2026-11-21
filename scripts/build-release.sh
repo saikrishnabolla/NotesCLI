@@ -7,13 +7,12 @@ IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bol
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
 HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"
 ENTITLEMENTS="$ROOT/packaging/macos/notescli.entitlements"
-ICON_SOURCE="$ROOT/packaging/macos/AppIcon.png"
-ICON_GENERATOR="$ROOT/packaging/macos/generate-app-icon.swift"
+ICON_SOURCE="$ROOT/packaging/macos/AppIcon.icon"
 OUTPUT_DIR="${NOTESCLI_RELEASE_DIR:-$ROOT/dist}"
 NOTARY_PROFILE="${NOTESCLI_NOTARY_PROFILE:-}"
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "build-release.sh requires macOS." >&2; exit 1; }
-[[ -f "$INFO_PLIST" && -f "$HOST_INFO_PLIST" && -f "$ENTITLEMENTS" && -f "$ICON_SOURCE" && -f "$ICON_GENERATOR" ]] || { echo "Release metadata is missing." >&2; exit 1; }
+[[ -f "$INFO_PLIST" && -f "$HOST_INFO_PLIST" && -f "$ENTITLEMENTS" && -f "$ICON_SOURCE/icon.json" ]] || { echo "Release metadata is missing." >&2; exit 1; }
 if [[ "$IDENTITY" != "-" && -z "$NOTARY_PROFILE" ]]; then
     echo "NOTESCLI_NOTARY_PROFILE is required for Developer ID releases." >&2
     exit 1
@@ -31,10 +30,14 @@ mkdir -p "$HOST_APP/Contents/MacOS" "$HOST_APP/Contents/Helpers" "$HOST_APP/Cont
 cp "$HOST_INFO_PLIST" "$HOST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$HOST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$HOST_APP/Contents/Info.plist"
-ICONSET="$STAGING/AppIcon.iconset"
-xcrun swift "$ICON_GENERATOR" "$ICON_SOURCE" "$ICONSET"
-iconutil -c icns "$ICONSET" -o "$HOST_APP/Contents/Resources/AppIcon.icns"
-[[ -s "$HOST_APP/Contents/Resources/AppIcon.icns" ]] || { echo "Could not build AppIcon.icns." >&2; exit 1; }
+ICON_PLIST="$STAGING/AppIcon-Info.plist"
+xcrun actool --compile "$HOST_APP/Contents/Resources" --platform macosx \
+    --minimum-deployment-target "$(plutil -extract LSMinimumSystemVersion raw "$HOST_INFO_PLIST")" \
+    --app-icon AppIcon --output-partial-info-plist "$ICON_PLIST" "$ICON_SOURCE"
+plutil -insert CFBundleIconName -string "$(plutil -extract CFBundleIconName raw "$ICON_PLIST")" "$HOST_APP/Contents/Info.plist"
+[[ -s "$HOST_APP/Contents/Resources/Assets.car" && -s "$HOST_APP/Contents/Resources/AppIcon.icns" ]] || {
+    echo "Could not compile the layered icon and its macOS fallback." >&2; exit 1;
+}
 
 echo "Building notescli $VERSION for arm64 and x86_64"
 NOTESCLI_INFO_PLIST="$RELEASE_INFO_PLIST" swift build --package-path "$ROOT" -c release --arch arm64 --arch x86_64
@@ -149,9 +152,10 @@ echo "Camera usage descriptions present"
 [[ "$(plutil -extract CFBundleName raw "$HOST_APP/Contents/Info.plist")" == "Notes CLI" ]]
 [[ "$(plutil -extract CFBundleExecutable raw "$HOST_APP/Contents/Info.plist")" == "Notes CLI" ]]
 [[ "$(plutil -extract CFBundleIconFile raw "$HOST_APP/Contents/Info.plist")" == "AppIcon" ]]
+[[ "$(plutil -extract CFBundleIconName raw "$HOST_APP/Contents/Info.plist")" == "AppIcon" ]]
 iconutil -c iconset "$HOST_APP/Contents/Resources/AppIcon.icns" -o "$STAGING/verified-AppIcon.iconset"
-[[ -s "$STAGING/verified-AppIcon.iconset/icon_16x16.png" && -s "$STAGING/verified-AppIcon.iconset/icon_512x512@2x.png" ]] || {
-    echo "AppIcon.icns does not contain the required icon sizes." >&2; exit 1;
+[[ -s "$STAGING/verified-AppIcon.iconset/icon_16x16.png" ]] || {
+    echo "AppIcon.icns does not contain a small fallback icon." >&2; exit 1;
 }
 
 if [[ -n "$NOTARY_PROFILE" ]]; then
@@ -188,7 +192,9 @@ for EXTRACTED in "$ZIP_VERIFY" "$TAR_VERIFY"; do
     codesign --verify --strict --verbose=4 "$EXTRACTED/notescli"
     codesign --verify --deep --strict --verbose=4 "$EXTRACTED/Notes CLI.app"
     [[ "$(plutil -extract CFBundleIconFile raw "$EXTRACTED/Notes CLI.app/Contents/Info.plist")" == "AppIcon" ]]
+    [[ "$(plutil -extract CFBundleIconName raw "$EXTRACTED/Notes CLI.app/Contents/Info.plist")" == "AppIcon" ]]
     [[ -s "$EXTRACTED/Notes CLI.app/Contents/Resources/AppIcon.icns" ]]
+    [[ -s "$EXTRACTED/Notes CLI.app/Contents/Resources/Assets.car" ]]
     if [[ -n "$NOTARY_PROFILE" ]]; then xcrun stapler validate "$EXTRACTED/Notes CLI.app"; fi
     if [[ "$IDENTITY" != "-" ]]; then spctl -a -t execute -vv "$EXTRACTED/Notes CLI.app"; fi
 done

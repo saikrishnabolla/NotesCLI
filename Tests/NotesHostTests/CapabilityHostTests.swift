@@ -12,7 +12,7 @@ final class CapabilityHostTests: XCTestCase {
     func testRequestCarriesHostProtocolAndCLIRelease() {
         let request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
         XCTAssertEqual(request.protocolVersion, 2)
-        XCTAssertEqual(request.clientVersion, "1.1.12")
+        XCTAssertEqual(request.clientVersion, "1.1.13")
     }
 
     func testVersionMismatchExplainsHowToUpgradeTheHost() {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.13
+
+- Import Markdown and HTML with inline files, a preview, and checks for changed sources and duplicate imports.
+- Keep Notes CLI.app in the background. Onboarding checks Notes access without setting up AI tools or remote access.
+- Use a layered folded-note icon that adapts to light and dark mode.
+
 ## 1.1.12
 
 ### Changed

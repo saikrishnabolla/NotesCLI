@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${NOTESCLI_VERSION:-1.1.12}"
+VERSION="${NOTESCLI_VERSION:-1.1.13}"
 IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bolla (GXKRUPGJVF)}"
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
 HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"
@@ -201,6 +201,8 @@ done
 
 if [[ "$IDENTITY" == "-" ]]; then
     echo "Skipping the Homebrew checksum update for an ad hoc build"
+elif [[ "${NOTESCLI_SKIP_FORMULA_UPDATE:-0}" == "1" ]]; then
+    echo "Skipping the Homebrew checksum update for a local build"
 else
     "$ROOT/scripts/update-formula.sh" --version "$VERSION" --archive "$TARBALL"
 fi

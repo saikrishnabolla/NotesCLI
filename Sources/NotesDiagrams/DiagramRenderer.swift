@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CryptoKit
 import Foundation
 import WebKit
 
@@ -17,7 +18,13 @@ public final class DiagramRenderer {
     }
 
     public func render(file: URL, options: DiagramRenderOptions) throws -> RenderedDiagram {
-        let source = try DiagramSource(file: file)
+        try render(source: DiagramSource(file: file), options: options)
+    }
+
+    public func render(source: DiagramSource, options: DiagramRenderOptions) throws -> RenderedDiagram {
+        guard !source.data.isEmpty, source.data.count <= DiagramLimits.maxSourceBytes else {
+            throw DiagramError.renderFailed("Diagram source is empty or too large.")
+        }
         let timeout = self.timeout
         if !Thread.isMainThread {
             let result = DiagramRenderResult()
@@ -88,6 +95,7 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
         guard let text = String(data: source.data, encoding: .utf8) else {
             throw DiagramError.renderFailed("Diagram source must be UTF-8.")
         }
+        let mermaidBundle = try source.mediaType == DiagramSource.mermaidMediaType ? Self.mermaidBundle() : nil
         let ruleDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("notescli-diagram-rules-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: ruleDirectory) }
         let rules = try compileRules(in: ruleDirectory)
@@ -102,10 +110,13 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
         webView.underPageBackgroundColor = .clear
         webView.appearance = NSAppearance(named: options.dark ? .darkAqua : .aqua)
 
-        let html = DiagramRenderer.isolatedHTML(source.mediaType == "image/svg+xml" ? Self.wrap(svg: text) : text)
+        let body = mermaidBundle != nil ? "<!doctype html><html><head></head><body style=\"margin:0\"></body></html>" :
+            source.mediaType == "image/svg+xml" ? Self.wrap(svg: text) : text
+        let html = DiagramRenderer.isolatedHTML(body)
         webView.loadHTMLString(html, baseURL: URL(string: "about:blank"))
         try wait(seconds: 20) { navigationFinished }
         if let navigationError { throw DiagramError.renderFailed("WebKit could not load the diagram: \(navigationError.localizedDescription)") }
+        if let mermaidBundle { try renderMermaid(text, using: mermaidBundle, in: webView, dark: options.dark) }
 
         let bounds = try contentBounds(webView: webView, options: options)
         guard bounds.width <= webView.bounds.width, bounds.height <= webView.bounds.height else {
@@ -118,6 +129,47 @@ private final class WebKitDiagramRenderer: NSObject, WKNavigationDelegate {
         let embedded = try DiagramSourceMetadata.embed(source: source.data, filename: source.filename,
                                                        mediaType: source.mediaType, in: png)
         return RenderedDiagram(png: embedded, source: source, pixelSize: pixelSize)
+    }
+
+    /// Only this pinned upstream bundle can execute in the isolated client world.
+    private static func mermaidBundle() throws -> String {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/NotesCLI", isDirectory: true)
+        let file = directory.appendingPathComponent("mermaid.min.js")
+        guard let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 8 * 1024 * 1024,
+              let data = try? Data(contentsOf: file), data.count <= 8 * 1024 * 1024,
+              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() ==
+                "336df803d87a38b70a01e736e666c8f7601d2ce42f5e47c8fafe5d721074b9a3",
+              let script = String(data: data, encoding: .utf8) else {
+            throw DiagramError.renderFailed("Install the official Mermaid 12.3.0 mermaid.min.js in ~/Library/Application Support/NotesCLI.")
+        }
+        return script
+    }
+
+    private func renderMermaid(_ source: String, using bundle: String, in webView: WKWebView, dark: Bool) throws {
+        guard source.utf8.count <= 50_000 else {
+            throw DiagramError.renderFailed("Mermaid source exceeds 50,000 bytes.")
+        }
+        var load: Result<Any, Error>?
+        webView.evaluateJavaScript(bundle + "\nvoid 0;", in: nil, in: .defaultClient) { load = $0 }
+        try wait(seconds: 12) { load != nil }
+        guard case .success? = load else { throw DiagramError.renderFailed("The Mermaid renderer did not load.") }
+        let script = """
+        const renderer = globalThis.mermaid;
+        renderer.initialize({ startOnLoad: false, securityLevel: 'strict', maxTextSize: 50000,
+                              suppressErrorRendering: true, theme: dark ? 'dark' : 'default',
+                              flowchart: { useMaxWidth: false } });
+        const {svg} = await renderer.render('notescli-mermaid', source);
+        document.body.innerHTML = svg;
+        return document.body.querySelector(':scope > svg') !== null;
+        """
+        var result: Result<Any, Error>?
+        webView.callAsyncJavaScript(script, arguments: ["source": source, "dark": dark],
+                                   in: nil, in: .defaultClient) { result = $0 }
+        try wait(seconds: 12) { result != nil }
+        guard case .success(let value)? = result, (value as? Bool) == true else {
+            throw DiagramError.renderFailed("Mermaid could not render this diagram.")
+        }
     }
 
     private func compileRules(in directory: URL) throws -> WKContentRuleList {

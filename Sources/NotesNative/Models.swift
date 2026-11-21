@@ -112,15 +112,17 @@ public struct NativeMarkdownInput: Sendable {
     public var trailingAttachments: [FrozenAttachmentInput]
     public var expectedAssetHashes: [String: String]?
     public var importDestination: NativeImportDestination?
+    public var renderDiagrams: Bool
 
     public init(source: String, assetBaseDirectory: URL? = nil,
                 trailingAttachments: [FrozenAttachmentInput] = [], expectedAssetHashes: [String: String]? = nil,
-                importDestination: NativeImportDestination? = nil) {
+                importDestination: NativeImportDestination? = nil, renderDiagrams: Bool = true) {
         self.source = source
         self.assetBaseDirectory = assetBaseDirectory
         self.trailingAttachments = trailingAttachments
         self.expectedAssetHashes = expectedAssetHashes
         self.importDestination = importDestination
+        self.renderDiagrams = renderDiagrams
     }
 }
 

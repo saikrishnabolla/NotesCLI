@@ -146,6 +146,115 @@ final class NotesMarkdownDocumentTests: XCTestCase {
         XCTAssertFalse(table[1][0].plainText.contains("notescli-empty-paragraph"))
     }
 
+    func testFlattenedTableBulletsStartOnNewLinesWithoutChangingLinksOrStyles() throws {
+        let document = NotesMarkdownDocument(parsing: """
+        | Project | Notes |
+        | --- | --- |
+        | Example | • First 🧪 [link](https://example.com) • **Second** • Third<br>• Already separate • Last |
+        | Wrapped | <p>• One • Two</p> |
+        """)
+
+        let table = try XCTUnwrap(document.paragraphs.first?.table)
+        XCTAssertEqual(table.map { $0.map(\.plainText) }, [
+            ["Project", "Notes"],
+            ["Example", "• First 🧪 link\n• Second\n• Third\n• Already separate\n• Last"],
+            ["Wrapped", "• One\n• Two"],
+        ])
+        XCTAssertTrue(table[1][1].runs.contains { $0.text == "link" && $0.link == "https://example.com" })
+        XCTAssertTrue(table[1][1].runs.contains { $0.text == "Second" && $0.bold })
+        XCTAssertTrue(document.html.contains("link</a><br>• <strong>Second</strong><br>• Third"))
+    }
+
+    func testTableBulletNormalizationLeavesProseCodeAndLinkLabelsAlone() throws {
+        let document = NotesMarkdownDocument(parsing: """
+        • First • Second
+
+        | Prose | Code | Link label | List with inline code and a link |
+        | --- | --- | --- | --- |
+        | Ads • Analytics · SEO. | `• First • Second` | [• First • Second](https://example.com) | • `a • b` [c • d](https://example.com) • Done |
+        """)
+
+        XCTAssertEqual(document.paragraphs.first?.plainText, "• First • Second")
+        let cells = try XCTUnwrap(document.paragraphs.last?.table?.last)
+        XCTAssertEqual(cells.map(\.plainText), [
+            "Ads • Analytics · SEO.", "• First • Second", "• First • Second", "• a • b c • d\n• Done",
+        ])
+        XCTAssertEqual(cells[1].runs.first?.code, true)
+        XCTAssertEqual(cells[2].runs.first?.link, "https://example.com")
+    }
+
+    func testExportedHTMLHeadersBecomeFormattedCellsWithoutChangingTheColumn() throws {
+        let document = NotesMarkdownDocument(parsing: #"""
+        | <p style="text-align:center;margin:0"><b>Week</b></p> | <P STYLE='margin: 0; text-align: RIGHT'><strong><i>[Focus](https://example.com)</i></strong></P> |
+        | :--- | --- |
+        | 1 | Regular cell |
+        """#)
+
+        let table = try XCTUnwrap(document.paragraphs.first?.table)
+        XCTAssertEqual(table.map { $0.map(\.plainText) }, [["Week", "Focus"], ["1", "Regular cell"]])
+        XCTAssertEqual(table.map { $0.map(\.alignment) }, [[.center, .right], [.left, nil]])
+        XCTAssertEqual(table[0][0].runs, [.init(text: "Week", bold: true)])
+        XCTAssertEqual(table[0][1].runs, [.init(text: "Focus", bold: true, italic: true, link: "https://example.com")])
+        XCTAssertTrue(document.html.contains(#"<th style="text-align:center"><strong>Week</strong></th>"#))
+        XCTAssertFalse(document.hasLiteralStyledParagraphHTML)
+    }
+
+    func testExportedEmptyHTMLParagraphPreservesBlankLineAndQuote() {
+        let document = NotesMarkdownDocument(parsing: #"""
+        Before
+
+        > <p style="text-align:center;margin:0">
+        > </p>
+
+        After <em>italic</em>.
+        """#)
+
+        XCTAssertEqual(document.paragraphs.map(\.plainText), ["Before", "", "After italic."])
+        XCTAssertEqual(document.paragraphs.map(\.quoteDepth), [0, 1, 0])
+        XCTAssertEqual(document.html, "<p>Before</p>\n<blockquote><p></p></blockquote>\n<p>After <em>italic</em>.</p>")
+        XCTAssertFalse(document.hasLiteralStyledParagraphHTML)
+    }
+
+    func testUnsupportedLayoutRemainsLiteralAndIsFlagged() throws {
+        let document = NotesMarkdownDocument(parsing: #"""
+        <p style="text-align:center">Standalone prose</p>
+
+        | Unsupported CSS | Partial wrapper | Multiple paragraphs |
+        | --- | --- | --- |
+        | <p style="margin:2px">Keep</p> | Prefix <p style="text-align:center">Keep</p> | <p style="text-align:center">A</p><p>B</p> |
+        """#)
+        XCTAssertTrue(document.hasLiteralStyledParagraphHTML)
+        XCTAssertEqual(document.paragraphs.first?.plainText, #"<p style="text-align:center">Standalone prose</p>"#)
+        let cells = try XCTUnwrap(document.paragraphs.last?.table?.last)
+        XCTAssertEqual(cells.map(\.plainText), [
+            #"<p style="margin:2px">Keep</p>"#,
+            #"Prefix <p style="text-align:center">Keep</p>"#,
+            #"<p style="text-align:center">A</p><p>B</p>"#,
+        ])
+        XCTAssertFalse(document.html.contains("<p style="))
+    }
+
+    func testHTMLExamplesInCodeAndEscapedTextAreNotInterpreted() throws {
+        let document = NotesMarkdownDocument(parsing: #"""
+        ```html
+        <p style="text-align:center;margin:0"><b>Example</b></p>
+        ```
+
+        | Escaped | Inline code |
+        | --- | --- |
+        | \<p style="text-align:center">\<b>Example\</b>\</p> | `<p style="text-align:center"><b>Example</b></p>` |
+        """#)
+
+        XCTAssertEqual(document.paragraphs.first?.plainText, #"<p style="text-align:center;margin:0"><b>Example</b></p>"#)
+        XCTAssertEqual(document.paragraphs.first?.kind, .monospaced)
+        let cells = try XCTUnwrap(document.paragraphs.last?.table?.last)
+        XCTAssertEqual(cells.map(\.plainText), Array(repeating: #"<p style="text-align:center"><b>Example</b></p>"#, count: 2))
+        XCTAssertEqual(cells.map(\.alignment), [nil, nil])
+        XCTAssertEqual(cells[0].runs.first?.bold, false)
+        XCTAssertEqual(cells[1].runs.first?.code, true)
+        XCTAssertFalse(document.hasLiteralStyledParagraphHTML)
+    }
+
     func testNativeWriterRequirementIncludesResourcesAndAppleFormatting() {
         XCTAssertFalse(NotesMarkdownDocument(parsing: "Plain **bold** [link](https://example.com)").requiresNativeWriter)
         for markdown in [
@@ -160,6 +269,40 @@ final class NotesMarkdownDocumentTests: XCTestCase {
         ] {
             XCTAssertTrue(NotesMarkdownDocument(parsing: markdown).requiresNativeWriter, markdown)
         }
+    }
+
+    func testDiagramResourcesKeepBlockOrderAndFallbackToOriginalCode() {
+        let markdown = """
+        Before
+
+        - Step
+
+          ```mermaid
+          flowchart LR
+          ```
+
+        ```svg
+        invalid SVG
+        ```
+
+        ```swift
+        let example = 1
+        ```
+
+        After
+        """
+        var languages: [String] = []
+        let document = NotesMarkdownDocument(parsing: markdown) { language, source in
+            languages.append(language)
+            guard language == "mermaid" else { return nil }
+            XCTAssertEqual(source.trimmingCharacters(in: .newlines), "flowchart LR")
+            return NotesMarkdownResource(source: "diagram.png", alt: "Flowchart")
+        }
+        XCTAssertEqual(languages, ["mermaid", "svg"])
+        XCTAssertEqual(document.paragraphs.map(\.plainText),
+                       ["Before", "Step", "Flowchart", "invalid SVG", "let example = 1", "After"])
+        XCTAssertEqual(document.paragraphs[2].indent, 1)
+        XCTAssertEqual(document.paragraphs[3].kind, .monospaced)
     }
 }
 

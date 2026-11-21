@@ -423,7 +423,7 @@ struct ImportCommand: ParsableCommand {
                     let expectedDestination = NativeImportDestination(folderID: folder.id, folderPath: folder.path,
                         noteRevision: target.map(NoteRevision.importValue))
                     let input = NativeMarkdownInput(source: item.body, trailingAttachments: files,
-                        expectedAssetHashes: assets, importDestination: expectedDestination)
+                        expectedAssetHashes: assets, importDestination: expectedDestination, renderDiagrams: false)
                     let value: WriteResult
                     if let current {
                         value = try NativeNotesWriter().prependMarkdown(current.summary.id.uuid, input: input,

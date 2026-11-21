@@ -28,6 +28,11 @@ struct ReportMarkdownPlan {
     var requested: ReportElementCounts
 }
 
+func markdownDiagramWarning(_ language: String, _ error: Error) {
+    let reason = (error as? DiagramError)?.description ?? "Image could not be prepared."
+    FileHandle.standardError.write(Data("Warning: \(language) diagram kept as code. \(reason)\n".utf8))
+}
+
 enum ReportMarkdownPreprocessor {
     typealias ImageDownloader = (URL) throws -> URL
     typealias DiagramRenderer = (_ language: String, _ source: String) throws -> URL
@@ -43,7 +48,7 @@ enum ReportMarkdownPreprocessor {
         var markdown = source.replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
         markdown = stripDuplicateTitle(title, from: markdown)
-        markdown = try replaceDiagramFences(in: markdown, requested: &requested, render: renderDiagram)
+        markdown = replaceDiagramFences(in: markdown, requested: &requested, render: renderDiagram)
         markdown = try replaceRemoteImages(in: markdown, requested: &requested, download: downloadImage)
         markdown = rewriteFootnotes(in: markdown, requested: &requested)
         markdown = rewriteBareURLs(in: markdown, requested: &requested)
@@ -55,8 +60,7 @@ enum ReportMarkdownPreprocessor {
             markdown = markdown.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + markers
             requested.tags += normalizedTags.count
         }
-        markdown = markdown.replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        markdown = markdown.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let localResources = NotesMarkdownDocument(parsing: markdown).localResources
         for resource in localResources {
@@ -89,38 +93,46 @@ enum ReportMarkdownPreprocessor {
     }
 
     private static func replaceDiagramFences(in markdown: String, requested: inout ReportElementCounts,
-                                             render: DiagramRenderer) throws -> String {
+                                             render: DiagramRenderer) -> String {
         let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var output: [String] = [], index = 0
         while index < lines.count {
             let opening = lines[index].trimmingCharacters(in: .whitespaces)
-            guard opening.hasPrefix("```") else { output.append(lines[index]); index += 1; continue }
-            let info = String(opening.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let delimiter = fenceDelimiter(opening) else { output.append(lines[index]); index += 1; continue }
+            let info = String(opening.dropFirst(delimiter.count)).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let language: String?
             switch info.split(whereSeparator: \Character.isWhitespace).map(String.init) {
             case ["svg"]: language = "svg"
-            case ["html", "diagram"]: language = "html"
+            case ["html", "diagram"], ["diagram"]: language = "html"
             case ["mermaid"]: language = "mermaid"
             default: language = nil
             }
-            guard let language else {
-                output.append(lines[index]); index += 1; continue
-            }
             var end = index + 1
-            while end < lines.count, lines[end].trimmingCharacters(in: .whitespaces) != "```" { end += 1 }
-            guard end < lines.count else {
-                throw NotesError("invalid_report_diagram", "The \(language) diagram fence is not closed.")
+            while end < lines.count {
+                let candidate = lines[end].trimmingCharacters(in: .whitespaces)
+                if closesFence(candidate, delimiter: delimiter) { break }
+                end += 1
             }
-            guard language != "mermaid" else {
-                throw NotesError("unsupported_report_diagram",
-                                 "Mermaid report fences are not supported without a bundled renderer.",
-                                 hint: "Use a self-contained SVG or HTML fence so the report can render offline.")
+            guard end < lines.count else {
+                if let language { markdownDiagramWarning(language, DiagramError.renderFailed("The fence is not closed.")) }
+                output.append(contentsOf: lines[index...])
+                break
+            }
+            guard let language else {
+                output.append(contentsOf: lines[index...end])
+                index = end + 1
+                continue
             }
             let source = lines[(index + 1)..<end].joined(separator: "\n")
-            let file = try render(language, source)
-            requested.diagrams += 1
-            requested.images += 1
-            output.append("![Diagram \(requested.diagrams)](<\(file.absoluteString)>)")
+            do {
+                let file = try render(language, source)
+                requested.diagrams += 1
+                requested.images += 1
+                output.append("![Diagram \(requested.diagrams)](<\(file.absoluteString)>)")
+            } catch {
+                markdownDiagramWarning(language, error)
+                output.append(contentsOf: lines[index...end])
+            }
             index = end + 1
         }
         return output.joined(separator: "\n")
@@ -269,7 +281,7 @@ enum ReportMarkdownPreprocessor {
         return lines.map { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if let current = fence {
-                if trimmed == current { fence = nil }
+                if closesFence(trimmed, delimiter: current) { fence = nil }
                 return line
             }
             if let opening = fenceDelimiter(trimmed) {
@@ -285,6 +297,10 @@ enum ReportMarkdownPreprocessor {
         guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
         let count = trimmed.prefix { $0 == first }.count
         return count >= 3 ? String(repeating: first, count: count) : nil
+    }
+
+    private static func closesFence(_ line: String, delimiter: String) -> Bool {
+        line.hasPrefix(delimiter) && line.allSatisfy { $0 == delimiter.first }
     }
 
     private static func mapInlineProse(in line: String, transform: (String) -> String) -> String {
@@ -311,7 +327,7 @@ enum ReportMarkdownPreprocessor {
         let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let marker = "<!-- notescli-empty-paragraph:0:0 -->"
         var output: [String] = []
-        var insideFence = false
+        var insideFence: String?
         var seenHeading = false
 
         func previousContentLine() -> String? {
@@ -328,25 +344,28 @@ enum ReportMarkdownPreprocessor {
         for index in lines.indices {
             let line = lines[index]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let fence = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
-            if fence {
+            if let current = insideFence {
                 output.append(line)
-                insideFence.toggle()
+                if closesFence(trimmed, delimiter: current) { insideFence = nil }
                 continue
             }
-            if !insideFence {
-                let heading = isReportHeading(trimmed)
-                let table = isTableStart(lines: lines, at: index)
-                let checklist = isChecklistStart(line)
-                let previous = previousContentLine()
-                if heading {
-                    if seenHeading { appendSpacer() }
-                    seenHeading = true
-                } else if table, previous.map(isParagraphLine) == true {
-                    appendSpacer()
-                } else if checklist, previous.map(isTableRow) == true {
-                    appendSpacer()
-                }
+            if let delimiter = fenceDelimiter(trimmed) {
+                output.append(line)
+                insideFence = delimiter
+                continue
+            }
+            if line.isEmpty && output.last == "" { continue }
+            let heading = isReportHeading(trimmed)
+            let table = isTableStart(lines: lines, at: index)
+            let checklist = isChecklistStart(line)
+            let previous = previousContentLine()
+            if heading {
+                if seenHeading { appendSpacer() }
+                seenHeading = true
+            } else if table, previous.map(isParagraphLine) == true {
+                appendSpacer()
+            } else if checklist, previous.map(isTableRow) == true {
+                appendSpacer()
             }
             output.append(line)
         }
@@ -482,20 +501,13 @@ public final class NotesReportWriter: @unchecked Sendable {
             downloadImage: { try downloader.download($0, kind: .image) },
             renderDiagram: { language, source in
                 diagramIndex += 1
-                let sourceURL = directory.appendingPathComponent("diagram-source-\(diagramIndex).\(language)")
                 let outputURL = directory.appendingPathComponent("notescli-report-diagram-\(diagramIndex).png")
-                guard let data = source.data(using: .utf8), data.count <= DiagramLimits.maxSourceBytes else {
-                    throw NotesError("diagram_too_large", "A report diagram exceeds the \(DiagramLimits.maxSourceBytes)-byte limit.")
-                }
-                try data.write(to: sourceURL, options: [.atomic])
-                do {
-                    let options = try DiagramRenderOptions(width: 700, scale: 2, background: .auto, dark: false)
-                    let rendered = try NotesDiagrams.DiagramRenderer().render(file: sourceURL, options: options)
-                    try rendered.png.write(to: outputURL, options: [.atomic])
-                    return outputURL
-                } catch let error as DiagramError {
-                    throw NotesError("diagram_render_failed", error.description)
-                }
+                let rendered = try NotesDiagrams.DiagramRenderer().render(
+                    source: DiagramSource(markdownLanguage: language, source: source, name: "diagram-source-\(diagramIndex)"),
+                    options: DiagramRenderOptions()
+                )
+                try rendered.png.write(to: outputURL, options: [.atomic])
+                return outputURL
             },
             stageLocalResource: { try stager.stage($0) }
         )
@@ -521,7 +533,7 @@ public final class NotesReportWriter: @unchecked Sendable {
             title: title,
             input: NativeMarkdownInput(source: plan.markdown,
                                        assetBaseDirectory: request.assetBaseDirectory,
-                                       trailingAttachments: trailing),
+                                       trailingAttachments: trailing, renderDiagrams: false),
             folder: target.folder.id,
             allowShared: request.allowShared
         )

@@ -2,7 +2,7 @@
 
 This reference follows `notescli --help` from Notes CLI 1.1.12.
 
-`notescli report create --title TITLE --file REPORT.md [--folder FOLDER] [--tags TAGS] [--replace]` creates and verifies one native report. `--replace` updates the report with the same title in the target folder, or creates it on the first run. Markdown may include local or HTTPS images, bare-URL preview cards, native tables, tags, checklists, attachments, citations, and dividers. An `svg` fence or an `html diagram` fence renders as a diagram; a plain `html` fence stays code.
+`notescli report create --title TITLE --file REPORT.md [--folder FOLDER] [--tags TAGS] [--replace]` creates and verifies one native report. `--replace` updates the report with the same title in the target folder, or creates it on the first run. Markdown may include local or HTTPS images, bare-URL preview cards, native tables, tags, checklists, attachments, citations, and dividers. Reports render `svg`, `diagram`, `html diagram`, and `mermaid` fences. If rendering fails, the fence stays as code. Plain `html` fences always stay as code.
 
 ## Global options
 
@@ -186,16 +186,16 @@ Set `import_token` to the preview's `token`. The token prevents writing a change
 ## Diagrams
 
 ```text
-notescli diagram add <note> --file <diagram.svg|diagram.html>
+notescli diagram add <note> --file <diagram.svg|diagram.html|diagram.mmd>
         [--as image|drawing] [--width <pixels>] [--scale 2|3]
         [--background white|transparent|auto] [--dark]
-notescli diagram create --folder <folder> --title <title> --file <diagram.svg|diagram.html>
+notescli diagram create --folder <folder> --title <title> --file <diagram.svg|diagram.html|diagram.mmd>
         [--as image|drawing] [--width <pixels>] [--scale 2|3]
         [--background white|transparent|auto] [--dark]
 notescli diagram export <note> --output <file> [--attachment-id <id>]
 ```
 
-Image mode is the default. WebKit renders the file with JavaScript off and no file or network access: only inline styles and `data:` images and fonts load, so linked web fonts fall back to installed fonts. Rendering stops after 30 seconds, and files over 5 MB or 50,000 elements are refused. WebKit crops the page to its visible content, renders at 700 pixels and 2x scale by default, and inserts one PNG through the native frozen-byte path. The PNG contains the original SVG or HTML in an iTXt chunk. `diagram export` recovers it; pass `--attachment-id` when a note has more than one diagram.
+Image mode is the default. SVG and HTML render without JavaScript or access to local files or the network. Mermaid needs the official Mermaid 12.3.0 `mermaid.min.js` at `~/Library/Application Support/NotesCLI/mermaid.min.js`. Notes CLI checks its hash and runs it in isolation; the installer does not include it. The PNG contains the original SVG, HTML, or Mermaid source. Use `diagram export` to recover it, and pass `--attachment-id` when a note has more than one diagram.
 
 `--background auto` keeps an opaque source background. A transparent source gets a white fallback, or a dark fallback with `--dark`. Notes does not invert images in dark mode. `--background transparent` clears the page background but leaves any background drawn inside the SVG. `--as drawing` accepts SVG and converts its supported shapes and paths to editable Paper strokes at the requested width. Outline text before conversion because SVG text nodes are not PencilKit strokes.
 

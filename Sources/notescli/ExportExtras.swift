@@ -32,6 +32,7 @@ private struct FilePush: ParsableCommand {
         let backend = try write.dryRun ? options.backends() : options.writable()
         let url = fileURL(path)
         let markdown = MarkdownFile.parse(try InputFile.readText(url, kind: "Markdown file", maxBytes: InputFile.maxTextBytes), fallbackTitle: url.deletingPathExtension().lastPathComponent)
+        warnAboutMarkdownHTML(markdown.body)
         guard let noteID = markdown.noteID else { throw NotesError("invalid_file", "The Markdown file must contain notes-id front matter.") }
         let note = try backend.reader.note(noteID)
         let plan = DryRunPlan(operation: "filePush", target: note.summary.id.uuid, arguments: ["path": url.path],

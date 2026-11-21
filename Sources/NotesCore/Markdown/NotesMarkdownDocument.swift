@@ -109,12 +109,17 @@ public struct NotesMarkdownParagraph: Sendable, Equatable {
 public struct NotesMarkdownDocument: Sendable {
     private let blocks: [Block]
     public let paragraphs: [NotesMarkdownParagraph]
+    public let hasLiteralStyledParagraphHTML: Bool
 
-    public init(parsing source: String) {
+    public init(parsing source: String, diagramResource: ((String, String) -> NotesMarkdownResource?)? = nil) {
         let document = Markdown.Document(parsing: source, options: [.disableSmartOpts])
-        let blocks = document.children.flatMap(Self.block)
+        var hasLiteralStyledParagraphHTML = false
+        let blocks = document.children.flatMap {
+            Self.block($0, warning: &hasLiteralStyledParagraphHTML, diagramResource: diagramResource)
+        }
         self.blocks = blocks
         self.paragraphs = Self.flatten(blocks)
+        self.hasLiteralStyledParagraphHTML = hasLiteralStyledParagraphHTML
     }
 
     public var resources: [NotesMarkdownResource] {
@@ -172,7 +177,7 @@ private extension NotesMarkdownDocument {
         case code(language: String?, value: String)
         case table([[NotesMarkdownCell]])
         case divider
-        case emptyParagraph(indent: Int, quoteDepth: Int)
+        case emptyParagraph(indent: Int?, quoteDepth: Int?)
     }
 
     struct Item: Sendable {
@@ -191,18 +196,37 @@ private extension NotesMarkdownDocument {
         var link: String?
     }
 
-    static func block(_ markup: Markup) -> [Block] {
-        if let paragraph = markup as? Paragraph { return [.paragraph(inlines(paragraph))] }
-        if let heading = markup as? Heading { return [.heading(heading.level, inlines(heading))] }
-        if let quote = markup as? BlockQuote { return [.quote(quote.children.flatMap(block))] }
+    static func block(_ markup: Markup, warning: inout Bool,
+                      diagramResource: ((String, String) -> NotesMarkdownResource?)?) -> [Block] {
+        if let paragraph = markup as? Paragraph {
+            warning = warning || containsStyledParagraphHTML(paragraph)
+            return [.paragraph(inlines(paragraph))]
+        }
+        if let heading = markup as? Heading {
+            warning = warning || containsStyledParagraphHTML(heading)
+            return [.heading(heading.level, inlines(heading))]
+        }
+        if let quote = markup as? BlockQuote {
+            return [.quote(quote.children.flatMap { block($0, warning: &warning, diagramResource: diagramResource) })]
+        }
         if let list = markup as? UnorderedList {
-            return [.list(ordered: false, start: 1, items: list.listItems.map(item))]
+            return [.list(ordered: false, start: 1, items: list.listItems.map {
+                item($0, warning: &warning, diagramResource: diagramResource)
+            })]
         }
         if let list = markup as? OrderedList {
-            return [.list(ordered: true, start: Int(list.startIndex), items: list.listItems.map(item))]
+            return [.list(ordered: true, start: Int(list.startIndex), items: list.listItems.map {
+                item($0, warning: &warning, diagramResource: diagramResource)
+            })]
         }
-        if let code = markup as? CodeBlock { return [.code(language: code.language, value: code.code)] }
-        if let table = markup as? Table { return [.table(tableRows(table))] }
+        if let code = markup as? CodeBlock {
+            if let language = code.language?.lowercased(), ["mermaid", "svg", "diagram"].contains(language),
+               let resource = diagramResource?(language, code.code) {
+                return [.paragraph([NotesMarkdownRun(text: "", resource: resource)])]
+            }
+            return [.code(language: code.language, value: code.code)]
+        }
+        if let table = markup as? Table { return [.table(tableRows(table, warning: &warning))] }
         if markup is ThematicBreak { return [.divider] }
         if let raw = markup as? HTMLBlock {
             let value = raw.rawHTML.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -214,18 +238,27 @@ private extension NotesMarkdownDocument {
                     return [.emptyParagraph(indent: indent, quoteDepth: quoteDepth)]
                 }
             }
+            if let opening = value.firstIndex(of: ">"), let closing = value.lastIndex(of: "<"), opening < closing,
+               paragraphTag(String(value[...opening])) != nil, isParagraphClose(String(value[closing...])),
+               value[value.index(after: opening)..<closing].allSatisfy(\.isWhitespace) {
+                return [.emptyParagraph(indent: nil, quoteDepth: nil)]
+            }
+            warning = warning || beginsStyledParagraph(value)
             return [.paragraph([NotesMarkdownRun(text: raw.rawHTML.trimmingCharacters(in: .newlines))])]
         }
-        return markup.children.flatMap(block)
+        return markup.children.flatMap { block($0, warning: &warning, diagramResource: diagramResource) }
     }
 
-    static func item(_ value: ListItem) -> Item {
+    static func item(_ value: ListItem, warning: inout Bool,
+                     diagramResource: ((String, String) -> NotesMarkdownResource?)?) -> Item {
         let checked: Bool?
         switch value.checkbox { case .checked?: checked = true; case .unchecked?: checked = false; case nil: checked = nil }
-        return Item(checked: checked, blocks: value.children.flatMap(block))
+        return Item(checked: checked, blocks: value.children.flatMap {
+            block($0, warning: &warning, diagramResource: diagramResource)
+        })
     }
 
-    static func tableRows(_ table: Table) -> [[NotesMarkdownCell]] {
+    static func tableRows(_ table: Table, warning: inout Bool) -> [[NotesMarkdownCell]] {
         func cells(_ markup: Markup) -> [NotesMarkdownCell] {
             markup.children.enumerated().compactMap { column, cell in
                 guard let cell = cell as? Table.Cell else { return nil }
@@ -236,14 +269,119 @@ private extension NotesMarkdownDocument {
                 case .right?: alignment = .right
                 case nil: alignment = nil
                 }
-                return NotesMarkdownCell(runs: inlines(cell), alignment: alignment)
+                let children = Array(cell.children)
+                if children.count >= 2, let first = children.first as? InlineHTML,
+                   let last = children.last as? InlineHTML, isParagraphClose(last.rawHTML),
+                   let tag = paragraphTag(first.rawHTML),
+                   !children.dropFirst().dropLast().contains(where: containsParagraphHTML) {
+                    let runs = tableCellRuns(inlines(children.dropFirst().dropLast()))
+                    return NotesMarkdownCell(runs: runs, alignment: runs.isEmpty ? nil : tag.alignment ?? alignment)
+                }
+                warning = warning || containsStyledParagraphHTML(cell)
+                return NotesMarkdownCell(runs: tableCellRuns(inlines(children[...])), alignment: alignment)
             }
         }
-        return [cells(table.head)] + table.body.rows.map(cells)
+        var rows = [cells(table.head)]
+        for row in table.body.rows { rows.append(cells(row)) }
+        return rows
+    }
+
+    // Some exports flatten lists to "• First • Second". Require a leading bullet
+    // so dots used as separators in ordinary prose stay as written.
+    static let flattenedBulletSpace = try! NSRegularExpression(pattern: #"(?<=\S) (?=• \S)"#)
+
+    static func tableCellRuns(_ runs: [NotesMarkdownRun]) -> [NotesMarkdownRun] {
+        func isLiteralText(_ run: NotesMarkdownRun) -> Bool {
+            !run.code && run.link == nil && run.resource == nil && run.attachmentID == nil &&
+                run.nativeTag == nil && run.richLinkURL == nil
+        }
+        guard let first = runs.first, isLiteralText(first), first.text.hasPrefix("•") else { return runs }
+        // Mask protected runs without shifting UTF-16 offsets or losing boundaries
+        // when a separator comes immediately after a link or before styled text.
+        let scan = runs.map {
+            isLiteralText($0) ? $0.text : String(repeating: "\u{FFFC}", count: max(1, $0.text.utf16.count))
+        }
+        let text = scan.joined()
+        guard text.hasPrefix("• ") else { return runs }
+        let breaks = flattenedBulletSpace.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard !breaks.isEmpty else { return runs }
+        var offset = 0
+        var nextBreak = 0
+        return zip(runs, scan).map { run, scanned in
+            let start = offset
+            offset += scanned.utf16.count
+            var local: [NSRange] = []
+            while nextBreak < breaks.count, breaks[nextBreak].range.location < offset {
+                local.append(NSRange(location: breaks[nextBreak].range.location - start, length: 1))
+                nextBreak += 1
+            }
+            guard !local.isEmpty else { return run }
+            let updated = NSMutableString(string: run.text)
+            for range in local { updated.replaceCharacters(in: range, with: "\n") }
+            var result = run
+            result.text = updated as String
+            return result
+        }
+    }
+
+    struct ParagraphTag {
+        var alignment: NotesMarkdownCell.Alignment?
+    }
+
+    static let styledParagraphTag = try! NSRegularExpression(
+        pattern: #"^<p\s+style\s*=\s*(?:"([^"]*)"|'([^']*)')\s*>$"#, options: .caseInsensitive
+    )
+
+    // Only import the export layout we can represent. Never pass source CSS to Notes.
+    static func paragraphTag(_ raw: String) -> ParagraphTag? {
+        if raw.range(of: #"^<p\s*>$"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return ParagraphTag()
+        }
+        guard let match = styledParagraphTag.firstMatch(in: raw, range: NSRange(raw.startIndex..., in: raw)),
+              let range = Range(match.range(at: 1), in: raw) ?? Range(match.range(at: 2), in: raw) else { return nil }
+        var tag = ParagraphTag()
+        var properties: Set<String> = []
+        for declaration in raw[range].lowercased().split(separator: ";") {
+            let fields = declaration.split(separator: ":", maxSplits: 1)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            if fields == [""] { continue }
+            guard fields.count == 2, properties.insert(fields[0]).inserted else { return nil }
+            switch (fields[0], fields[1]) {
+            case ("text-align", let value):
+                guard let alignment = NotesMarkdownCell.Alignment(rawValue: value) else { return nil }
+                tag.alignment = alignment
+            case ("margin", "0"): break
+            default: return nil
+            }
+        }
+        return tag
+    }
+
+    static func isParagraphClose(_ raw: String) -> Bool {
+        raw.range(of: #"^</p\s*>$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    static func containsParagraphHTML(_ markup: Markup) -> Bool {
+        if let html = markup as? InlineHTML {
+            return html.rawHTML.range(of: #"^</?p(?:\s|>)"#, options: [.regularExpression, .caseInsensitive]) != nil
+        }
+        return markup.children.contains(where: containsParagraphHTML)
+    }
+
+    static func beginsStyledParagraph(_ raw: String) -> Bool {
+        raw.range(of: #"^<p\s+[^>]*\bstyle\s*="#, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    static func containsStyledParagraphHTML(_ markup: Markup) -> Bool {
+        if let html = markup as? InlineHTML { return beginsStyledParagraph(html.rawHTML) }
+        return markup.children.contains(where: containsStyledParagraphHTML)
     }
 
     static func inlines(_ markup: Markup, style: InlineStyle = InlineStyle()) -> [NotesMarkdownRun] {
-        let children = Array(markup.children)
+        inlines(Array(markup.children)[...], style: style)
+    }
+
+    static func inlines(_ children: ArraySlice<Markup>, style: InlineStyle = InlineStyle()) -> [NotesMarkdownRun] {
         var validHTML: [Int: HTMLAction] = [:]
         var openHTML: [(tag: String, index: Int, action: HTMLAction)] = []
 
@@ -372,6 +510,14 @@ private extension NotesMarkdownDocument {
     static func htmlAction(_ raw: String) -> HTMLAction? {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         switch value {
+        case "<b>": return .open("b", { $0.bold = true })
+        case "</b>": return .close("b")
+        case "<strong>": return .open("strong", { $0.bold = true })
+        case "</strong>": return .close("strong")
+        case "<i>": return .open("i", { $0.italic = true })
+        case "</i>": return .close("i")
+        case "<em>": return .open("em", { $0.italic = true })
+        case "</em>": return .close("em")
         case "<u>": return .open("u", { $0.underline = true })
         case "</u>": return .close("u")
         case "<sup>": return .open("sup", { $0.superscript = 1 })
@@ -439,7 +585,7 @@ private extension NotesMarkdownDocument {
             case .divider:
                 result.append(.init(kind: .divider, indent: indent, quoteDepth: quoteDepth))
             case .emptyParagraph(let savedIndent, let savedQuoteDepth):
-                result.append(.init(kind: .body, indent: savedIndent, quoteDepth: savedQuoteDepth))
+                result.append(.init(kind: .body, indent: savedIndent ?? indent, quoteDepth: savedQuoteDepth ?? quoteDepth))
             }
         }
         return result
@@ -471,7 +617,10 @@ private extension NotesMarkdownDocument {
         case .table(let rows):
             return "<table>" + rows.enumerated().map { row, cells in
                 let tag = row == 0 ? "th" : "td"
-                return "<tr>" + cells.map { "<\(tag)>\(html($0.runs))</\(tag)>" }.joined() + "</tr>"
+                return "<tr>" + cells.map { cell in
+                    let alignment = cell.alignment.map { " style=\"text-align:\($0.rawValue)\"" } ?? ""
+                    return "<\(tag)\(alignment)>\(html(cell.runs))</\(tag)>"
+                }.joined() + "</tr>"
             }.joined() + "</table>"
         case .divider: return "<hr>"
         case .emptyParagraph: return "<p></p>"

@@ -52,13 +52,44 @@ final class ReportMarkdownTests: XCTestCase {
         XCTAssertEqual(plan.requested.citations, 1)
     }
 
-    func testUnsupportedDiagramFailsDuringPreflight() {
-        XCTAssertThrowsError(try ReportMarkdownPreprocessor.prepare(
+    func testMermaidFailureKeepsCodeAndDoesNotCountAnImage() throws {
+        let plan = try ReportMarkdownPreprocessor.prepare(
             title: "Report", markdown: "```mermaid\nsequenceDiagram\nA->>B: Hi\n```", tags: [],
-            downloadImage: { $0 }, renderDiagram: { _, _ in XCTFail("must not render"); return URL(fileURLWithPath: "/tmp/no") }
-        )) {
-            XCTAssertEqual(($0 as? NotesError)?.code, "unsupported_report_diagram")
-        }
+            downloadImage: { $0 }, renderDiagram: { language, source in
+                XCTAssertEqual(language, "mermaid")
+                XCTAssertEqual(source, "sequenceDiagram\nA->>B: Hi")
+                throw NotesError("diagram_render_failed", "Renderer unavailable.")
+            }
+        )
+        XCTAssertTrue(plan.markdown.contains("```mermaid\nsequenceDiagram\nA->>B: Hi\n```"))
+        XCTAssertEqual(plan.requested.diagrams, 0)
+    }
+
+    func testMermaidRendersInPlaceButLiteralFenceExampleIsNotRun() throws {
+        let markdown = """
+        Before
+
+        ````text
+        ```mermaid
+        graph LR
+        ```
+        ````
+
+        ~~~mermaid
+        flowchart TD
+        ~~~
+
+        After
+        """
+        let plan = try ReportMarkdownPreprocessor.prepare(title: "Report", markdown: markdown, tags: [],
+            downloadImage: { $0 }, renderDiagram: { language, source in
+                XCTAssertEqual(language, "mermaid")
+                XCTAssertEqual(source, "flowchart TD")
+                return URL(fileURLWithPath: "/tmp/diagram.png")
+            })
+        XCTAssertEqual(plan.requested.diagrams, 1)
+        XCTAssertTrue(plan.markdown.contains("```mermaid\ngraph LR\n```"))
+        XCTAssertTrue(plan.markdown.range(of: "/tmp/diagram.png")!.lowerBound < plan.markdown.range(of: "After")!.lowerBound)
     }
 
     func testPreprocessingTransformsOnlyProseAndExplicitDiagramFences() throws {

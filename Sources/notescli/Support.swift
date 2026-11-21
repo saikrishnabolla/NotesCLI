@@ -143,6 +143,18 @@ func validateBodySources(body: String?, stdin: Bool, file: String? = nil, allowE
 struct MarkdownSourceInput {
     var source: String
     var assetBaseDirectory: URL
+
+    init(source: String, assetBaseDirectory: URL) {
+        self.source = source
+        self.assetBaseDirectory = assetBaseDirectory
+        warnAboutMarkdownHTML(source)
+    }
+}
+
+func warnAboutMarkdownHTML(_ source: String) {
+    if NotesMarkdownDocument(parsing: source).hasLiteralStyledParagraphHTML {
+        Output.error("Warning: Some styled HTML paragraphs could not be converted and will appear as text.")
+    }
 }
 
 func inputMarkdown(body: String?, stdin: Bool, file: String? = nil,

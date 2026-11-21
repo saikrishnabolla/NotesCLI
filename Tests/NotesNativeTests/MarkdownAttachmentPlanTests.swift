@@ -1,10 +1,27 @@
 import Foundation
 import XCTest
 import NotesCore
+import NotesDiagrams
 @testable import NotesNative
 import NotesStore
 
 final class MarkdownAttachmentPlanTests: XCTestCase {
+    func testNativeMermaidImportFreezesInlineImageAndKeepsItsSource() throws {
+        let bundle = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/NotesCLI/mermaid.min.js")
+        guard FileManager.default.fileExists(atPath: bundle.path) else {
+            throw XCTSkip("Install the pinned Mermaid renderer for this integration check.")
+        }
+        let plan = try MarkdownNativeWriter(owner: NativeNotesWriter()).prepare(NativeMarkdownInput(
+            source: "Before\n\n```mermaid\nflowchart LR\nA --> B\n```\n\nAfter"
+        ))
+        XCTAssertEqual(plan.document.paragraphs.map(\.plainText), ["Before", "Diagram 1", "After"])
+        let frozen = try XCTUnwrap(plan.resources.first ?? nil)
+        let recovered = try XCTUnwrap(DiagramSourceMetadata.extract(from: Data(contentsOf: frozen.url)))
+        XCTAssertEqual(recovered.mediaType, DiagramSource.mermaidMediaType)
+        XCTAssertEqual(String(data: recovered.data, encoding: .utf8)?.trimmingCharacters(in: .newlines),
+                       "flowchart LR\nA --> B")
+    }
     func testCreateTitleIsLiteralMarkdownAndCannotReferenceLocalFiles() {
         let title = "![secret](~/Documents/secret.txt)\n# next *bold*"
         let document = NotesMarkdownDocument(parsing: markdownSourceWithLiteralTitle(title, body: "Body"))
@@ -170,7 +187,7 @@ final class MarkdownAttachmentPlanTests: XCTestCase {
 
                 | [<mark data-apple-notes-highlight="blue">**Name**</mark>](https://example.com) | Value |
                 | --- | --- |
-                | A | B |
+                | A | • First [link](https://example.com/details) • **Second**<br>• Third |
 
                 ---
 
@@ -200,6 +217,12 @@ final class MarkdownAttachmentPlanTests: XCTestCase {
         XCTAssertTrue(tableCell.runs.contains {
             $0.font.bold && $0.highlight == .blue && $0.link == "https://example.com"
         })
+        let rows = try XCTUnwrap(note.document?.tableCells?[markers[1].id])
+        XCTAssertEqual(rows.map(\.count), [2, 2])
+        let bullets = try XCTUnwrap(rows.last?.last)
+        XCTAssertEqual(bullets.text, "• First link\n• Second\n• Third")
+        XCTAssertTrue(bullets.runs.contains { $0.link == "https://example.com/details" })
+        XCTAssertTrue(bullets.runs.contains { $0.font.bold })
         XCTAssertEqual(note.document?.runs.compactMap(\.paragraph?.startNumber), [7, 8])
 
         let lossless = try XCTUnwrap(note.document).markdown(

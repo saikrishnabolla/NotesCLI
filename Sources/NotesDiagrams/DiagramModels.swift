@@ -13,7 +13,7 @@ public enum DiagramError: Error, CustomStringConvertible, Equatable {
         switch self {
         case .invalidWidth: return "Diagram width must be between 1 and 2400 pixels."
         case .invalidScale: return "Diagram scale must be 2 or 3."
-        case .invalidFileType: return "Diagram files must use .svg, .html, or .htm."
+        case .invalidFileType: return "Diagram files must use .svg, .html, .htm, .mmd, or .mermaid."
         case .invalidPNG: return "The rendered diagram is not a valid PNG."
         case .sourceMetadataMissing: return "The image has no embedded diagram source."
         case .renderFailed(let message): return message
@@ -115,24 +115,37 @@ public enum DiagramGeometry {
 }
 
 public struct DiagramSource: Equatable, Sendable {
+    public static let mermaidMediaType = "text/vnd.mermaid"
     public let data: Data
     public let filename: String
     public let mediaType: String
 
     public init(file: URL) throws {
         let ext = file.pathExtension.lowercased()
-        guard ["svg", "html", "htm"].contains(ext) else { throw DiagramError.invalidFileType }
+        guard ["svg", "html", "htm", "mmd", "mermaid"].contains(ext) else { throw DiagramError.invalidFileType }
         let data = try InputFile.read(file, kind: "diagram", maxBytes: DiagramLimits.maxSourceBytes)
         guard !data.isEmpty else { throw DiagramError.renderFailed("The diagram file is empty.") }
         self.data = data
         self.filename = file.lastPathComponent
-        self.mediaType = ext == "svg" ? "image/svg+xml" : "text/html"
+        self.mediaType = ext == "svg" ? "image/svg+xml" :
+            ["mmd", "mermaid"].contains(ext) ? Self.mermaidMediaType : "text/html"
     }
 
     public init(data: Data, filename: String, mediaType: String) {
         self.data = data
         self.filename = filename
         self.mediaType = mediaType
+    }
+
+    public init(markdownLanguage: String, source: String, name: String) {
+        let type: String
+        let ext: String
+        switch markdownLanguage {
+        case "mermaid": (type, ext) = (Self.mermaidMediaType, "mmd")
+        case "svg": (type, ext) = ("image/svg+xml", "svg")
+        default: (type, ext) = ("text/html", "html")
+        }
+        self.init(data: Data(source.utf8), filename: "\(name).\(ext)", mediaType: type)
     }
 }
 

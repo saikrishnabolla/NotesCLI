@@ -30,6 +30,7 @@ struct ReportCreate: ParsableCommand {
         guard !backend.isFake else { throw NotesError("native_required", "Report creation requires the live native Notes engine.") }
         let source = URL(fileURLWithPath: NSString(string: file).expandingTildeInPath).standardizedFileURL
         let markdown = try readReportMarkdown(source)
+        warnAboutMarkdownHTML(markdown)
         let reportTags = tags?.split(separator: ",").map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }.filter { !$0.isEmpty } ?? []

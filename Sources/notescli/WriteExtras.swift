@@ -102,6 +102,7 @@ func writeExtraEdit(options: GlobalOptions, write: WriteOptions, ref: String) th
                                                   result: WriteResult(outcome: .verified, noteID: note.summary.id, message: "Unchanged; no write made.")), options: options)
         return
     }
+    warnAboutMarkdownHTML(edited)
     if selected == .scripting, markdownRequiresNative(edited), !write.allowDowngrade {
         let fallback = options.resolvedEngine == .native && !options.engineWasExplicitlySelected
         throw NotesError(

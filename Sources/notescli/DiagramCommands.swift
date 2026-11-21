@@ -68,12 +68,12 @@ struct DiagramWriteService {
     }
 
     func add(file: URL, to noteID: String, options: DiagramRenderOptions, mode: DiagramInsertionMode,
-             allowShared: Bool) throws -> (NativeAttachmentResult, DiagramPixelSize?) {
+             position: Int? = nil, allowShared: Bool) throws -> (NativeAttachmentResult, DiagramPixelSize?) {
         let source = try diagramSource(file)
         if mode == .drawing { return (try drawing.add(source: source, to: noteID, options: options, allowShared: allowShared), nil) }
         let rendered = try diagramRender(file, options: options)
         let frozen = try FrozenAttachmentInput(data: rendered.png, suggestedName: file.deletingPathExtension().lastPathComponent + ".png")
-        return (try NativeNotesWriter().insertFrozenFile(noteID, frozen: frozen, position: nil, imageView: "large", allowShared: allowShared), rendered.pixelSize)
+        return (try NativeNotesWriter().insertFrozenFile(noteID, frozen: frozen, position: position, imageView: "large", allowShared: allowShared), rendered.pixelSize)
     }
 
     func create(file: URL, title: String, folder: String, options: DiagramRenderOptions, mode: DiagramInsertionMode,
@@ -99,7 +99,7 @@ struct DiagramWriteService {
 struct DiagramCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "diagram",
-        abstract: "Render SVG or HTML diagrams into Apple Notes.",
+        abstract: "Render Mermaid, SVG, or HTML diagrams into Apple Notes.",
         subcommands: [DiagramAdd.self, DiagramCreate.self, DiagramExport.self]
     )
 }
@@ -111,8 +111,14 @@ struct DiagramAdd: ParsableCommand {
     @OptionGroup var diagram: DiagramOptions
     @Argument var note: String
     @Option var file: String
+    @Option(help: "UTF-16 insertion position for an image.") var position: Int?
 
-    func validate() throws { _ = try diagram.renderOptions() }
+    func validate() throws {
+        _ = try diagram.renderOptions()
+        if let position, position < 0 || diagram.insertion == .drawing {
+            throw ValidationError("--position requires a nonnegative image insertion position.")
+        }
+    }
 
     func run() throws {
         let backend = try options.writable()
@@ -120,7 +126,8 @@ struct DiagramAdd: ParsableCommand {
         let target = try backend.reader.note(note)
         let renderOptions = try diagram.renderOptions()
         let path = diagramFile(file)
-        let arguments = diagramArguments(path: path, options: renderOptions, mode: diagram.insertion)
+        var arguments = diagramArguments(path: path, options: renderOptions, mode: diagram.insertion)
+        if let position { arguments["position"] = String(position) }
         let plan = DryRunPlan(operation: "diagramAdd", target: target.summary.id.uuid, arguments: arguments,
                               resultingHTML: SafetyExecutor.html(target), engine: "native")
         var captured: NativeAttachmentResult?
@@ -128,7 +135,7 @@ struct DiagramAdd: ParsableCommand {
         let result = try SafetyExecutor.run(options: write, operation: "diagramAdd", arguments: arguments,
             note: target, allowedPaths: [target.summary.folderPath], destructive: true, plan: plan) {
                 let value = try DiagramWriteService().add(file: path, to: target.summary.id.uuid, options: renderOptions,
-                                                          mode: diagram.insertion, allowShared: write.allowShared)
+                                                          mode: diagram.insertion, position: position, allowShared: write.allowShared)
                 captured = value.0
                 pixels = value.1
                 return value.0.write.writeResult

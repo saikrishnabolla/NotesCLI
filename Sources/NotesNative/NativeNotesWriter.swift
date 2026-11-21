@@ -7,6 +7,7 @@ import Dispatch
 import Foundation
 import ImageIO
 import NotesCore
+import NotesDiagrams
 import NotesNativeObjC
 import NotesStore
 import PDFKit
@@ -3770,13 +3771,9 @@ public final class NativeNotesWriter: NotesNativeWriting {
 
     private func createNote(title: String, input: NativeMarkdownInput, folder folderRef: String?,
                             systemPaper: Bool, allowShared: Bool) throws -> NativeCreateResult {
-        let source = markdownSourceWithLiteralTitle(title, body: input.source)
-        let prepared = try MarkdownNativeWriter(owner: self).prepare(
-            NativeMarkdownInput(source: source, assetBaseDirectory: input.assetBaseDirectory,
-                                trailingAttachments: input.trailingAttachments,
-                                expectedAssetHashes: input.expectedAssetHashes,
-                                importDestination: input.importDestination)
-        )
+        var titled = input
+        titled.source = markdownSourceWithLiteralTitle(title, body: input.source)
+        let prepared = try MarkdownNativeWriter(owner: self).prepare(titled)
         let write = try performWrite(features: Self.contractFeatures(for: prepared, systemPaper: systemPaper)) { context in
             let destination = try destinationFolder(folderRef, in: context)
             try guardWritableFolder(destination, allowShared: allowShared)
@@ -7928,7 +7925,25 @@ final class MarkdownNativeWriter {
     }
 
     func prepare(_ input: NativeMarkdownInput) throws -> PreparedInput {
-        let document = NotesMarkdownDocument(parsing: input.source)
+        var diagrams: [String: FrozenAttachmentInput] = [:]
+        var diagramCount = 0
+        let document = NotesMarkdownDocument(parsing: input.source, diagramResource: { language, source in
+            guard input.renderDiagrams else { return nil }
+            diagramCount += 1
+            let name = "Diagram \(diagramCount)"
+            do {
+                let rendered = try DiagramRenderer().render(
+                    source: DiagramSource(markdownLanguage: language, source: source, name: name),
+                    options: DiagramRenderOptions()
+                )
+                let key = UUID().uuidString
+                diagrams[key] = try FrozenAttachmentInput(data: rendered.png, suggestedName: name + ".png")
+                return NotesMarkdownResource(source: key, alt: name)
+            } catch {
+                markdownDiagramWarning(language, error)
+                return nil
+            }
+        })
         var resources: [FrozenAttachmentInput?] = []
         for paragraph in document.paragraphs {
             if let table = paragraph.table {
@@ -7942,6 +7957,10 @@ final class MarkdownNativeWriter {
             }
             for run in paragraph.runs where run.resource != nil {
                 guard let resource = run.resource else { continue }
+                if let diagram = diagrams[resource.source] {
+                    resources.append(diagram)
+                    continue
+                }
                 guard resource.isLocal else {
                     throw NotesError(
                         "remote_image_unsupported",
@@ -8034,7 +8053,13 @@ final class MarkdownNativeWriter {
                 startNumber: customStart, basedOn: nil
             )
             if let table = paragraph.table {
-                let rows = table.map { $0.map(\.plainText).joined(separator: "\t") }.joined(separator: "\n")
+                // The initializer reads TSV, so cell breaks would create extra
+                // rows or columns. Write the real text and styles below.
+                let separators = CharacterSet.newlines.union(CharacterSet(charactersIn: "\t"))
+                let rows = table.map { row in
+                    row.map { $0.plainText.components(separatedBy: separators).joined(separator: " ") }
+                        .joined(separator: "\t")
+                }.joined(separator: "\n")
                 let id = try editor.addTable(rows)
                 guard let attachment = try owner.fetch(
                     "ICAttachment",

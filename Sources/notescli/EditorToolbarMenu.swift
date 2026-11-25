@@ -36,6 +36,24 @@ final class EditorToolbarMenu: NSObject {
     }
 
     var apply: ((Change) -> Void)?
+    var chooseNoteAction: ((EditorNoteAction) -> Void)?
+
+    func overflow(for controls: [EditorToolbarControl]) -> NSMenu {
+        let root = NSMenu(title: "More Actions")
+        let actions = EditorNoteAction.allCases.filter { !controls.contains(.note($0)) }
+        for action in actions {
+            let item = NSMenuItem(title: action.title, action: #selector(selectNoteAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action.rawValue
+            item.image = NSImage(systemSymbolName: action.symbol, accessibilityDescription: nil)
+            root.addItem(item)
+        }
+        if !actions.isEmpty { root.addItem(.separator()) }
+        let customize = NSMenuItem(title: "Customize Toolbar", action: nil, keyEquivalent: "")
+        root.addItem(customize)
+        root.setSubmenu(menu(for: controls), for: customize)
+        return root
+    }
 
     func menu(for controls: [EditorToolbarControl]) -> NSMenu {
         let root = NSMenu(title: "Customize Toolbar")
@@ -45,7 +63,8 @@ final class EditorToolbarMenu: NSObject {
             section.autoenablesItems = false
             section.addItem(item("Move Left", .moveLeft(control), controls))
             section.addItem(item("Move Right", .moveRight(control), controls))
-            section.addItem(item("Hide", .hide(control), controls))
+            let hideTitle = if case .note = control { "Move to More Actions" } else { "Hide" }
+            section.addItem(item(hideTitle, .hide(control), controls))
             let entry = NSMenuItem(title: control.title, action: nil, keyEquivalent: "")
             root.addItem(entry)
             root.setSubmenu(section, for: entry)
@@ -75,5 +94,10 @@ final class EditorToolbarMenu: NSObject {
     @objc private func selectChange(_ item: NSMenuItem) {
         guard item.isEnabled, let command = item.representedObject as? MenuCommand else { return }
         apply?(command.change)
+    }
+
+    @objc private func selectNoteAction(_ item: NSMenuItem) {
+        guard let raw = item.representedObject as? String, let action = EditorNoteAction(rawValue: raw) else { return }
+        chooseNoteAction?(action)
     }
 }

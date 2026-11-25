@@ -12,6 +12,14 @@ struct EditorSlashChoice: Equatable {
     let aliases: [String]
     let action: EditorSlashAction
 
+    var symbol: String {
+        switch action {
+        case .format(let action): action.symbol
+        case .date: "calendar"
+        case .template: "doc.on.doc"
+        }
+    }
+
     static let choices: [Self] = [
         .init(label: "Title", aliases: ["title", "h1"], action: .format(.title)),
         .init(label: "Heading", aliases: ["heading", "h2"], action: .format(.heading)),
@@ -138,7 +146,44 @@ private extension Character {
 final class EditorSlashRow: NSButton {
     private var hoverArea: NSTrackingArea?
     private var hovered = false
-    var keyboardSelected = false { didSet { updateFill() } }
+    var keyboardSelected = false {
+        didSet {
+            guard keyboardSelected != oldValue else { return }
+            setAccessibilitySelected(keyboardSelected)
+            updateAppearance()
+        }
+    }
+
+    func configure(for choice: EditorSlashChoice) {
+        title = choice.label
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel(choice.label)
+        isBordered = false
+        alignment = .left
+        lineBreakMode = .byTruncatingTail
+        imagePosition = .imageLeft
+        if let icon = NSImage(systemSymbolName: choice.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) {
+            // Give every symbol the same space so labels stay in one column.
+            let padded = NSImage(size: NSSize(width: 20, height: 18), flipped: false) { rect in
+                icon.draw(in: NSRect(x: rect.midX - icon.size.width / 2, y: rect.midY - icon.size.height / 2,
+                                     width: icon.size.width, height: icon.size.height))
+                return true
+            }
+            padded.isTemplate = true
+            image = padded
+        }
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        updateAppearance()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        performClick(nil)
+        return true
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -151,23 +196,25 @@ final class EditorSlashRow: NSButton {
 
     override func mouseEntered(with event: NSEvent) {
         hovered = true
-        updateFill()
+        updateAppearance()
     }
 
     override func mouseExited(with event: NSEvent) {
         hovered = false
-        updateFill()
+        updateAppearance()
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        updateFill()
+        updateAppearance()
     }
 
-    private func updateFill() {
+    private func updateAppearance() {
+        font = .systemFont(ofSize: 13, weight: keyboardSelected ? .semibold : .regular)
+        contentTintColor = keyboardSelected ? .alternateSelectedControlTextColor : .labelColor
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = keyboardSelected ? NSColor.selectedControlColor.cgColor
-                : hovered ? NSColor.labelColor.withAlphaComponent(0.14).cgColor : nil
+            layer?.backgroundColor = keyboardSelected ? NSColor.selectedContentBackgroundColor.cgColor
+                : hovered ? NSColor.unemphasizedSelectedContentBackgroundColor.cgColor : nil
         }
     }
 }
@@ -225,10 +272,16 @@ final class EditorTriggerPanel: NSObject {
 
     func move(_ delta: Int) {
         guard isVisible, !choices.isEmpty else { return }
+        let previousFirstVisible = firstVisible
         selected = (selected + delta + choices.count) % choices.count
         if selected < firstVisible { firstVisible = selected }
         if selected >= firstVisible + maxRows { firstVisible = selected - maxRows + 1 }
-        render()
+        if firstVisible != previousFirstVisible { render() }
+        else {
+            for case let row as EditorSlashRow in background.subviews {
+                row.keyboardSelected = row.tag == selected
+            }
+        }
     }
 
     func accept() {
@@ -244,12 +297,7 @@ final class EditorTriggerPanel: NSObject {
         background.subviews.forEach { $0.removeFromSuperview() }
         for (index, choice) in rows.enumerated() {
             let row = EditorSlashRow(frame: NSRect(x: 6, y: height - 5 - CGFloat(index + 1) * rowHeight, width: width - 12, height: rowHeight))
-            row.title = choice.label
-            row.alignment = .left
-            row.isBordered = false
-            row.font = .systemFont(ofSize: 13, weight: firstVisible + index == selected ? .semibold : .regular)
-            row.wantsLayer = true
-            row.layer?.cornerRadius = 5
+            row.configure(for: choice)
             row.keyboardSelected = firstVisible + index == selected
             row.tag = firstVisible + index
             row.target = self
@@ -274,7 +322,7 @@ enum EditorPanelPlacement {
         let area = screen.visibleFrame
         let above = bounds.maxY + 7
         let below = bounds.minY - size.height - 7
-        let x = max(area.minX, min(bounds.midX - size.width / 2, area.maxX - size.width))
+        let x = max(area.minX, min(bounds.minX, area.maxX - size.width))
         let canGoAbove = above + size.height <= area.maxY
         let canGoBelow = below >= area.minY
         if preferBelow, canGoBelow { return NSPoint(x: x, y: below) }

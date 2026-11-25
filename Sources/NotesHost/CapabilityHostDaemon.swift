@@ -1,7 +1,6 @@
 import Darwin
 import Dispatch
 import Foundation
-import NotesHost
 import Security
 
 private let teamID = "GXKRUPGJVF"
@@ -136,66 +135,70 @@ private func terminateAndWait(_ pid: pid_t) {
     }
 }
 
-guard verifyOwnSignature(), let cli = bundledCLI() else { Darwin.exit(78) }
-private let children = ChildRegistry()
+package enum CapabilityHostDaemon {
+    package static func run() -> Never {
+        guard verifyOwnSignature(), let cli = bundledCLI() else { Darwin.exit(78) }
+        let children = ChildRegistry()
 
-Darwin.signal(SIGTERM, SIG_IGN)
-Darwin.signal(SIGINT, SIG_IGN)
-let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-let terminateHost = {
-    children.terminateAll()
-    Darwin.exit(0)
-}
-termination.setEventHandler(handler: terminateHost)
-interrupt.setEventHandler(handler: terminateHost)
-termination.resume()
-interrupt.resume()
-
-let developmentSocket = ProcessInfo.processInfo.environment["NOTESCLI_HOST_ALLOW_UNSIGNED"] == "1"
-    ? ProcessInfo.processInfo.environment["NOTESCLI_HOST_SOCKET_PATH"].map { URL(fileURLWithPath: $0) }
-    : nil
-let server = CapabilityHostServer(socketURL: developmentSocket ?? CapabilityHostPaths.socket) { request, descriptors, socket in
-    defer { descriptors.forEach { close($0) }; close(socket) }
-    guard trustedPeer(socket), CapabilityHostPolicy.allows(request.arguments) else {
-        CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI refused the request."), socket: socket)
-        return
-    }
-    if request.arguments == CapabilityHostPolicy.notesAccessProbeArguments {
-        CapabilityHostServer.reply(CapabilityHostReply(exitCode: HostNotesAccess.canReadStoreHeader() ? 0 : 1), socket: socket)
-        return
-    }
-    guard validStaticCode(cli, identifier: "com.saikrishnabolla.notescli") else {
-        CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI refused the request."), socket: socket)
-        return
-    }
-    var environment = request.environment
-    for key in ["HOME", "TMPDIR", "USER", "LOGNAME"] {
-        if let value = ProcessInfo.processInfo.environment[key] { environment[key] = value }
-    }
-    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    environment["NOTESCLI_HOST_ACTIVE"] = "1"
-    environment["NOTESCLI_CAPABILITY_HOST"] = "direct"
-    do {
-        let pid = try spawn(cli, request: request, descriptors: descriptors, environment: environment)
-        children.insert(pid)
-        defer { children.remove(pid) }
-        var connected = true
-        var status: Int32 = 0
-        while connected {
-            let result = waitpid(pid, &status, WNOHANG)
-            if result == pid { break }
-            if result < 0, errno != EINTR { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-            connected = clientConnected(socket)
+        Darwin.signal(SIGTERM, SIG_IGN)
+        Darwin.signal(SIGINT, SIG_IGN)
+        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        let interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        let terminateHost: @Sendable () -> Void = {
+            children.terminateAll()
+            Darwin.exit(0)
         }
-        if !connected { terminateAndWait(pid) }
-        else { CapabilityHostServer.reply(CapabilityHostReply(exitCode: exitCode(status)), socket: socket) }
-    } catch {
-        CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI could not run the command."), socket: socket)
+        termination.setEventHandler(handler: terminateHost)
+        interrupt.setEventHandler(handler: terminateHost)
+        termination.resume()
+        interrupt.resume()
+
+        let developmentSocket = ProcessInfo.processInfo.environment["NOTESCLI_HOST_ALLOW_UNSIGNED"] == "1"
+            ? ProcessInfo.processInfo.environment["NOTESCLI_HOST_SOCKET_PATH"].map { URL(fileURLWithPath: $0) }
+            : nil
+        let server = CapabilityHostServer(socketURL: developmentSocket ?? CapabilityHostPaths.socket) { request, descriptors, socket in
+            defer { descriptors.forEach { close($0) }; close(socket) }
+            guard trustedPeer(socket), CapabilityHostPolicy.allows(request.arguments) else {
+                CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI refused the request."), socket: socket)
+                return
+            }
+            if request.arguments == CapabilityHostPolicy.notesAccessProbeArguments {
+                CapabilityHostServer.reply(CapabilityHostReply(exitCode: HostNotesAccess.canReadStoreHeader() ? 0 : 1), socket: socket)
+                return
+            }
+            guard validStaticCode(cli, identifier: "com.saikrishnabolla.notescli") else {
+                CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI refused the request."), socket: socket)
+                return
+            }
+            var environment = request.environment
+            for key in ["HOME", "TMPDIR", "USER", "LOGNAME"] {
+                if let value = ProcessInfo.processInfo.environment[key] { environment[key] = value }
+            }
+            environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            environment["NOTESCLI_HOST_ACTIVE"] = "1"
+            environment["NOTESCLI_CAPABILITY_HOST"] = "direct"
+            do {
+                let pid = try spawn(cli, request: request, descriptors: descriptors, environment: environment)
+                children.insert(pid)
+                defer { children.remove(pid) }
+                var connected = true
+                var status: Int32 = 0
+                while connected {
+                    let result = waitpid(pid, &status, WNOHANG)
+                    if result == pid { break }
+                    if result < 0, errno != EINTR { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                    connected = clientConnected(socket)
+                }
+                if !connected { terminateAndWait(pid) }
+                else { CapabilityHostServer.reply(CapabilityHostReply(exitCode: exitCode(status)), socket: socket) }
+            } catch {
+                CapabilityHostServer.reply(CapabilityHostReply(error: "Notes CLI could not run the command."), socket: socket)
+            }
+        }
+
+        do { try server.start() }
+        catch { Darwin.exit(78) }
+
+        return withExtendedLifetime((termination, interrupt, server)) { dispatchMain() }
     }
 }
-
-do { try server.start() }
-catch { Darwin.exit(78) }
-
-dispatchMain()

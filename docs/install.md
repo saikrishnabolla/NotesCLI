@@ -20,8 +20,8 @@ After `brew upgrade notescli`, run `notescli onboard` to update Notes CLI.app an
 Download the `.tar.gz` file and its `.sha256` file from the same release. Check the archive, then install it on your `PATH`:
 
 ```bash
-grep 'tar.gz$' notescli-1.1.15-macos-universal.sha256 | shasum -a 256 -c -
-tar -xzf notescli-1.1.15-macos-universal.tar.gz
+grep 'tar.gz$' notescli-1.1.16-macos-universal.sha256 | shasum -a 256 -c -
+tar -xzf notescli-1.1.16-macos-universal.tar.gz
 mkdir -p "$HOME/.local/bin" "$HOME/Applications"
 install -m 755 notescli "$HOME/.local/bin/notescli"
 ditto "Notes CLI.app" "$HOME/Applications/Notes CLI.app"

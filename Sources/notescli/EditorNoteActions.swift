@@ -26,26 +26,34 @@ enum EditorToolbarControl: Equatable, Sendable {
     case format(NotesEditorAction)
     case note(EditorNoteAction)
     case alignment
+    case paragraphStyles
+
+    static let paragraphChoices: [NotesEditorAction] = [.title, .heading, .subheading, .body, .monostyled]
 
     static let defaults: [Self] = [
-        .format(.title), .format(.heading), .format(.subheading), .format(.body),
+        .paragraphStyles,
         .format(.bold), .format(.italic), .format(.underline), .format(.strikethrough),
-        .alignment, .format(.highlight), .format(.link), .format(.checklist),
-        .note(.copyMarkdown), .note(.copyLink), .note(.backlinks)
+        .alignment, .format(.highlight), .format(.link), .format(.checklist)
     ]
 
-    static let available: [Self] = [.alignment] + NotesEditorAction.allCases.map(Self.format)
+    static let available: [Self] = [.paragraphStyles, .alignment] + NotesEditorAction.allCases.map(Self.format)
         + EditorNoteAction.allCases.map(Self.note)
 
     init?(_ id: String) {
         if id == "alignment" { self = .alignment }
+        else if id == "paragraph-styles" { self = .paragraphStyles }
         else if let value = NotesEditorAction(rawValue: id) { self = .format(value) }
         else if let value = EditorNoteAction(rawValue: id) { self = .note(value) }
         else { return nil }
     }
 
     var id: String {
-        switch self { case .format(let value): value.rawValue; case .note(let value): value.rawValue; case .alignment: "alignment" }
+        switch self {
+        case .format(let value): value.rawValue
+        case .note(let value): value.rawValue
+        case .alignment: "alignment"
+        case .paragraphStyles: "paragraph-styles"
+        }
     }
 
     var title: String {
@@ -53,11 +61,17 @@ enum EditorToolbarControl: Equatable, Sendable {
         case .format(let value): value.rawValue.replacingOccurrences(of: "-", with: " ").capitalized
         case .note(let value): value.title
         case .alignment: "Alignment"
+        case .paragraphStyles: "Paragraph Styles"
         }
     }
 
     var symbol: String {
-        switch self { case .format(let value): value.symbol; case .note(let value): value.symbol; case .alignment: "text.alignleft" }
+        switch self {
+        case .format(let value): value.symbol
+        case .note(let value): value.symbol
+        case .alignment: "text.alignleft"
+        case .paragraphStyles: "textformat"
+        }
     }
 
     @MainActor
@@ -66,13 +80,20 @@ enum EditorToolbarControl: Equatable, Sendable {
         button.isBordered = false
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
         button.title = button.image == nil ? String(title.prefix(2)) : ""
+        if self == .paragraphStyles {
+            button.title = "Aa"
+            button.font = .systemFont(ofSize: NSFont.systemFontSize)
+            button.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 8, weight: .medium))
+            button.imagePosition = .imageRight
+        }
         button.setAccessibilityLabel(title)
         button.toolTip = title
         button.identifier = NSUserInterfaceItemIdentifier(id)
         button.target = target
         button.action = action
-        // The native Alignment menu tracks its own mouse events.
-        button.sendAction(on: self == .alignment ? .leftMouseUp : .leftMouseDown)
+        // Native menus track their own mouse events.
+        button.sendAction(on: self == .alignment || self == .paragraphStyles ? .leftMouseUp : .leftMouseDown)
         return button
     }
 
@@ -191,7 +212,7 @@ final class EditorCurrentNoteActions: NSObject {
     }
 
     func run(_ action: EditorNoteAction, for context: NotesEditorSelection, from bar: EditorNoteActionsBar? = nil) {
-        guard !busy, isCurrent(context), let executable = Bundle.main.executableURL else { return }
+        guard !busy, isCurrent(context), let executable = NotesCLIApplication.cliExecutable else { return }
         let client = PaletteClient(executable: executable, backend: nil)
         let id = context.noteID
         let reference = "id:" + id.uuidString

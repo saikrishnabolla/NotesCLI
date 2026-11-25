@@ -5,9 +5,11 @@
     <key>CFBundleIdentifier</key>
     <string>com.saikrishnabolla.notescli</string>
     <key>CFBundleName</key>
-    <string>notescli</string>
+    <string>Notes CLI</string>
+    <key>CFBundleDisplayName</key>
+    <string>Notes CLI</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.15</string>
+    <string>1.1.16</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>NSAppleEventsUsageDescription</key>

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.16
+
+- Start the editor as Notes CLI.app so macOS shows the app name and icon in its permissions list. The Terminal command is still `notescli`.
+- Keep the formatting toolbar visible when applying styles, and align it with the start of the selection.
+- Use a compact formatting toolbar and add icons to the slash menu.
+
 ## 1.1.14
 
 - Onboarding puts a draggable Notes CLI icon next to Full Disk Access, with Finder as a fallback.

@@ -166,6 +166,7 @@ enum HostInstallation {
         let hadLegacyApp = fileManager.fileExists(atPath: CapabilityHostPaths.legacyApp.path)
         let hadLaunchAgent = fileManager.fileExists(atPath: CapabilityHostPaths.launchAgent.path)
         var mutationBegan = false
+        var migratingEditor = false
 
         func removeIfPresent(_ url: URL) {
             if fileManager.fileExists(atPath: url.path) { try? fileManager.removeItem(at: url) }
@@ -231,6 +232,10 @@ enum HostInstallation {
             }
 
             if hadLegacyApp { try fileManager.removeItem(at: CapabilityHostPaths.legacyApp) }
+            if NotesCLIApplication.supportsEmbeddedEditor(at: CapabilityHostPaths.app) {
+                migratingEditor = true
+                try EditorLogin.local.migrateIfNeeded()
+            }
             removeIfPresent(appBackup)
             removeIfPresent(legacyAppBackup)
             removeIfPresent(launchAgentBackup)
@@ -265,6 +270,7 @@ enum HostInstallation {
                         throw NotesError("host_rollback_failed", "The previous Notes CLI app was restored, but it did not become ready.")
                     }
                 }
+                if migratingEditor { try EditorLogin.local.restartLegacyAfterAppRollback() }
             } catch {
                 throw NotesError("host_rollback_failed",
                                  "Replacing Notes CLI failed (\(installError)). Restoring the previous app also failed (\(error)).")

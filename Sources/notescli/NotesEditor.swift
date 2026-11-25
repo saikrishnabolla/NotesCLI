@@ -140,6 +140,7 @@ struct EditorCommand: ParsableCommand {
         if showSettings { try Output.json(settingsStore.load()); return }
         if let login { try login.run(settingsStore: settingsStore); return }
         try ClipboardCopy.requireLocalSession()
+        try NotesCLIApplication.forwardEditorIfInstalled()
         do {
             let configuration = try settings(for: settingsStore).validate()
             let lock = try EditorInstance.acquire()
@@ -175,7 +176,7 @@ enum EditorLoginMode: String, ExpressibleByArgument {
         case .enable:
             try ClipboardCopy.requireLocalSession()
             _ = try settingsStore.load()
-            try job.enable { _ in HostInstallation.isCurrentInstall }
+            try job.enable { NotesCLIApplication.supportsEmbeddedEditor(at: $0) && HostInstallation.isCurrentInstall }
             print("Editor startup at login is enabled. If it cannot start, run 'notescli editor --export-logs'.")
         case .disable:
             try ClipboardCopy.requireLocalSession()
@@ -322,6 +323,23 @@ struct NotesEditorSelection: Equatable {
     static func noteID(_ identifier: String?) -> UUID? {
         guard let identifier, identifier.hasPrefix("Note[id="), identifier.hasSuffix("]") else { return nil }
         return UUID(uuidString: String(identifier.dropFirst(8).dropLast()))
+    }
+}
+
+struct EditorToolbarContinuity {
+    let original: NotesEditorSelection
+    let expires: TimeInterval
+
+    init(_ original: NotesEditorSelection, now: TimeInterval) {
+        self.original = original
+        expires = now + 0.30
+    }
+
+    func keepsPanel(for selection: NotesEditorSelection?, frontPID: pid_t?, helperPID: pid_t,
+                    now: TimeInterval) -> Bool {
+        guard now < expires, frontPID == original.pid || frontPID == helperPID else { return false }
+        guard let selection else { return true }
+        return original.sameEditor(as: selection) && (selection.length == 0 || selection == original)
     }
 }
 
@@ -637,7 +655,9 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
     private var insertingTemplate = false
     private var timer: Timer?
     private var context: NotesEditorSelection?
-    private var alignmentContext: NotesEditorSelection?
+    private var formatMenuContext: NotesEditorSelection?
+    private var chosenMenuFormat: NotesEditorAction?
+    private var toolbarContinuity: EditorToolbarContinuity?
     private var picker: Process?
     private var hotkeys: EditorHotkeys?
     private let currentNoteActions = EditorCurrentNoteActions()
@@ -688,7 +708,7 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
         self.toolbarSettings = toolbarSettings
         self.typing = typing
         noteActionsBar = showNoteActionsBar ? EditorNoteActionsBar() : nil
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1, height: 38),
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1, height: 36),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         super.init()
         noteActionsBar?.choose = { [weak self] action, shownContext in
@@ -724,35 +744,51 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
     var toolbarView: NSView { background }
 
     private func rebuildToolbar() {
-        panel.setContentSize(NSSize(width: CGFloat(34 * (controls.count + 1) + 12), height: 38))
         background.subviews = []
         guard showToolbar else { return }
+        var x: CGFloat = 5
         for (index, action) in controls.enumerated() {
-            let button = action.makeButton(frame: NSRect(x: 6 + 34 * index, y: 4, width: 34, height: 30),
+            if action == .alignment, index > 0, controls[index - 1] == .format(.strikethrough) {
+                let separator = NSBox(frame: NSRect(x: x + 3, y: 8, width: 1, height: 20))
+                separator.boxType = .separator
+                background.addSubview(separator)
+                x += 7
+            }
+            let width: CGFloat = action == .paragraphStyles ? 44 : 30
+            let button = action.makeButton(frame: NSRect(x: x, y: 3, width: width, height: 30),
                                            target: self, action: #selector(apply(_:)))
             background.addSubview(button)
+            x += width
         }
-        let more = NSButton(frame: NSRect(x: 6 + 34 * controls.count, y: 4, width: 34, height: 30))
+        let more = NSButton(frame: NSRect(x: x, y: 3, width: 30, height: 30))
         more.isBordered = false
         more.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: nil)
         more.title = more.image == nil ? "…" : ""
-        more.setAccessibilityLabel("Customize Toolbar")
-        more.toolTip = "Customize Toolbar"
+        more.setAccessibilityLabel("More Actions")
+        more.toolTip = "More Actions"
         more.target = self
-        more.action = #selector(showCustomization(_:))
+        more.action = #selector(showMoreActions(_:))
         background.addSubview(more)
+        panel.setContentSize(NSSize(width: x + 35, height: 36))
     }
 
-    @objc private func showCustomization(_ sender: NSButton) {
+    @objc private func showMoreActions(_ sender: NSButton) {
         guard !customizing, let context, NotesEditorAccess.matchesBacklinkContext(context) else { return }
         customizing = true
         var requested: EditorToolbarMenu.Change?
+        var noteAction: EditorNoteAction?
         customize.apply = { requested = $0 }
+        customize.chooseNoteAction = { noteAction = $0 }
         let anchor = sender.convert(NSPoint(x: sender.bounds.midX, y: sender.bounds.minY), to: nil)
-        customize.menu(for: controls).popUp(positioning: nil, at: panel.convertPoint(toScreen: anchor), in: nil)
+        customize.overflow(for: controls).popUp(positioning: nil, at: panel.convertPoint(toScreen: anchor), in: nil)
         customize.apply = nil
+        customize.chooseNoteAction = nil
         customizing = false
         if let requested { applyCustomization(requested) }
+        if let noteAction {
+            hide()
+            afterMenu(for: context) { self.currentNoteActions.run(noteAction, for: context) }
+        }
         refresh()
     }
 
@@ -790,7 +826,7 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
     private func openPalette() {
         guard picker?.isRunning != true else { return }
         let process = Process()
-        process.executableURL = Bundle.main.executableURL
+        process.executableURL = NotesCLIApplication.cliExecutable
         process.arguments = ["palette"]
         if let active = NotesEditorAccess.selection(requireText: false) {
             process.arguments?.append(contentsOf: ["--selected-note", active.noteID.uuidString])
@@ -806,14 +842,21 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
     }
 
     private func refresh() {
-        guard !customizing else { return }
+        guard !customizing, formatMenuContext == nil else { return }
         let trusted = AXIsProcessTrusted()
+        let selection = trusted ? NotesEditorAccess.selection(requireText: false) : nil
+        if let continuity = toolbarContinuity {
+            if trusted, continuity.keepsPanel(for: selection,
+                frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier, helperPID: getpid(),
+                now: ProcessInfo.processInfo.systemUptime) { return }
+            toolbarContinuity = nil
+        }
         let directTyping = typing.isEnabled && trusted && EditorKeyTap.isDirectKeyboardLayout()
         if typing.isEnabled {
             keyTap.watch(directTyping ? NotesEditorAccess.frontmostPID() : nil, interceptNavigation: typing.interceptsSlashKeys)
         }
         guard showToolbar || typing.isEnabled || noteActionsBar != nil,
-              trusted, let selected = NotesEditorAccess.selection(requireText: false) else {
+              let selected = selection else {
             lastEditor = nil
             pendingSpace = nil
             clearSlashSequence()
@@ -830,7 +873,9 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
         }
         if directTyping && selected.length == 0 { refreshTyping(selected) }
         else { hideSlash() }
-        guard showToolbar, alignmentContext == nil, selected.length > 0, let bounds = NotesEditorAccess.bounds(selected),
+        guard showToolbar, selected.length > 0,
+              let bounds = NotesEditorAccess.bounds(selected.covering(NSRange(location: selected.location, length: 1)))
+                ?? NotesEditorAccess.bounds(selected),
               let origin = EditorPanelPlacement.origin(for: panel.frame.size, beside: bounds, preferBelow: false) else {
             hide()
             return
@@ -870,7 +915,7 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
 
     private func loadTemplates(for destination: UUID, now: TimeInterval) {
         if let catalog = templateCatalog, catalog.destination == destination, now - catalog.loaded < 15 { return }
-        guard !insertingTemplate, templateRequest == nil, let executable = Bundle.main.executableURL else { return }
+        guard !insertingTemplate, templateRequest == nil, let executable = NotesCLIApplication.cliExecutable else { return }
         templateRequest = destination
         let client = PaletteClient(executable: executable, backend: nil)
         let request = Task.detached { () throws -> [EditorTemplate] in
@@ -886,7 +931,7 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
     }
 
     private func handle(_ input: EditorKeyTap.Input) -> Bool {
-        guard !customizing else { return false }
+        guard !customizing, formatMenuContext == nil else { return false }
         let key = input.key
         let now = ProcessInfo.processInfo.systemUptime
         if key == .slash, typing.interceptsSlashKeys, let lastEditor {
@@ -1002,7 +1047,7 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
         dismissed = (caret, trigger)
         hideSlash()
         if case .template(let source) = choice.action {
-            guard !insertingTemplate, let executable = Bundle.main.executableURL else { return false }
+            guard !insertingTemplate, let executable = NotesCLIApplication.cliExecutable else { return false }
             insertingTemplate = true
             let client = PaletteClient(executable: executable, backend: nil)
             let destination = caret.noteID
@@ -1044,42 +1089,74 @@ final class NotesEditorToolbar: NSObject, NSApplicationDelegate {
 
     private func hide() {
         context = nil
+        toolbarContinuity = nil
         if panel.isVisible { panel.orderOut(nil) }
     }
 
     @objc private func apply(_ sender: NSButton) {
         guard let action = sender.identifier.flatMap({ EditorToolbarControl($0.rawValue) }),
               let context else { return }
-        hide()
         switch action {
         case .format(let value):
+            keepToolbarThroughFormatting(context)
             if !NotesEditorAccess.perform(value, for: context) { NSSound.beep() }
-        case .note(let value): currentNoteActions.run(value, for: context)
-        case .alignment:
-            let anchor = sender.convert(NSPoint(x: sender.bounds.midX, y: sender.bounds.minY), to: nil)
-            showAlignment(at: panel.convertPoint(toScreen: anchor), for: context)
+        case .note(let value):
+            hide()
+            currentNoteActions.run(value, for: context)
+        case .alignment, .paragraphStyles:
+            let anchor = sender.convert(NSPoint(x: sender.bounds.minX, y: sender.bounds.minY - 7), to: nil)
+            let choices = action == .paragraphStyles ? EditorToolbarControl.paragraphChoices
+                : [.alignLeft, .alignCenter, .alignRight, .justify]
+            showFormatMenu(choices, at: panel.convertPoint(toScreen: anchor), for: context)
         }
     }
 
-    private func showAlignment(at point: NSPoint, for context: NotesEditorSelection) {
-        guard alignmentContext == nil, NotesEditorAccess.selection() == context else { return }
-        alignmentContext = context
-        defer { alignmentContext = nil }
+    private func showFormatMenu(_ choices: [NotesEditorAction], at point: NSPoint, for context: NotesEditorSelection) {
+        guard formatMenuContext == nil, NotesEditorAccess.selection() == context else { return }
+        formatMenuContext = context
+        chosenMenuFormat = nil
         let menu = NSMenu()
-        let choices: [NotesEditorAction] = [.alignLeft, .alignCenter, .alignRight, .justify]
         for choice in choices {
             let item = NSMenuItem(title: EditorToolbarControl.format(choice).title,
-                                  action: #selector(applyAlignment(_:)), keyEquivalent: "")
+                                  action: #selector(applyMenuFormat(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = choice.rawValue
+            item.image = NSImage(systemSymbolName: choice.symbol, accessibilityDescription: nil)
             menu.addItem(item)
         }
         menu.popUp(positioning: nil, at: point, in: nil)
+        let action = chosenMenuFormat
+        chosenMenuFormat = nil
+        formatMenuContext = nil
+        keepToolbarThroughFormatting(context)
+        if let action {
+            afterMenu(for: context) {
+                self.keepToolbarThroughFormatting(context)
+                if !NotesEditorAccess.perform(action, for: context) { NSSound.beep() }
+            }
+        }
     }
 
-    @objc private func applyAlignment(_ item: NSMenuItem) {
-        guard let context = alignmentContext, let raw = item.representedObject as? String,
+    private func keepToolbarThroughFormatting(_ selection: NotesEditorSelection) {
+        toolbarContinuity = EditorToolbarContinuity(selection, now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    @objc private func applyMenuFormat(_ item: NSMenuItem) {
+        guard formatMenuContext != nil, let raw = item.representedObject as? String,
               let action = NotesEditorAction(rawValue: raw) else { return }
-        if !NotesEditorAccess.perform(action, for: context) { NSSound.beep() }
+        chosenMenuFormat = action
+    }
+
+    private func afterMenu(for context: NotesEditorSelection, perform: @escaping @MainActor () -> Void) {
+        if NotesEditorAccess.selection() == context {
+            perform()
+        } else if NSWorkspace.shared.frontmostApplication?.processIdentifier == getpid(),
+                  NotesEditorAccess.matchesBacklinkContext(context) {
+            // A native menu can leave focus on this process briefly as it closes.
+            Task {
+                try? await Task.sleep(for: .milliseconds(80))
+                if NotesEditorAccess.selection() == context { perform() }
+            }
+        }
     }
 }

@@ -11,7 +11,6 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "notescli", targets: ["notescli"]),
-        .executable(name: "Notes CLI", targets: ["NotesCapabilityHost"]),
         .library(name: "NotesCore", targets: ["NotesCore"]),
         .library(name: "NotesSync", targets: ["NotesSync"]),
         .library(name: "NotesSafety", targets: ["NotesSafety"]),
@@ -46,8 +45,7 @@ let package = Package(
         .target(name: "NotesDiagrams", dependencies: ["NotesCore"], linkerSettings: [
             .linkedFramework("AppKit"), .linkedFramework("CoreGraphics"), .linkedFramework("WebKit")
         ]),
-        .target(name: "NotesHost", dependencies: ["NotesCore"]),
-        .executableTarget(name: "NotesCapabilityHost", dependencies: ["NotesHost"], linkerSettings: [
+        .target(name: "NotesHost", dependencies: ["NotesCore"], linkerSettings: [
             .linkedFramework("Security")
         ]),
         // MCP server over stdio, same operations as the CLI.

@@ -1534,12 +1534,17 @@ enum PermissionGuide {
 
     static func openSettings() -> Bool { open(settingsArguments) }
 
-    static func openEditorAccessibility(launch: ([String]) -> Bool = open,
+    static func openEditorAccessibility(usesApp: Bool = NotesCLIApplication.supportsEmbeddedEditor(at: CapabilityHostPaths.app),
+                                        launch: ([String]) -> Bool = open,
                                         show: (String) -> Void = { print($0) }) {
         if !launch(["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]) {
             show("In System Settings > Privacy & Security, look for Accessibility or Device Control and Data Access.")
         }
-        show("Allow the app that starts the editor. For launch at login, look for Notes CLI or notescli.")
+        if usesApp {
+            show("Turn on Notes CLI. If it isn’t listed, add Notes CLI.app from your Applications folder.")
+        } else {
+            show("Allow the app that runs notescli, such as Terminal.")
+        }
     }
 
     static func openFullDiskAccess(revealing app: URL?, silent: Bool = false,

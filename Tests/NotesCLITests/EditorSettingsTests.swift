@@ -3,6 +3,37 @@ import XCTest
 @testable import notescli
 
 final class EditorSettingsTests: XCTestCase {
+    func testCompactToolbarKeepsNoteActionsInOverflow() throws {
+        try MainActor.assumeIsolated {
+            _ = NSApplication.shared
+            let controls = try EditorSettings().validate().controls
+            let toolbar = NotesEditorToolbar(controls, typing: .init(), showNoteActionsBar: false, toolbarSettings: nil)
+            XCTAssertEqual(toolbar.toolbarView.subviews.compactMap { $0.identifier?.rawValue },
+                           ["paragraph-styles", "bold", "italic", "underline", "strikethrough",
+                            "alignment", "highlight", "link", "checklist"])
+            XCTAssertLessThan(toolbar.toolbarView.frame.width, 400)
+            let styles = try XCTUnwrap(toolbar.toolbarView.subviews.first as? NSButton)
+            XCTAssertEqual(styles.title, "Aa")
+            XCTAssertEqual(EditorToolbarControl.paragraphChoices, [.title, .heading, .subheading, .body, .monostyled])
+
+            let customizer = EditorToolbarMenu()
+            var chosen: [EditorNoteAction] = []
+            customizer.chooseNoteAction = { chosen.append($0) }
+            let overflow = customizer.overflow(for: controls)
+            for action in EditorNoteAction.allCases {
+                let index = overflow.indexOfItem(withTitle: action.title)
+                XCTAssertGreaterThanOrEqual(index, 0)
+                if index >= 0 { overflow.performActionForItem(at: index) }
+            }
+            XCTAssertEqual(chosen, EditorNoteAction.allCases)
+            XCTAssertNotNil(overflow.item(withTitle: "Customize Toolbar")?.submenu?.item(withTitle: "Reset Toolbar"))
+            let expanded = customizer.overflow(for: controls + [.note(.backlinks)])
+            XCTAssertNil(expanded.item(withTitle: "Backlinks"))
+            XCTAssertNotNil(expanded.item(withTitle: "Customize Toolbar")?.submenu?.item(withTitle: "Backlinks")?
+                .submenu?.item(withTitle: "Move to More Actions"))
+        }
+    }
+
     func testToolbarMenuAppliesChangesInPlaceAndSurvivesRelaunch() throws {
         try withStore { store in
             try editor("--save-settings", "--actions", "bold,italic,underline",
@@ -136,10 +167,39 @@ final class EditorSettingsTests: XCTestCase {
     func testAccessibilityGuideOpensOnlyTheAccessibilityPane() {
         var calls: [[String]] = []
         var messages: [String] = []
-        PermissionGuide.openEditorAccessibility(launch: { calls.append($0); return false },
+        PermissionGuide.openEditorAccessibility(usesApp: true, launch: { calls.append($0); return false },
                                                 show: { messages.append($0) })
         XCTAssertEqual(calls, [["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]])
         XCTAssertEqual(messages.first, "In System Settings > Privacy & Security, look for Accessibility or Device Control and Data Access.")
+        XCTAssertEqual(messages.last, "Turn on Notes CLI. If it isn’t listed, add Notes CLI.app from your Applications folder.")
+        PermissionGuide.openEditorAccessibility(usesApp: false, launch: { _ in true }, show: { messages.append($0) })
+        XCTAssertEqual(messages.last, "Allow the app that runs notescli, such as Terminal.")
+    }
+
+    func testPermissionIdentityBelongsOnlyToTheAppMainExecutable() throws {
+        try withStore { store in
+            let app = store.url.deletingLastPathComponent().appendingPathComponent("Notes CLI.app", isDirectory: true)
+            let main = app.appendingPathComponent(NotesCLIApplication.mainPath)
+            let helper = app.appendingPathComponent(NotesCLIApplication.helperPath)
+            for executable in [main, helper] {
+                try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: executable)
+            }
+            let plist = app.appendingPathComponent("Contents/Info.plist")
+            let info: [String: Any] = ["CFBundleIdentifier": NotesCLIApplication.identifier,
+                                       "CFBundleExecutable": "Notes CLI", "CFBundlePackageType": "APPL"]
+            func write(_ info: [String: Any]) throws {
+                try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: plist)
+            }
+            try write(info)
+            XCTAssertFalse(NotesCLIApplication.supportsEmbeddedEditor(at: app))
+            try write(info.merging(["NotesCLIEmbeddedEditor": true]) { _, new in new })
+            XCTAssertTrue(NotesCLIApplication.supportsEmbeddedEditor(at: app))
+            let bundle = try XCTUnwrap(Bundle(url: app))
+            XCTAssertTrue(NotesCLIApplication.isMainExecutable(bundle: bundle, invokedAs: main.path))
+            XCTAssertFalse(NotesCLIApplication.isMainExecutable(bundle: bundle, invokedAs: helper.path))
+            XCTAssertFalse(NotesCLIApplication.isMainExecutable(bundle: .main, invokedAs: main.path))
+        }
     }
 
     func testInvalidSettingsDoNotOverwriteSavedSettings() throws {

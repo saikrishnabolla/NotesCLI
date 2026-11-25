@@ -16,7 +16,7 @@ notescli onboard
 From a release archive:
 
 ```bash
-tar -xzf notescli-1.1.15-macos-universal.tar.gz
+tar -xzf notescli-1.1.16-macos-universal.tar.gz
 mkdir -p "$HOME/.local/bin" "$HOME/Applications"
 install -m 755 notescli "$HOME/.local/bin/notescli"
 ditto "Notes CLI.app" "$HOME/Applications/Notes CLI.app"

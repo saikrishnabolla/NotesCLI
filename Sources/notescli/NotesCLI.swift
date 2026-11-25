@@ -38,6 +38,9 @@ struct NotesCLI: ParsableCommand {
 
     static func main() {
         do {
+            if NotesCLIApplication.isMainExecutable, CommandLine.arguments.count == 1 {
+                CapabilityHostDaemon.run()
+            }
             if try runInternalCommand() { return }
             if shouldUseCapabilityHost() {
                 Darwin.exit(try CapabilityHostClient.run(arguments: Array(CommandLine.arguments.dropFirst())))
@@ -114,6 +117,46 @@ struct NotesCLI: ParsableCommand {
         else { Output.error(e.description) }
         let code: Int32 = status ?? (e.code.contains("not_found") ? 3 : e.code.contains("denied") || e.code == "read_only" || e.code.contains("permission") ? 4 : e.code == "write_outcome_unknown" ? 5 : e.code.hasPrefix("invalid_") || e.code == "usage" ? 2 : 1)
         Darwin.exit(code)
+    }
+}
+
+enum NotesCLIApplication {
+    static let identifier = "com.saikrishnabolla.notescli.capability-host"
+    static let mainPath = "Contents/MacOS/Notes CLI"
+    static let helperPath = "Contents/Helpers/notescli"
+
+    static var isMainExecutable: Bool {
+        isMainExecutable(bundle: .main, invokedAs: CommandLine.arguments[0])
+    }
+
+    static func isMainExecutable(bundle: Bundle, invokedAs: String) -> Bool {
+        guard bundle.bundleIdentifier == identifier, bundle.bundleURL.pathExtension == "app",
+              let executable = bundle.executableURL else { return false }
+        let main = bundle.bundleURL.appendingPathComponent(mainPath).resolvingSymlinksInPath()
+        return executable.resolvingSymlinksInPath() == main && URL(fileURLWithPath: invokedAs).resolvingSymlinksInPath() == main
+    }
+
+    // Subprocesses that talk to the host use the signed CLI identity, not the app's identity.
+    static var cliExecutable: URL? {
+        isMainExecutable ? Bundle.main.bundleURL.appendingPathComponent(helperPath) : Bundle.main.executableURL
+    }
+
+    static func supportsEmbeddedEditor(at app: URL) -> Bool {
+        let plist = app.appendingPathComponent("Contents/Info.plist")
+        guard let data = try? Data(contentsOf: plist), let dictionary = try? PropertyListSerialization.propertyList(
+            from: data, options: [], format: nil) as? [String: Any] else { return false }
+        return dictionary["NotesCLIEmbeddedEditor"] as? Bool == true
+    }
+
+    static func forwardEditorIfInstalled() throws {
+        let app = CapabilityHostPaths.app
+        guard !isMainExecutable, supportsEmbeddedEditor(at: app), HostInstallation.validSignature(app) else { return }
+        let executable = app.appendingPathComponent(mainPath)
+        // Replace this process so Control-C and the command's exit code still work in Terminal.
+        var argv = ([executable.path] + CommandLine.arguments.dropFirst()).map { strdup($0) } + [nil]
+        defer { argv.forEach { free($0) } }
+        _ = executable.path.withCString { execv($0, &argv) }
+        throw NotesError("editor_app_launch_failed", "Could not start Notes CLI.app. Run 'notescli onboard' to repair it.")
     }
 }
 

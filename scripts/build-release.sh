@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${NOTESCLI_VERSION:-1.1.15}"
+VERSION="${NOTESCLI_VERSION:-1.1.16}"
 IDENTITY="${NOTESCLI_SIGNING_IDENTITY:-Developer ID Application: Sai Krishna Bolla (GXKRUPGJVF)}"
 INFO_PLIST="$ROOT/packaging/macos/Info.plist"
 HOST_INFO_PLIST="$ROOT/packaging/macos/CapabilityHost-Info.plist"
@@ -10,6 +10,19 @@ ENTITLEMENTS="$ROOT/packaging/macos/notescli.entitlements"
 ICON_SOURCE="$ROOT/packaging/macos/AppIcon.icon"
 OUTPUT_DIR="${NOTESCLI_RELEASE_DIR:-$ROOT/dist}"
 NOTARY_PROFILE="${NOTESCLI_NOTARY_PROFILE:-}"
+
+verify_bundle_names() {
+    [[ "$(plutil -extract CFBundleName raw -expect string "$1")" == "Notes CLI" &&
+       "$(plutil -extract CFBundleDisplayName raw -expect string "$1")" == "Notes CLI" ]] || {
+        echo "The bundle name and display name must both be Notes CLI: $1" >&2; exit 1;
+    }
+}
+
+verify_editor_marker() {
+    [[ "$(plutil -extract NotesCLIEmbeddedEditor raw -expect bool "$1")" == "true" ]] || {
+        echo "The Notes CLI app is missing the embedded editor marker: $1" >&2; exit 1;
+    }
+}
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "build-release.sh requires macOS." >&2; exit 1; }
 [[ -f "$INFO_PLIST" && -f "$HOST_INFO_PLIST" && -f "$ENTITLEMENTS" && -f "$ICON_SOURCE/icon.json" ]] || { echo "Release metadata is missing." >&2; exit 1; }
@@ -26,6 +39,8 @@ cp "$INFO_PLIST" "$RELEASE_INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$RELEASE_INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$RELEASE_INFO_PLIST"
 HOST_APP="$STAGING/Notes CLI.app"
+HOST_EXECUTABLE="$HOST_APP/Contents/MacOS/Notes CLI"
+HOST_IDENTIFIER="com.saikrishnabolla.notescli.capability-host"
 mkdir -p "$HOST_APP/Contents/MacOS" "$HOST_APP/Contents/Helpers" "$HOST_APP/Contents/Resources"
 cp "$HOST_INFO_PLIST" "$HOST_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$HOST_APP/Contents/Info.plist"
@@ -40,19 +55,16 @@ plutil -insert CFBundleIconName -string "$(plutil -extract CFBundleIconName raw 
 }
 
 echo "Building notescli $VERSION for arm64 and x86_64"
-NOTESCLI_INFO_PLIST="$RELEASE_INFO_PLIST" swift build --package-path "$ROOT" -c release --arch arm64 --arch x86_64
+NOTESCLI_INFO_PLIST="$RELEASE_INFO_PLIST" swift build --package-path "$ROOT" -c release --product notescli --arch arm64 --arch x86_64
 
 BUILT="$ROOT/.build/apple/Products/Release/notescli"
-BUILT_HOST="$ROOT/.build/apple/Products/Release/Notes CLI"
 if [[ ! -x "$BUILT" ]]; then
     BUILT="$ROOT/.build/release/notescli"
-    BUILT_HOST="$ROOT/.build/release/Notes CLI"
 fi
 [[ -x "$BUILT" ]] || { echo "Could not find the release executable." >&2; exit 1; }
-[[ -x "$BUILT_HOST" ]] || { echo "Could not find the Notes CLI app executable." >&2; exit 1; }
 
 cp "$BUILT" "$STAGING/notescli"
-cp "$BUILT_HOST" "$HOST_APP/Contents/MacOS/Notes CLI"
+cp "$BUILT" "$HOST_EXECUTABLE"
 if [[ "$IDENTITY" == "-" ]]; then
     echo "Signing ad hoc because NOTESCLI_SIGNING_IDENTITY=-"
     codesign --force --entitlements "$ENTITLEMENTS" --sign - "$STAGING/notescli"
@@ -62,11 +74,9 @@ else
 fi
 cp "$STAGING/notescli" "$HOST_APP/Contents/Helpers/notescli"
 if [[ "$IDENTITY" == "-" ]]; then
-    codesign --force --entitlements "$ENTITLEMENTS" --sign - "$HOST_APP/Contents/MacOS/Notes CLI"
-    codesign --force --entitlements "$ENTITLEMENTS" --sign - "$HOST_APP"
+    codesign --force --identifier "$HOST_IDENTIFIER" --entitlements "$ENTITLEMENTS" --sign - "$HOST_APP"
 else
-    codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP/Contents/MacOS/Notes CLI"
-    codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP"
+    codesign --force --identifier "$HOST_IDENTIFIER" --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$IDENTITY" "$HOST_APP"
 fi
 
 ARCHITECTURES="$(lipo -archs "$STAGING/notescli")"
@@ -83,7 +93,11 @@ echo "Architectures: $ARCHITECTURES"
     echo "The Notes CLI app contains the wrong CLI version; expected $VERSION." >&2
     exit 1
 }
-for BINARY in "$HOST_APP/Contents/MacOS/Notes CLI" "$HOST_APP/Contents/Helpers/notescli"; do
+[[ "$("$HOST_EXECUTABLE" --version)" == "$VERSION" ]] || {
+    echo "The Notes CLI app executable version does not match $VERSION." >&2
+    exit 1
+}
+for BINARY in "$HOST_EXECUTABLE" "$HOST_APP/Contents/Helpers/notescli"; do
     INNER_ARCHITECTURES="$(lipo -archs "$BINARY")"
     [[ " $INNER_ARCHITECTURES " == *" arm64 "* && " $INNER_ARCHITECTURES " == *" x86_64 "* ]] || {
         echo "Release binary is not universal: $BINARY ($INNER_ARCHITECTURES)" >&2
@@ -94,9 +108,10 @@ codesign --verify --strict --verbose=4 "$STAGING/notescli"
 codesign --verify --deep --strict --verbose=4 "$HOST_APP"
 [[ "$(codesign -d --verbose=4 "$STAGING/notescli" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli" ]]
 [[ "$(codesign -d --verbose=4 "$HOST_APP/Contents/Helpers/notescli" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli" ]]
-[[ "$(codesign -d --verbose=4 "$HOST_APP" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "com.saikrishnabolla.notescli.capability-host" ]]
+[[ "$(codesign -d --verbose=4 "$HOST_APP" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "$HOST_IDENTIFIER" ]]
+[[ "$(codesign -d --verbose=4 "$HOST_EXECUTABLE" 2>&1 | awk -F= '$1 == "Identifier" { print $2 }')" == "$HOST_IDENTIFIER" ]]
 codesign -d --verbose=4 --entitlements - "$STAGING/notescli" 2>&1
-for BINARY in "$STAGING/notescli" "$HOST_APP/Contents/MacOS/Notes CLI"; do
+for BINARY in "$STAGING/notescli" "$HOST_EXECUTABLE"; do
     CAMERA_ENTITLEMENT="$(codesign -d --entitlements - --xml "$BINARY" 2>&1 | sed -n '/^<?xml/,$p' | plutil -extract 'com\.apple\.security\.device\.camera' raw - 2>/dev/null || true)"
     [[ "$CAMERA_ENTITLEMENT" == "true" ]] || {
         echo "The signed binary is missing the camera entitlement: $BINARY" >&2
@@ -113,6 +128,7 @@ INFO_SIZE="$(printf '%s\n' "$INFO_SECTION" | awk '$1 == "size" { print $2; exit 
     exit 1
 }
 dd if="$STAGING/notescli-x86_64" of="$STAGING/embedded-Info.plist" bs=1 skip="$INFO_OFFSET" count="$((INFO_SIZE))" status=none
+verify_bundle_names "$STAGING/embedded-Info.plist"
 [[ "$(plutil -extract NSAppleEventsUsageDescription raw "$STAGING/embedded-Info.plist")" == "Notes CLI uses Apple Events to create and update notes through the Notes app." ]] || {
     echo "The embedded Info.plist is missing NSAppleEventsUsageDescription." >&2
     exit 1
@@ -148,8 +164,8 @@ echo "Camera usage descriptions present"
 [[ "$(plutil -extract CFBundleVersion raw "$HOST_APP/Contents/Info.plist")" == "$VERSION" ]] || {
     echo "The Notes CLI app build version does not match $VERSION." >&2; exit 1;
 }
-[[ "$(plutil -extract CFBundleDisplayName raw "$HOST_APP/Contents/Info.plist")" == "Notes CLI" ]]
-[[ "$(plutil -extract CFBundleName raw "$HOST_APP/Contents/Info.plist")" == "Notes CLI" ]]
+verify_bundle_names "$HOST_APP/Contents/Info.plist"
+verify_editor_marker "$HOST_APP/Contents/Info.plist"
 [[ "$(plutil -extract CFBundleExecutable raw "$HOST_APP/Contents/Info.plist")" == "Notes CLI" ]]
 [[ "$(plutil -extract CFBundleIconFile raw "$HOST_APP/Contents/Info.plist")" == "AppIcon" ]]
 [[ "$(plutil -extract CFBundleIconName raw "$HOST_APP/Contents/Info.plist")" == "AppIcon" ]]
@@ -186,11 +202,19 @@ ditto -x -k "$ZIP" "$ZIP_VERIFY"
 tar -xzf "$TARBALL" -C "$TAR_VERIFY"
 for EXTRACTED in "$ZIP_VERIFY" "$TAR_VERIFY"; do
     [[ "$("$EXTRACTED/notescli" --version)" == "$VERSION" ]]
+    cmp -s "$STAGING/notescli" "$EXTRACTED/notescli" || {
+        echo "An extracted stand-alone CLI differs from the verified binary." >&2; exit 1;
+    }
+    [[ "$("$EXTRACTED/Notes CLI.app/Contents/MacOS/Notes CLI" --version)" == "$VERSION" ]] || {
+        echo "An extracted Notes CLI app executable version does not match $VERSION." >&2; exit 1;
+    }
     [[ "$("$EXTRACTED/Notes CLI.app/Contents/Helpers/notescli" --version)" == "$VERSION" ]] || {
         echo "An extracted Notes CLI app contains the wrong CLI version." >&2; exit 1;
     }
     codesign --verify --strict --verbose=4 "$EXTRACTED/notescli"
     codesign --verify --deep --strict --verbose=4 "$EXTRACTED/Notes CLI.app"
+    verify_bundle_names "$EXTRACTED/Notes CLI.app/Contents/Info.plist"
+    verify_editor_marker "$EXTRACTED/Notes CLI.app/Contents/Info.plist"
     [[ "$(plutil -extract CFBundleIconFile raw "$EXTRACTED/Notes CLI.app/Contents/Info.plist")" == "AppIcon" ]]
     [[ "$(plutil -extract CFBundleIconName raw "$EXTRACTED/Notes CLI.app/Contents/Info.plist")" == "AppIcon" ]]
     [[ -s "$EXTRACTED/Notes CLI.app/Contents/Resources/AppIcon.icns" ]]

@@ -3,6 +3,7 @@ import CryptoKit
 import XCTest
 import Foundation
 import ImageIO
+import NotesCore
 import NotesSafety
 import UniformTypeIdentifiers
 
@@ -823,7 +824,7 @@ final class CLITests: XCTestCase {
         let json = try run(["--backend", "fake", "--json"])
         XCTAssertEqual(json.0, 0, json.2)
         let home = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.1.utf8)) as? [String: Any])
-        XCTAssertEqual(home["version"] as? String, "1.1.14")
+        XCTAssertEqual(home["version"] as? String, notesCLIVersion)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.compactMap { $0["number"] as? Int }, [2, 1])
         XCTAssertEqual((home["recent"] as? [[String: Any]])?.map { $0.keys.sorted() },

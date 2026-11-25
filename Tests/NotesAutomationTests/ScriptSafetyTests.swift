@@ -7,7 +7,7 @@ final class ScriptSafetyTests: XCTestCase {
     // No Notes Apple Events are sent by these tests.
     private func exercise(_ payload: [String: String]) throws -> [String: Any] {
         let fixture = #"""
-        let deleted = 0, made = 0, moved = 0;
+        let deleted = 0, made = 0, moved = 0, accountQueries = 0;
         const account = {id:()=> 'account', name:()=> 'account', upgraded:()=> true};
         const root = {id:()=> 'root', name:()=> 'Root', container:()=> account, folders:()=> [], notes:()=> [], shared:()=> false};
         const trash = {id:()=> 'trash', name:()=> 'Supprimées récemment', container:()=> account, folders:()=> [], notes:()=> [], shared:()=> false};
@@ -17,7 +17,7 @@ final class ScriptSafetyTests: XCTestCase {
         const note = {id:()=> 'x-coredata://test/ICNote/p1', name:()=> 'synthetic', container:()=> trash, passwordProtected:()=> false, shared:()=> false};
         account.defaultFolder = ()=> root;
         account.folders = ()=> [root, trash, stale];
-        const app = {defaultAccount:()=> account, accounts:()=> [account], notes:{whose:()=> ()=> [note]}, delete:()=> {deleted++;}, make:()=> {made++; return root;}, move:()=> {moved++;}};
+        const app = {defaultAccount:()=> account, accounts:()=> {accountQueries++; return [account];}, notes:{whose:()=> ()=> [note]}, delete:()=> {deleted++;}, make:()=> {made++; return root;}, move:()=> {moved++;}};
         function Application(bundle) {return app;}
         """#
         let operation = NotesScripts.operation.replacingOccurrences(of: "function run(argv)", with: "function perform(argv)")
@@ -29,8 +29,18 @@ final class ScriptSafetyTests: XCTestCase {
             if (p.listFixture) {note.container=()=>root; root.notes=()=>[note]; trash.notes=()=>[note];}
             if (p.outsideAllowed) {note.container=()=>root; root.notes=()=>[note];}
             if (p.moveFixture) root.folders=()=> [child];
+            if (p.folderInventoryFixture) {
+                account.folders=()=> [root, child, trash, stale];
+                root.folders=()=> [child, child, stale];
+            }
+            if (p.scopedListFixture) {
+                root.folders=()=> [child];
+                root.notes=()=> {throw new Error('must not scan outside scope');};
+                child.notes=()=> [note];
+                note.container=()=> child;
+            }
             const reply=JSON.parse(perform(argv));
-            return JSON.stringify({reply:reply, deleted:deleted, made:made, moved:moved});
+            return JSON.stringify({reply:reply, deleted:deleted, made:made, moved:moved, accountQueries:accountQueries});
         }
         """#
         let data = try JSONEncoder().encode(payload)
@@ -44,6 +54,24 @@ final class ScriptSafetyTests: XCTestCase {
         let reply = try XCTUnwrap(result["reply"] as? [String: Any])
         XCTAssertEqual(reply["folderID"] as? String, "root")
         XCTAssertNil(reply["errorNumber"])
+    }
+    func testFolderInventoryUsesVerifiedParentsWithoutLookingUpAccountsAgain() throws {
+        let result = try exercise(["operation": "listFolders", "folderInventoryFixture": "yes",
+                                   "protectedFolderNamesJSON": #"["Supprimées récemment"]"#])
+        let reply = try XCTUnwrap(result["reply"] as? [String: Any])
+        let rows = try XCTUnwrap(reply["folders"] as? [[String: Any]])
+        XCTAssertEqual(rows.compactMap { $0["id"] as? String }, ["root", "child"])
+        XCTAssertEqual(rows.compactMap { $0["path"] as? [String] }, [["Root"], ["Root", "Child"]])
+        XCTAssertEqual(rows.compactMap { $0["accountID"] as? String }, ["account", "account"])
+        XCTAssertEqual(result["accountQueries"] as? Int, 1)
+    }
+    func testScopedNoteInventoryNeverEnumeratesNotesInAnUnrelatedFolder() throws {
+        let result = try exercise(["operation": "list", "scopedListFixture": "yes", "folderIDsJSON": #"["child"]"#,
+                                   "protectedFolderNamesJSON": #"["Supprimées récemment"]"#])
+        let reply = try XCTUnwrap(result["reply"] as? [String: Any])
+        let notes = try XCTUnwrap(reply["notes"] as? [[String: Any]])
+        XCTAssertEqual(notes.compactMap { $0["folderID"] as? String }, ["child"])
+        XCTAssertEqual(notes.compactMap { $0["folderPath"] as? [String] }, [["Root", "Child"]])
     }
     func testLocalizedTrashNoteCannotBeDeleted() throws {
         let result = try exercise(["operation": "deleteNote", "ref": "x-coredata://test/ICNote/p1",

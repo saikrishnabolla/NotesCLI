@@ -1,2 +1,2 @@
 /// The NotesCLI release version, shared by the CLI and the MCP server.
-public let notesCLIVersion = "1.1.14"
+public let notesCLIVersion = "1.1.15"

@@ -21,7 +21,7 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
     private let permissionCheck: @Sendable () throws -> Void
     private let lock = NSLock()
     private var cachedSnapshot: ScriptingSnapshot?
-    private var cachedAt: Date?
+    private var cachedAt: ContinuousClock.Instant?
 
     public init(timeout: TimeInterval = 30, snapshotTTL: TimeInterval = 1) {
         runner = OSAScriptRunner()
@@ -56,7 +56,7 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
         return value.folders.filter { accountIDs == nil || accountIDs!.contains($0.accountID) }.map {
             Folder(id: $0.id, name: $0.name, accountID: $0.accountID, parentID: $0.parentID,
                    path: $0.path, isSmartFolder: false, isRecentlyDeleted: $0.isRecentlyDeleted,
-                   noteCount: counts[$0.id, default: 0], coreDataID: $0.id)
+                   noteCount: $0.noteCount ?? counts[$0.id, default: 0], coreDataID: $0.id)
         }
     }
 
@@ -73,12 +73,12 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
             if let after = query.modifiedAfter, (item.modified ?? .distantPast) < after { return false }
             if let before = query.modifiedBefore, (item.modified ?? .distantFuture) > before { return false }
             if let foldedText {
-                let haystack = (item.title + "\n" + limitedPlainText(item.bodyHTML ?? ""))
+                let haystack = (item.title + "\n" + (item.isLocked ? "" : item.bodyText ?? ""))
                     .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                 if !haystack.contains(foldedText) { return false }
             }
             return true
-        }.map(summary)
+        }.map { summary($0) }
         notes.sort { ($0.modified ?? .distantPast, $0.id.uuid) > ($1.modified ?? .distantPast, $1.id.uuid) }
         if let limit = query.limit { notes = Array(notes.prefix(limit)) }
         return notes
@@ -91,10 +91,19 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
         }, number: { _ in [] }, title: { title in
             value.notes.filter { $0.title == title }
         }, key: \.id, describe: { NoteReference.describe(number: nil, uuid: $0.id, title: $0.title) })
-        guard !item.isLocked, let html = item.bodyHTML else {
+        guard !item.isLocked, let text = item.bodyText else {
             throw NotesError("note_locked", "The note body is unavailable.")
         }
-        return Note(summary: summary(item), document: NoteDocument(text: limitedPlainText(html), runs: []), attachments: [])
+        return Note(summary: summary(item), document: NoteDocument(text: text, runs: []), attachments: [])
+    }
+
+    public func editorSearch(_ query: EditorSearchQuery) throws -> [EditorSearchMatch] {
+        let value = try snapshot()
+        let deletedFolders = Set(value.folders.filter(\.isRecentlyDeleted).map(\.id))
+        return value.notes.compactMap { item in
+            guard !deletedFolders.contains(item.folderID) else { return nil }
+            return query.match(summary(item, includeSnippet: false), body: { item.bodyText })
+        }
     }
 
     public func tags() throws -> [String: Int] { throw unsupported("tags") }
@@ -116,9 +125,10 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
                    hint: "Grant Full Disk Access for full-fidelity reads.")
     }
 
-    private func summary(_ item: ScriptingSnapshot.NoteValue) -> NoteSummary {
-        let body = limitedPlainText(item.bodyHTML ?? "")
-        let snippet = body.split(separator: "\n").dropFirst().joined(separator: " ")
+    private func summary(_ item: ScriptingSnapshot.NoteValue, includeSnippet: Bool = true) -> NoteSummary {
+        let snippet = includeSnippet && !item.isLocked
+            ? (item.bodyText ?? "").split(whereSeparator: \.isNewline).dropFirst().joined(separator: " ")
+            : ""
         return NoteSummary(id: NoteID(uuid: item.id, coreDataID: item.id), title: item.title,
                            snippet: String(snippet.prefix(240)), folderID: item.folderID,
                            folderPath: item.folderPath, accountID: item.accountID,
@@ -152,22 +162,34 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
 
     private func snapshot() throws -> ScriptingSnapshot {
         try lock.withLock {
-            if let cachedSnapshot, let cachedAt, Date().timeIntervalSince(cachedAt) < snapshotTTL {
+            do {
+                try permissionCheck()
+            } catch {
+                cachedSnapshot = nil
+                cachedAt = nil
+                throw error
+            }
+            if let cachedSnapshot, let cachedAt, cachedAt.duration(to: .now) < .seconds(snapshotTTL) {
                 return cachedSnapshot
             }
+            cachedSnapshot = nil
+            cachedAt = nil
             let value = try loadSnapshot()
-            cachedSnapshot = value
-            cachedAt = Date()
+            if snapshotTTL > 0 {
+                cachedSnapshot = value
+                cachedAt = .now
+            }
             return value
         }
     }
 
     private func loadSnapshot() throws -> ScriptingSnapshot {
-        try permissionCheck()
-        var output = try runner.run(source: Self.source, language: .javaScript, arguments: [], timeout: timeout)
+        let names = try JSONEncoder().encode(ProtectedFolders.names ?? ["Recently Deleted", "Trash"])
+        let arguments = [String(decoding: names, as: UTF8.self)]
+        var output = try runner.run(source: Self.source, language: .javaScript, arguments: arguments, timeout: timeout)
         if Self.errorNumber(output) == -600 {
             _ = try runner.run(source: NotesScripts.launch, language: .javaScript, arguments: [], timeout: min(timeout, 10))
-            output = try runner.run(source: Self.source, language: .javaScript, arguments: [], timeout: timeout)
+            output = try runner.run(source: Self.source, language: .javaScript, arguments: arguments, timeout: timeout)
         }
         if output.timedOut { throw NotesError("automation_timeout", "Notes Automation timed out.") }
         if output.status != 0 { throw Self.scriptError(output) }
@@ -176,7 +198,9 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
         let response: ScriptingSnapshot
         do { response = try decoder.decode(ScriptingSnapshot.self, from: Data(output.stdout.utf8)) }
         catch { throw Self.scriptError(output) }
-        if let number = response.errorNumber { throw Self.scriptError(number: number, code: response.errorCode) }
+        if response.errorNumber != nil || response.errorCode != nil {
+            throw Self.scriptError(number: response.errorNumber ?? -1, code: response.errorCode)
+        }
         guard response.accounts != nil, response.folders != nil, response.notes != nil else {
             throw NotesError("invalid_script_response", "Notes returned an incomplete limited-read response.")
         }
@@ -190,6 +214,7 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
     private static func scriptError(_ output: ScriptOutput) -> NotesError {
         if let number = errorNumber(output) { return scriptError(number: number, code: nil) }
         if output.stderr.contains("-1743") { return scriptError(number: -1743, code: nil) }
+        if output.stderr.contains("-1744") { return scriptError(number: -1744, code: nil) }
         return NotesError("automation_failed", "Notes Automation could not complete the limited read.")
     }
 
@@ -203,37 +228,23 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
         return NotesError(code ?? "automation_failed", "Notes Automation could not complete the limited read.")
     }
 
-    private static let source = #"""
-    function run() {
+    static let source = #"""
+    function run(argv) {
       const app = Application('com.apple.Notes');
+      const trashNames = argv.length ? JSON.parse(argv[0]) : ['Recently Deleted', 'Trash'];
       const result = {accounts: [], folders: [], notes: []};
       function id(value) { return String(value.id()); }
       function same(a, b) { return String(a).normalize('NFC') === String(b).normalize('NFC'); }
-      function children(parent) {
-        const parentID = id(parent);
-        return parent.folders().filter(folder => {
-          try { return id(folder.container()) === parentID; }
-          catch (error) { if ((error.errorNumber || error.number) === -1728) return false; throw error; }
-        });
-      }
-      function descendants(parent, seen) {
-        seen = seen || {};
-        let found = [];
-        children(parent).forEach(folder => {
-          const key = id(folder);
-          if (!seen[key]) { seen[key] = true; found.push(folder); found = found.concat(descendants(folder, seen)); }
-        });
-        return found;
-      }
-      function path(folder) {
-        const parts = [], seen = {};
-        let value = folder;
-        while (value && !seen[id(value)]) {
-          seen[id(value)] = true;
-          if (app.accounts().some(account => id(account) === id(value))) break;
-          parts.unshift(String(value.name())); value = value.container();
-        }
-        return parts;
+      function number(error) { return Number(error.errorNumber || error.number) || null; }
+      function stale(error) { return number(error) === -1728 || number(error) === -1719; }
+      function changed() { throw {code: 'automation_snapshot_changed', number: -1}; }
+      function path(row, folders, seen) {
+        if (seen.has(row.id)) changed();
+        seen.add(row.id);
+        if (row.parentID === null) return [row.name];
+        const parent = folders.get(row.parentID);
+        if (!parent) changed();
+        return path(parent, folders, seen).concat(row.name);
       }
       function iso(value) { try { return value ? new Date(value).toISOString() : null; } catch (_) { return null; } }
       try {
@@ -243,25 +254,59 @@ public final class ScriptingNotesReader: NotesReading, @unchecked Sendable {
           let defaultFolderID = null;
           try { defaultFolderID = id(account.defaultFolder()); } catch (_) {}
           result.accounts.push({id: accountID, name: String(account.name()), isDefault: accountID === defaultID, defaultFolderID: defaultFolderID});
-          descendants(account).forEach(folder => {
-            const folderID = id(folder), folderPath = path(folder);
-            const parent = folder.container();
-            const parentID = app.accounts().some(candidate => id(candidate) === id(parent)) ? null : id(parent);
-            const recentlyDeleted = ['Recently Deleted', 'Trash'].some(name => same(name, folder.name()));
-            result.folders.push({id: folderID, name: String(folder.name()), accountID: accountID, parentID: parentID, path: folderPath, isRecentlyDeleted: recentlyDeleted});
-            folder.notes().forEach(note => {
+          const folders = new Map();
+          account.folders.id().forEach(folderID => {
+            const folder = account.folders.byId(folderID);
+            try {
+              const value = folder.properties();
+              if (value.id !== folderID || folders.has(folderID)) changed();
+              const parent = id(value.container);
+              const name = String(value.name);
+              folders.set(folderID, {id: folderID, name: name, accountID: accountID,
+                parentID: parent === accountID ? null : parent,
+                isRecentlyDeleted: trashNames.some(label => same(label, name))});
+            } catch (error) { if (!stale(error)) throw error; }
+          });
+          folders.forEach(row => {
+            const folderID = row.id, folderPath = path(row, folders, new Set());
+            const notes = account.folders.byId(folderID).notes;
+            const noteIDs = notes.id();
+            result.folders.push(Object.assign({}, row, {path: folderPath, noteCount: row.isRecentlyDeleted ? noteIDs.length : null}));
+            if (row.isRecentlyDeleted || noteIDs.length === 0) return;
+            const eligible = new Set(notes.whose({passwordProtected: false}).id());
+            noteIDs.forEach(noteID => {
               try {
-                if (id(note.container()) !== folderID) return;
-                const locked = Boolean(note.passwordProtected());
-                result.notes.push({id: id(note), title: String(note.name()), bodyHTML: locked ? null : String(note.body()), folderID: folderID,
-                  folderPath: folderPath, accountID: accountID, created: iso(note.creationDate()), modified: iso(note.modificationDate()), isLocked: locked});
-              } catch (error) { if ((error.errorNumber || error.number) !== -1728) throw error; }
+                let value;
+                if (eligible.has(noteID)) {
+                  // Ask Notes for one record containing both the ID and body. Never zip body and ID arrays.
+                  const match = notes.whose({_and: [{id: noteID}, {passwordProtected: false}]});
+                  try { value = match.at(0).properties(); }
+                  catch (error) { if (!stale(error)) throw error; }
+                  if (value && (value.id !== noteID || value.passwordProtected !== false)) changed();
+                }
+                if (!value) {
+                  const note = notes.byId(noteID);
+                  // Do not ask for the properties record here: it includes body and plaintext.
+                  const locked = note.passwordProtected();
+                  if (locked !== true) changed();
+                  value = {id: note.id(), name: note.name(), container: note.container(),
+                    creationDate: note.creationDate(), modificationDate: note.modificationDate(),
+                    passwordProtected: locked};
+                }
+                if (value.id !== noteID) changed();
+                if (id(value.container) !== folderID) return;
+                if (value.passwordProtected === false && typeof value.plaintext !== 'string') changed();
+                // HTML may contain hundreds of megabytes of inline media. The limited reader uses text only.
+                result.notes.push({id: noteID, title: String(value.name), bodyText: value.plaintext ?? null,
+                  folderID: folderID, folderPath: folderPath, accountID: accountID,
+                  created: iso(value.creationDate), modified: iso(value.modificationDate), isLocked: value.passwordProtected});
+              } catch (error) { if (!stale(error)) throw error; }
             });
           });
         });
         return JSON.stringify(result);
       } catch (error) {
-        return JSON.stringify({errorCode: error.code || null, errorNumber: error.errorNumber || error.number || null});
+        return JSON.stringify({errorCode: typeof error.code === 'string' ? error.code : null, errorNumber: number(error)});
       }
     }
     """#
@@ -281,11 +326,12 @@ private struct ScriptingSnapshot: Decodable {
         var parentID: String?
         var path: [String]
         var isRecentlyDeleted: Bool
+        var noteCount: Int?
     }
     struct NoteValue: Decodable {
         var id: String
         var title: String
-        var bodyHTML: String?
+        var bodyText: String?
         var folderID: String
         var folderPath: [String]
         var accountID: String
@@ -298,17 +344,4 @@ private struct ScriptingSnapshot: Decodable {
     var notes: [NoteValue]!
     var errorCode: String?
     var errorNumber: Int?
-}
-
-private func limitedPlainText(_ html: String) -> String {
-    var value = html
-    for pattern in ["(?i)<br\\s*/?>", "(?i)</(?:div|p|li|h[1-6])\\s*>"] {
-        value = value.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
-    }
-    value = value.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-    for (entity, replacement) in [("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'")] {
-        value = value.replacingOccurrences(of: entity, with: replacement, options: .caseInsensitive)
-    }
-    return value.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
-        .filter { !$0.isEmpty }.joined(separator: "\n")
 }

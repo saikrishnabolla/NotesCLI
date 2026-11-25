@@ -157,6 +157,19 @@ final class SQLiteNotesStoreTests: XCTestCase {
         )
     }
 
+    func testBacklinksResolveNativeOwnerURL() throws {
+        let fixture = try SyntheticLibrary()
+        let target = "6FBC3E84-8201-4F4D-967A-C5E46BAB9BDD"
+        try fixture.sql("""
+        UPDATE ZICCLOUDSYNCINGOBJECT SET ZIDENTIFIER='\(target)' WHERE ZIDENTIFIER='N2';
+        UPDATE ZICCLOUDSYNCINGOBJECT
+        SET ZTOKENCONTENTIDENTIFIER='applenotes:note/\(target.lowercased())?ownerIdentifier=owner'
+        WHERE ZIDENTIFIER='link';
+        """)
+        let store = try SQLiteNotesStore(databaseURL: fixture.database, groupContainerURL: fixture.directory)
+        XCTAssertEqual(try store.backlinks(target).map(\.id.uuid), ["N1"])
+    }
+
     func testExplicitSortsAreDeterministicAndLimitAfterSorting() throws {
         let fixture = try SyntheticLibrary()
         try fixture.sql("""
@@ -448,6 +461,85 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(try fixture.store().note("N2").summary.title,"Second")
         XCTAssertEqual(try SQLiteNotesStore(databaseURL:fixture.database,refresh:true).note("N2").summary.title,"Changed")
     }
+
+    func testEditorTemplateStoreListsAndRendersTemplatesInTheDestinationAccount() throws {
+        let fixture = try SyntheticLibrary()
+        let destination = UUID().uuidString
+        let source = UUID().uuidString
+        let foreign = UUID().uuidString
+        let locked = UUID().uuidString
+        let illustrated = UUID().uuidString
+        let deleted = UUID().uuidString
+        try fixture.sql("""
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE2='Templates' WHERE Z_PK=11;
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE2,ZOWNER,ZFOLDERTYPE)
+                VALUES (14,202,'local-templates','Templates',2,0);
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZIDENTIFIER='\(destination)' WHERE Z_PK=21;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZIDENTIFIER='\(source)',ZFOLDER=11,ZTITLE1='Weekly plan' WHERE Z_PK=26;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZIDENTIFIER='\(foreign)',ZFOLDER=14,ZACCOUNT7=2 WHERE Z_PK=27;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZIDENTIFIER='\(locked)',ZFOLDER=11 WHERE Z_PK=22;
+            UPDATE ZICCLOUDSYNCINGOBJECT SET ZIDENTIFIER='\(deleted)',ZFOLDER=11 WHERE Z_PK=24;
+            INSERT INTO ZICCLOUDSYNCINGOBJECT
+                (Z_PK,Z_ENT,ZIDENTIFIER,ZTITLE1,ZACCOUNT7,ZFOLDER,ZNOTEDATA,ZISPASSWORDPROTECTED,ZMARKEDFORDELETION)
+                VALUES (28,201,'\(illustrated)','Illustrated plan',1,11,128,0,0);
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZNOTE,ZTYPEUTI,ZMEDIA)
+                VALUES (44,204,'template-image',28,'public.png',45);
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK,Z_ENT,ZIDENTIFIER,ZFILENAME)
+                VALUES (45,206,'template-media','image.png');
+            DELETE FROM ZICNOTEDATA WHERE ZNOTE=26;
+            """)
+        try fixture.body(26, "Weekly plan\nPrepare the agenda @today")
+        let prefix = "Illustrated plan\nBefore "
+        let suffix = " after"
+        try fixture.body(28, prefix + "\u{fffc}" + suffix, [
+            SyntheticLibrary.int(1, prefix.utf16.count),
+            SyntheticLibrary.int(1, 1) + SyntheticLibrary.bytes(12,
+                SyntheticLibrary.string(1, "template-image") + SyntheticLibrary.string(2, "public.png")),
+            SyntheticLibrary.int(1, suffix.utf16.count)
+        ])
+        let media = fixture.database.deletingLastPathComponent().appendingPathComponent("Accounts/account/Media/template-media")
+        try FileManager.default.createDirectory(at: media, withIntermediateDirectories: true)
+        let png = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jNukAAAAASUVORK5CYII="))
+        let asset = media.appendingPathComponent("image.png")
+        try png.write(to: asset)
+        let beforeDB = try Data(contentsOf: fixture.database)
+        let wal = URL(fileURLWithPath: fixture.database.path + "-wal")
+        let before = try Data(contentsOf: wal)
+        let store = EditorTemplateStore(reader: try fixture.store())
+        let target = try XCTUnwrap(UUID(uuidString: destination))
+        let templates = try store.catalog(destination: target)
+        XCTAssertEqual(templates.map { $0.id.uuidString }, [illustrated, source])
+        let payload = try store.render(source: XCTUnwrap(UUID(uuidString: source)), destination: target)
+        XCTAssertTrue(payload.text.hasPrefix("Prepare the agenda "))
+        XCTAssertFalse(payload.text.contains("@today"))
+        let rich = try store.render(source: XCTUnwrap(UUID(uuidString: illustrated)), destination: target)
+        XCTAssertEqual(rich.text, "Before \u{fffc} after")
+        XCTAssertEqual(rich.richText?.images.map(\.bytes), [png])
+        for invalid in [foreign, locked, deleted, destination] {
+            XCTAssertThrowsError(try store.render(source: XCTUnwrap(UUID(uuidString: invalid)), destination: target))
+        }
+        for invalid in [locked, deleted] {
+            XCTAssertThrowsError(try store.catalog(destination: XCTUnwrap(UUID(uuidString: invalid))))
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.database), beforeDB)
+        XCTAssertEqual(try Data(contentsOf: wal), before)
+        XCTAssertEqual(try Data(contentsOf: asset), png)
+    }
+
+    func testEditorSearchReturnsMatchingExcerptsAndNeverSearchesLockedBodies() throws {
+        let fixture = try SyntheticLibrary()
+        try fixture.sql("DELETE FROM ZICNOTEDATA WHERE ZNOTE=22;")
+        try fixture.body(22, "privatehaystack body-only needle 😀")
+        let store = try fixture.store()
+        func search(_ text: String) throws -> [EditorSearchMatch] {
+            try store.editorSearch(XCTUnwrap(EditorSearchQuery(text)))
+        }
+        let hit = try XCTUnwrap(search("work NEEDLE 😀").first)
+        XCTAssertEqual(hit.id, "x-coredata://STORE-UUID/ICNote/p21")
+        XCTAssertTrue(try XCTUnwrap(hit.excerpt).contains("Body-only needle 😀"))
+        XCTAssertEqual(try search("privatehaystack"), [])
+    }
+
     func testTableBlobFallbackImageAndMetadataPlist() throws {
         let fixture = try SyntheticLibrary()
         typealias P = SyntheticLibrary
@@ -479,6 +571,9 @@ final class SQLiteNotesStoreTests: XCTestCase {
         XCTAssertEqual(note.summary.id.coreDataID,"x-coredata://PLIST-UUID/ICNote/p21")
         XCTAssertEqual(note.document?.tables?["table"],[["Cell"]])
         XCTAssertEqual(note.document?.markdown(),"| Cell |\n| --- |")
+        let copy = try NotePresentation.clipboardMarkdown(note)
+        XCTAssertTrue(copy.hasPrefix("| Cell |\n| --- |"))
+        XCTAssertFalse(copy.contains("\u{fffc}"))
         XCTAssertEqual(note.attachments.first { $0.id == "drawing" }?.filePath,fallback.appendingPathComponent("FallbackImage.jpeg").path)
         XCTAssertTrue(note.attachments.first { $0.id == "drawing" }?.drawingSVG?.contains("<path") == true)
     }

@@ -740,7 +740,17 @@ struct CollaborationActivityCommand: ParsableCommand {
 struct DeepLink: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "deeplink")
     @OptionGroup var options: GlobalOptions; @Argument var ref: String
-    func run() throws { let summary = try options.backends().reader.summary(ref); let url = summary.deepLink ?? "applenotes://showNote?identifier=\(summary.id.uuid)"; if options.json { try Output.json(["url": url]) } else { print(url) } }
+    @Flag(help: "Copy the note link to the local clipboard.") var copy = false
+    func run() throws {
+        if copy { try ClipboardCopy.requireLocalSession() }
+        let backend = try options.backends()
+        let url = try ClipboardCopy.noteLink(backend.reader.summary(ref))
+        if copy {
+            try ClipboardCopy.write(url)
+            try ClipboardCopy.report(format: "link", fidelity: backend.fidelity, options: options)
+        } else if options.json { try Output.json(["url": url]) }
+        else { print(url) }
+    }
 }
 
 struct TextCommand: ParsableCommand { static let configuration = CommandConfiguration(commandName: "text", subcommands: [TextInsert.self, TextDelete.self, TextReplace.self, TextFind.self]) }

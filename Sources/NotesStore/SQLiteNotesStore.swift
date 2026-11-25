@@ -250,6 +250,15 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         return Array(result.prefix(query.limit ?? result.count))
     }
 
+    public func editorSearch(_ query: EditorSearchQuery) throws -> [EditorSearchMatch] {
+        try notes(.init()).compactMap { summary in
+            query.match(summary, body: {
+                guard let pk = notePKs[summary.id.uuid.lowercased()], let data = library.bodies[pk] else { return nil }
+                return try? NotesDecoder.plainText(data)
+            })
+        }
+    }
+
     public func notes(_ query: NoteQuery, sort: NoteSort) throws -> [NoteSummary] {
         var unbounded = query
         let limit = unbounded.limit
@@ -675,7 +684,9 @@ public final class SQLiteNotesStore: NotesReading, Sendable {
         let noteEntities = library.entities["ICNote"] ?? []
         let pks = Set(library.rows("ICInlineAttachment").compactMap { row -> Int64? in
             let uti = row.string("ZTYPEUTI1", "ZTYPEUTI") ?? ""
-            guard uti.contains("link"), row.string("ZTOKENCONTENTIDENTIFIER")?.caseInsensitiveCompare(target) == .orderedSame else { return nil }
+            guard uti == "com.apple.notes.inlinetextattachment.link",
+                  let token = row.string("ZTOKENCONTENTIDENTIFIER"),
+                  AppleNotesLinkTarget.identifier(from: token)?.caseInsensitiveCompare(target) == .orderedSame else { return nil }
             return row.int("ZNOTE1", "ZNOTE")
         })
         return summaries.filter { summary in

@@ -994,6 +994,8 @@ struct MCPUninstall: ParsableCommand {
 
     static func execute(client: MCPClient, options: GlobalOptions, dryRun: Bool, keepConfig: Bool,
                         scope: Scope = .mcpClients) throws {
+        let editorLogin = EditorLogin.local
+        let editorEnabled = scope == .fullProduct ? try editorLogin.isEnabled() : false
         let selectedClients = client == .all ? MCPClient.installable : [client]
         var actions: [UninstallAction] = []
         for selected in selectedClients {
@@ -1076,6 +1078,11 @@ struct MCPUninstall: ParsableCommand {
                         actions.append(UninstallAction(kind: "app", target: app.path, status: "removed"))
                     }
                 }
+            }
+            if editorEnabled {
+                if !dryRun && installedApps.isEmpty { try editorLogin.disable() }
+                actions.append(UninstallAction(kind: "launch_agent", target: editorLogin.plist.path,
+                                               status: dryRun ? "would_remove" : "removed"))
             }
             for file in try InstallManifest.filesToRemove(keepConfig: keepConfig) {
                 if dryRun {
@@ -1526,6 +1533,14 @@ enum PermissionGuide {
     private static let settingsArguments = ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"]
 
     static func openSettings() -> Bool { open(settingsArguments) }
+
+    static func openEditorAccessibility(launch: ([String]) -> Bool = open,
+                                        show: (String) -> Void = { print($0) }) {
+        if !launch(["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]) {
+            show("In System Settings > Privacy & Security, look for Accessibility or Device Control and Data Access.")
+        }
+        show("Allow the app that starts the editor. For launch at login, look for Notes CLI or notescli.")
+    }
 
     static func openFullDiskAccess(revealing app: URL?, silent: Bool = false,
                                    launch: ([String]) -> Bool = open, show: (String) -> Void = { print($0) }) {

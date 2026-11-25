@@ -14,7 +14,7 @@ import Darwin
 struct NotesCLI: ParsableCommand {
     nonisolated(unsafe) private static var hostParentMonitor: DispatchSourceProcess?
     static let version = notesCLIVersion
-    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, Capabilities.self, HelpAlias.self, Add.self, ImportCommand.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, OCRCommand.self, ImageLabelsCommand.self, HandwritingCommand.self, PaperCommand.self, MapCommand.self, ScanCommand.self, CameraCommand.self, MathCommand.self, QuickNoteCommand.self, SettingsCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, CollaborationCommand.self, DeepLink.self, ReportCommand.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self, HostCommand.self, UninstallCommand.self])
+    static let configuration = CommandConfiguration(commandName: "notescli", abstract: "Read and manage Apple Notes.", version: version, subcommands: [Accounts.self, Folders.self, ReadList.self, Show.self, IndexedSearch.self, Tags.self, Recent.self, Pinned.self, PaletteCommand.self, EditorBodySearchCommand.self, EditorCommand.self, EditorTemplateCommand.self, EditorNoteCopyCommand.self, Capabilities.self, HelpAlias.self, Add.self, ImportCommand.self, Append.self, Edit.self, Rename.self, Move.self, Delete.self, FolderCommand.self, Export.self, FileCommand.self, Open.self, SyncCommand.self, SyncDaemonCommand.self, WatchCommand.self, EngineCommand.self, OCRCommand.self, ImageLabelsCommand.self, HandwritingCommand.self, PaperCommand.self, MapCommand.self, ScanCommand.self, CameraCommand.self, MathCommand.self, QuickNoteCommand.self, SettingsCommand.self, ChecklistCommand.self, PinCommand.self, UnpinCommand.self, TagCommand.self, LinkCommand.self, CollaborationCommand.self, DeepLink.self, ReportCommand.self, TextCommand.self, FormatCommand.self, AttachCommand.self, AttachmentsCommand.self, AttachmentCommand.self, ReadTableCommand.self, DuplicateCommand.self, RestoreCommand.self, WriteMarkdownCommand.self, NativeDoctor.self, NativeChecklist.self, NativePin.self, NativeTag.self, NativeLink.self, NativeText.self, NativeFormat.self, NativeAttachment.self, NativeTableCommand.self, NativeDuplicate.self, NativeRestore.self, NativeMoveFolder.self, NativeWriteMarkdown.self, Fetch.self, IndexCommand.self, Stats.self, Count.self, ShowMany.self, Selection.self, Backlinks.self, Raw.self, Deleted.self, SmartFolders.self, PrependCommand.self, InsertUnderHeadingCommand.self, ReplaceSectionCommand.self, ReplaceTextCommand.self, ClipCommand.self, Exists.self, HistoryCommand.self, DiffCommand.self, UndoCommand.self, RevertCommand.self, JournalCommand.self, SmartFolderCommand.self, DrawingCommand.self, DiagramCommand.self, RecordingCommand.self, SpeechHelperCommand.self, Doctor.self, Setup.self, Permissions.self, MCPRoot.self, Completion.self, AnchorCommand.self, WaitSyncCommand.self, HostCommand.self, UninstallCommand.self])
     @OptionGroup var options: GlobalOptions
     @Flag(name: .customLong("no-recent"), help: "Hide recently edited titles on the home screen. Also set by NOTESCLI_HOME_RECENT=0.")
     var noRecent = false
@@ -88,22 +88,18 @@ struct NotesCLI: ParsableCommand {
         source.resume()
     }
 
-    private static func shouldUseCapabilityHost() -> Bool {
-        let environment = ProcessInfo.processInfo.environment
-        if environment["NOTESCLI_HOST_ACTIVE"] == "1" { return false }
-        let arguments = Array(CommandLine.arguments.dropFirst())
-        if requestedBackend(arguments: arguments, environment: environment) == "fake" { return false }
-        let route = CapabilityHostRoute(rawValue: environment["NOTESCLI_CAPABILITY_HOST"] ?? "auto") ?? .auto
-        if route == .direct { return false }
-        if arguments.contains("--help") || arguments.contains("-h") || arguments.contains("--version") {
+    static func shouldUseCapabilityHost(arguments: [String] = Array(CommandLine.arguments.dropFirst()),
+                                        environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        let options = Array(arguments.prefix(while: { $0 != "--" }))
+        if options.contains("--help") || options.contains("-h") || options.contains("--version") {
             return false
         }
         if let command = CapabilityHostPolicy.commandIndex(arguments).map({ arguments[$0] }),
            command == "doctor" || command == "capabilities" { return false }
         guard arguments != CapabilityHostPolicy.notesAccessProbeArguments,
               CapabilityHostPolicy.allows(arguments) else { return false }
-        if route == .auto, HostInstallation.requiresInstallOrUpgrade { return false }
-        return route == .force || CapabilityHostClient.isAvailable()
+        return CapabilityHostRouting.usesHost(backend: requestedBackend(arguments: options, environment: environment),
+                                              environment: environment)
     }
 
     private static func requestedBackend(arguments: [String], environment: [String: String]) -> String {
@@ -177,9 +173,15 @@ struct Show: ParsableCommand {
     @Argument var ref: String
     @Option var format: NoteFormat = .markdown
     @Flag var noAttachments = false
+    @Flag(help: "Copy the note as Markdown to the local clipboard.")
+    var copy = false
     @Flag(help: "Read a Notes-password-locked body using one password from stdin. Never stores the password.")
     var passwordStdin = false
+    func validate() throws {
+        if copy && format != .markdown { throw ValidationError("--copy requires Markdown format.") }
+    }
     func run() throws {
+        if copy { try ClipboardCopy.requireLocalSession() }
         let backend = try options.backends()
         let note: Note
         if passwordStdin {
@@ -193,7 +195,11 @@ struct Show: ParsableCommand {
             }
             note = try reader.note(ref, password: inputPassword())
         } else { note = try backend.reader.note(ref) }
-        if format == .outline {
+        if copy {
+            try ClipboardCopy.write(ClipboardCopy.markdown(note, includeAttachments: !noAttachments))
+            try ClipboardCopy.report(format: "markdown", fidelity: backend.fidelity, options: options)
+            if !options.json { Output.fidelityNotice(backend) }
+        } else if format == .outline {
             let outline = note.document?.outline() ?? []
             if options.json { try Output.readJSON(outline, backend: backend) }
             else if !options.quiet { print(String(decoding: try NotePresentation.json(outline), as: UTF8.self)) }
@@ -561,7 +567,6 @@ struct DeleteFolder: ParsableCommand {
         // Identify the subtree by stable ids and parent links, never by path: Notes allows
         // sibling folders with the same name, so paths are ambiguous.
         var allFolders = try backend.reader.folders(account: nil)
-        var activeNoteIDs: Set<String>?
         if let scripting = writer as? ScriptingNotesWriter, let coreDataID = folder.coreDataID {
             let active = try scripting.listFoldersViaScripting()
             guard active.contains(where: { $0.id == coreDataID }) else {
@@ -572,7 +577,6 @@ struct DeleteFolder: ParsableCommand {
                 guard let id = item.coreDataID else { return true }
                 return !activeIDs.contains(id)
             }
-            activeNoteIDs = Set(try scripting.listViaScripting().map(\.id))
         }
         var subtreeIDs: Set<String> = [folder.id]
         var grew = true
@@ -583,6 +587,16 @@ struct DeleteFolder: ParsableCommand {
             }
         }
         let descendants = allFolders.filter { subtreeIDs.contains($0.id) }
+        let allowedFolderIDs = descendants.compactMap(\.coreDataID)
+        let activeNoteIDs: Set<String>?
+        if let scripting = writer as? ScriptingNotesWriter {
+            guard allowedFolderIDs.count == descendants.count else {
+                throw NotesError("stale_folder", "The folder subtree could not be resolved to stable Notes.app folder identities.")
+            }
+            activeNoteIDs = Set(try scripting.listViaScripting(folderIDs: allowedFolderIDs).map(\.id))
+        } else {
+            activeNoteIDs = nil
+        }
         let notes = try backend.reader.notes(NoteQuery(includeDeleted: false)).filter { summary in
             guard subtreeIDs.contains(summary.folderID ?? "") else { return false }
             guard let activeNoteIDs else { return true }
@@ -603,10 +617,6 @@ struct DeleteFolder: ParsableCommand {
         if !write.dryRun { try confirm("Delete folder \(ref) and move \(notes.count) note(s) to Recently Deleted?", yes: yes) }
         if let scripting = writer as? ScriptingNotesWriter {
             try scripting.validateFolderDelete(folder.coreDataID ?? folder.path.joined(separator: " > "), expectedCount: notes.count)
-        }
-        let allowedFolderIDs = descendants.compactMap(\.coreDataID)
-        if writer is ScriptingNotesWriter, allowedFolderIDs.count != descendants.count {
-            throw NotesError("stale_folder", "The folder subtree could not be resolved to stable Notes.app folder identities.")
         }
         var plans: [DryRunPlan] = []
         for summary in notes {
@@ -647,14 +657,34 @@ struct Open: ParsableCommand {
     @Flag var account = false
     @Option var attachment: String?
     @Flag var reveal = false
+    @Flag(help: "Open the note in a separate Notes window. Requires Notes Automation.")
+    var newWindow = false
     func validate() throws {
         if [folder, account, attachment != nil].filter({ $0 }).count > 1 { throw ValidationError("Choose one of --folder, --account, or --attachment.") }
         if reveal && attachment == nil { throw ValidationError("--reveal requires --attachment.") }
+        if newWindow && (folder || account || attachment != nil) {
+            throw ValidationError("--new-window opens a note, not a folder, account, or attachment.")
+        }
     }
     func run() throws {
         let backend = try options.backends()
         let opened: String
-        if account {
+        if newWindow {
+            let exact = ref.hasPrefix("id:x-coredata://") ? String(ref.dropFirst(3)) : ref
+            if exact.hasPrefix("x-coredata://"), !backend.isFake {
+                try ScriptingNotesWriter().showInNotes(exact, separately: true)
+                opened = exact
+            } else {
+                let summary = try backend.reader.summary(ref)
+                if !backend.isFake {
+                    guard let id = summary.id.coreDataID else {
+                        throw NotesError("note_window_unavailable", "Notes did not return the note’s scripting ID.")
+                    }
+                    try ScriptingNotesWriter().showInNotes(id, separately: true)
+                }
+                opened = summary.id.shortID ?? summary.id.uuid
+            }
+        } else if account {
             let matches = try backend.reader.accounts().filter { $0.id.caseInsensitiveCompare(ref) == .orderedSame || $0.name == ref }
             guard matches.count == 1 else { throw NotesError(matches.isEmpty ? "account_not_found" : "ambiguous_account", "Account must resolve uniquely.") }
             if !backend.isFake { try ReadOpen.account(matches[0]) }; opened = matches[0].id

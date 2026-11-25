@@ -33,6 +33,7 @@ public protocol NotesReading: Sendable {
     func defaultLocation() throws -> DefaultNotesLocation?
     func folders(account: String?) throws -> [Folder]
     func notes(_ query: NoteQuery) throws -> [NoteSummary]
+    func editorSearch(_ query: EditorSearchQuery) throws -> [EditorSearchMatch]
     /// Accepts #number, legacy n-number/bare number, UUID, x-coredata id, or exact title.
     func note(_ ref: String) throws -> Note
     func tags() throws -> [String: Int]
@@ -46,6 +47,13 @@ public protocol NotesReading: Sendable {
 }
 
 public extension NotesReading {
+    func editorSearch(_ query: EditorSearchQuery) throws -> [EditorSearchMatch] {
+        try notes(.init()).compactMap { summary in
+            let id = EditorSearchQuery.identity(summary)
+            return query.match(summary, body: { (try? note("id:" + id))?.document?.text })
+        }
+    }
+
     func defaultLocation() throws -> DefaultNotesLocation? {
         let accounts = try accounts()
         guard let account = accounts.first(where: \.isDefault) ?? accounts.first else { return nil }

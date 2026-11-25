@@ -42,6 +42,29 @@ enum NotesScripts {
             });
             return found;
         }
+        function visitReadFolders(action) {
+            const protectedNames = JSON.parse(p.protectedFolderNamesJSON || '["Recently Deleted","Trash"]');
+            app.accounts().forEach(a => {
+                const accountID = id(a);
+                const seen = new Set();
+                function visit(parent, parts) {
+                    children(parent).forEach(f => {
+                        const key = id(f);
+                        if (seen.has(key)) return;
+                        seen.add(key);
+                        const name = f.name();
+                        const next = parts.concat(name);
+                        if (!protectedNames.some(protectedName => sameName(protectedName, name))) {
+                            action(f, key, next, accountID);
+                        }
+                        visit(f, next);
+                    });
+                }
+                // The traversal already knows the ancestors. Do not walk each
+                // folder back to the account with more synchronous Apple Events.
+                visit(a, []);
+            });
+        }
         function folder(ref, a) {
             a = a || app.defaultAccount();
             if (!ref) return a.defaultFolder();
@@ -214,6 +237,13 @@ enum NotesScripts {
                 app.show(note(p.ref));
                 break;
             }
+            case 'showSeparately': {
+                const n = note(p.ref);
+                app.show(n.container());
+                app.show(n, {separately: true});
+                app.activate();
+                break;
+            }
             case 'read': {
                 const n = note(p.ref);
                 result = {id: id(n), title: n.name(), folderID: id(n.container()), body: n.passwordProtected() ? null : n.body(), attachmentCount: n.attachments().length};
@@ -252,18 +282,17 @@ enum NotesScripts {
             }
             case 'list': {
                 const items = [];
-                app.accounts().forEach(a => {
-                    folders(a).forEach(f => {
-                        if (isTrash(f)) return;
-                        f.notes().forEach(n => {
-                            try {
-                                if (id(n.container()) === id(f)) {
-                                    items.push({id: id(n), title: n.name(), folderID: id(f), folderPath: path(f), accountID: id(a)});
-                                }
-                            } catch (e) {
-                                if ((e.errorNumber || e.number) !== -1728) throw e;
+                const scope = p.folderIDsJSON ? new Set(JSON.parse(p.folderIDsJSON)) : null;
+                visitReadFolders((f, folderID, folderPath, accountID) => {
+                    if (scope && !scope.has(folderID)) return;
+                    f.notes().forEach(n => {
+                        try {
+                            if (id(n.container()) === folderID) {
+                                items.push({id: id(n), title: n.name(), folderID, folderPath, accountID});
                             }
-                        });
+                        } catch (e) {
+                            if ((e.errorNumber || e.number) !== -1728) throw e;
+                        }
                     });
                 });
                 result = {notes: items};
@@ -271,11 +300,7 @@ enum NotesScripts {
             }
             case 'listFolders': {
                 const items = [];
-                app.accounts().forEach(a => {
-                    folders(a).forEach(f => {
-                        if (!isTrash(f)) items.push({id: id(f), path: path(f), accountID: id(a)});
-                    });
-                });
+                visitReadFolders((f, id, path, accountID) => items.push({id, path, accountID}));
                 result = {folders: items};
                 break;
             }

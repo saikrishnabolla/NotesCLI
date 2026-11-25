@@ -247,9 +247,19 @@ notescli capabilities
 notescli host install|status|restart|uninstall
 notescli uninstall [--dry-run] [--keep-config]
 notescli completion [zsh|bash|fish]
+notescli editor [--help]
+notescli editor --save-settings [<editor options>]
+notescli editor --show-settings
+notescli editor --check-for-updates
+notescli editor --login enable|disable|status
+notescli editor --open-accessibility | --export-logs
 ```
 
 `setup` connects supported MCP clients and opens permission settings. `permissions` opens Full Disk Access and requests Notes Automation and Speech Recognition access.
+
+`editor` adds a selection toolbar, slash commands, Markdown shortcuts, and ⌘P search to Apple Notes. Matches in note text show a short excerpt with the matching words in bold. Use … on the selection toolbar to hide, reorder, or restore buttons. A plain `editor` launch saves these changes; a launch with options keeps them for that run. The bottom-right bar offers Copy Markdown, Copy Note Link, and Backlinks without a text selection. Hide it with `--no-note-actions-bar`. Use `--menu-bar-icon` to add Search, Check for Updates, and Quit to the menu bar. Use `--automatic-update-checks` to check GitHub at startup and daily without installing anything. Both options are off by default. The editor runs until you press Control-C and needs Accessibility access for the on-screen controls. `editor --save-settings --no-markdown-shortcuts` saves that choice for the next plain `editor` launch. Passing options without `--save-settings` uses them for one run, starting from defaults. To reset, run `editor --save-settings` without options.
+
+After `notescli onboard`, run `notescli editor --login enable` to start the editor in the background with your saved settings. This is off by default. If macOS denies access, run `notescli editor --open-accessibility`, allow Notes CLI, then run `--login enable` again. `--login disable` stops the login job without stopping the Notes CLI permission helper.
 
 ## MCP
 

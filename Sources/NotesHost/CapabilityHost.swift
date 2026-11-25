@@ -33,7 +33,7 @@ public struct CapabilityHostRequest: Codable, Sendable {
     public static let currentProtocol = 2
     public static let maximumEncodedBytes = 1_048_576
     public static let allowedEnvironmentKeys: Set<String> = [
-        "TERM", "NO_COLOR", "LANG", "LC_ALL", "TZ", "SSH_CONNECTION", "SSH_TTY",
+        "TERM", "NO_COLOR", "LANG", "LC_ALL", "TZ", "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT",
         "NOTESCLI_BACKEND", "NOTESCLI_ENGINE", "NOTESCLI_WRITE_FOLDERS",
     ]
     public var protocolVersion: Int
@@ -41,6 +41,10 @@ public struct CapabilityHostRequest: Codable, Sendable {
     public var arguments: [String]
     public var workingDirectory: String
     public var environment: [String: String]
+
+    package static func isLocal(_ environment: [String: String]) -> Bool {
+        environment["SSH_CONNECTION"] == nil && environment["SSH_TTY"] == nil && environment["SSH_CLIENT"] == nil
+    }
 
     public init(arguments: [String], workingDirectory: String) {
         protocolVersion = Self.currentProtocol
@@ -83,7 +87,7 @@ public enum CapabilityHostPolicy {
         "unpin", "tag", "link", "collaboration", "deeplink", "text", "format", "attachments", "table", "duplicate", "restore",
         "write", "fetch", "index", "stats", "count", "show-many", "selection", "backlinks", "raw", "deleted",
         "smart-folders", "prepend", "insert-under-heading", "replace-section", "replace-text", "attachment", "exists", "history",
-        "diff", "undo", "revert", "journal", "smart-folder", "permissions", "mcp", "anchor", "wait-sync",
+        "diff", "undo", "revert", "journal", "smart-folder", "permissions", "mcp", "anchor", "wait-sync", "editor-template", "editor-note-copy",
         "native-doctor", "native-checklist", "native-pin", "native-tag", "native-link", "native-text", "native-format",
         "native-attachment", "native-table", "native-duplicate", "native-restore", "native-move-folder", "write-markdown",
     ]
@@ -98,6 +102,11 @@ public enum CapabilityHostPolicy {
         guard let index = commandIndex(arguments) else { return allowsHome(arguments) }
         let command = arguments[index]
         if command == "doctor" { return arguments == ["doctor", "--for-agent", "--json"] }
+        if command == "editor-body-search" {
+            let prefix = Array(arguments.dropLast())
+            return arguments.last.flatMap(EditorSearchQuery.init) != nil
+                && (prefix == [command, "--json", "--"] || prefix == [command, "--json", "--backend", "default", "--"])
+        }
         guard allowedCommands.contains(command) else { return false }
         if containsPathOption(arguments) {
             let lockedAttachmentExport = command == "attachments" &&
@@ -307,7 +316,8 @@ public enum CapabilityHostClient {
         }
     }
 
-    public static func capture(arguments: [String], socketURL: URL = CapabilityHostPaths.socket) throws -> CapturedCommand {
+    public static func capture(arguments: [String], socketURL: URL = CapabilityHostPaths.socket,
+                               replyTimeoutSeconds: Int? = nil) throws -> CapturedCommand {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("notescli-host-capture-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
@@ -330,7 +340,8 @@ public enum CapabilityHostClient {
             try? error.close()
         }
         let status = try run(arguments: arguments, socketURL: socketURL,
-                             descriptors: [input.fileDescriptor, output.fileDescriptor, error.fileDescriptor])
+                             descriptors: [input.fileDescriptor, output.fileDescriptor, error.fileDescriptor],
+                             replyTimeoutSeconds: replyTimeoutSeconds)
         try output.synchronize()
         try error.synchronize()
         return CapturedCommand(exitCode: status, stdout: try Data(contentsOf: outputURL),
@@ -359,7 +370,7 @@ public enum CapabilityHostClient {
                     }
                     var message = msghdr(msg_name: nil, msg_namelen: 0, msg_iov: vectorPointer, msg_iovlen: 1,
                                          msg_control: base, msg_controllen: socklen_t(controlBytes.count), msg_flags: 0)
-                    return sendmsg(socket, &message, 0)
+                    return sendmsg(socket, &message, MSG_NOSIGNAL)
                 }
             }
         }
@@ -385,10 +396,16 @@ public enum CapabilityHostClient {
             if count == 0 { break }
             guard count > 0 else {
                 if errno == EINTR { continue }
+                if !data.isEmpty {
+                    throw CapabilityHostError.protocolFailure("Notes CLI returned an incomplete reply.")
+                }
                 throw CapabilityHostError.unavailable("Notes CLI disconnected.")
             }
             data.append(contentsOf: buffer.prefix(count))
             if data.contains(0x0a) { break }
+        }
+        guard !data.isEmpty else {
+            throw CapabilityHostError.unavailable("Notes CLI disconnected.")
         }
         guard let newline = data.firstIndex(of: 0x0a) else {
             throw CapabilityHostError.protocolFailure("Notes CLI returned an invalid reply.")
@@ -403,6 +420,7 @@ public final class CapabilityHostServer: @unchecked Sendable {
     private let launcher: Launcher
     private let queue = DispatchQueue(label: "com.saikrishnabolla.notescli.capability-host", attributes: .concurrent)
     private var listener: Int32 = -1
+    private var ownsSocket = false
     private var source: DispatchSourceRead?
 
     public init(socketURL: URL = CapabilityHostPaths.socket, launcher: @escaping Launcher) {
@@ -430,6 +448,7 @@ public final class CapabilityHostServer: @unchecked Sendable {
                 Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
+        ownsSocket = didBind == 0
         guard didBind == 0, chmod(socketURL.path, 0o600) == 0, listen(listener, 32) == 0 else {
             let message = String(cString: strerror(errno))
             stop()
@@ -450,7 +469,10 @@ public final class CapabilityHostServer: @unchecked Sendable {
         source?.cancel()
         source = nil
         if listener >= 0 { close(listener); listener = -1 }
-        if FileManager.default.fileExists(atPath: socketURL.path) { try? FileManager.default.removeItem(at: socketURL) }
+        if ownsSocket {
+            ownsSocket = false
+            try? FileManager.default.removeItem(at: socketURL)
+        }
     }
 
     private func acceptConnections() {

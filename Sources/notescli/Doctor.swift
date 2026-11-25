@@ -222,8 +222,7 @@ struct Doctor: ParsableCommand {
     }
 
     private func capabilityHostAccess() -> (probe: AccessProbe, inventory: [String: Int]?)? {
-        guard ProcessInfo.processInfo.environment["NOTESCLI_HOST_ACTIVE"] != "1",
-              CapabilityHostClient.isAvailable() else { return nil }
+        guard CapabilityHostRouting.usesHost(backend: resolvedBackendName) else { return nil }
         do {
             let captured = try CapabilityHostClient.capture(arguments: ["doctor", "--for-agent", "--json"])
             guard captured.exitCode == 0 else {

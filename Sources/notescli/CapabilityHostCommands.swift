@@ -36,6 +36,19 @@ struct HostStatus: ParsableCommand {
     }
 }
 
+enum CapabilityHostRouting {
+    static func usesHost(backend: String, environment: [String: String] = ProcessInfo.processInfo.environment,
+                         needsUpgrade: () -> Bool = { HostInstallation.requiresInstallOrUpgrade },
+                         isAvailable: () -> Bool = { CapabilityHostClient.isAvailable() }) -> Bool {
+        guard backend != "fake", environment["NOTESCLI_HOST_ACTIVE"] != "1" else { return false }
+        switch CapabilityHostRoute(rawValue: environment["NOTESCLI_CAPABILITY_HOST"] ?? "auto") ?? .auto {
+        case .direct: return false
+        case .force: return true
+        case .auto: return !needsUpgrade() && isAvailable()
+        }
+    }
+}
+
 enum HostInstallation {
     private static let teamID = "GXKRUPGJVF"
     static var sourceApp: URL? {
@@ -57,8 +70,30 @@ enum HostInstallation {
     }
 
     static var isCurrentInstall: Bool {
-        let app = CapabilityHostPaths.app
-        return bundleVersion(app) == [notesCLIVersion, notesCLIVersion] && validSignature(app)
+        isCurrentInstall(at: CapabilityHostPaths.app, packagedSource: sourceApp)
+    }
+
+    static func isCurrentInstall(at app: URL, packagedSource: URL?,
+                                 validate: (URL) -> Bool = validSignature,
+                                 identity: (URL) -> Data? = signingIdentity) -> Bool {
+        guard bundleVersion(app) == [notesCLIVersion, notesCLIVersion], validate(app) else { return false }
+        guard let packagedSource,
+              packagedSource.resolvingSymlinksInPath() != app.resolvingSymlinksInPath() else { return true }
+        let helper = "Contents/Helpers/notescli"
+        return [(app, packagedSource), (app.appendingPathComponent(helper), packagedSource.appendingPathComponent(helper))]
+            .allSatisfy { installed, packaged in
+                guard let installedCode = identity(installed) else { return false }
+                return installedCode == identity(packaged)
+            }
+    }
+
+    private static func signingIdentity(_ url: URL) -> Data? {
+        var code: SecStaticCode?
+        var info: CFDictionary?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,
+              SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+              let info = info as? [String: Any] else { return nil }
+        return info[kSecCodeInfoUnique as String] as? Data
     }
 
     private static func bundleVersion(_ app: URL) -> [String] {
@@ -239,6 +274,7 @@ enum HostInstallation {
     }
 
     static func uninstall() throws {
+        try EditorLogin.local.disable()
         _ = launchctl(["bootout", "gui/\(getuid())", CapabilityHostPaths.launchAgent.path])
         for target in [CapabilityHostPaths.launchAgent, CapabilityHostPaths.app, CapabilityHostPaths.legacyApp]
             where FileManager.default.fileExists(atPath: target.path) {
@@ -269,7 +305,10 @@ struct HostUninstall: ParsableCommand {
     @Flag var dryRun = false
     func run() throws {
         let targets = [CapabilityHostPaths.launchAgent, CapabilityHostPaths.app, CapabilityHostPaths.legacyApp]
-        if dryRun { targets.forEach { print($0.path) }; return }
+        if dryRun {
+            if try EditorLogin.local.isEnabled() { print(EditorLogin.local.plist.path) }
+            targets.forEach { print($0.path) }; return
+        }
         try HostInstallation.uninstall()
     }
 }

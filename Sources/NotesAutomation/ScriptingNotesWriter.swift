@@ -184,11 +184,12 @@ public final class ScriptingNotesWriter: NotesWriting, Sendable {
         let html = current.replacingOccurrences(of: escapedFind, with: escapedReplacement)
         return try writeHTML("replaceText", ref: target, html: html, allowAttachmentLoss: allowAttachmentLoss, uuid: UUID(uuidString: ref)?.uuidString)
     }
-    public func showInNotes(_ ref: String) throws {
-        _ = try execute("show", fields: ["ref": resolve(ref)], isWrite: false)
+    public func showInNotes(_ ref: String, separately: Bool = false) throws {
+        _ = try execute(separately ? "showSeparately" : "show", fields: ["ref": resolve(ref)], isWrite: false)
     }
-    public func listViaScripting() throws -> [ScriptingNote] {
-        let result = try execute("list", fields: [:], isWrite: false)
+    public func listViaScripting(folderIDs: [String]? = nil) throws -> [ScriptingNote] {
+        let scope = try folderIDs.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
+        let result = try execute("list", fields: ["folderIDsJSON": scope], isWrite: false)
         guard let notes = result.notes else { throw NotesError("invalid_script_response", "Notes returned no list.") }
         return notes
     }

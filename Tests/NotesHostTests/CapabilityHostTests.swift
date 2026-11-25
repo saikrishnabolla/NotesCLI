@@ -1,9 +1,24 @@
 import Darwin
 import Foundation
+import NotesCore
 @testable import NotesHost
 import XCTest
 
 final class CapabilityHostTests: XCTestCase {
+    func testEditorReadsCanUseHostButInteractiveCommandsStayLocal() {
+        let noteID = "E1EAFE75-7EB2-40C0-8493-CD9AA94793D1"
+        XCTAssertTrue(CapabilityHostPolicy.allows(["editor-note-copy", noteID, "copy-markdown", "--json"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["editor-note-copy", noteID, "copy-link", "--json"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["editor-body-search", "--json", "--", "--file"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["editor-body-search", "--json", "--backend", "default", "--", "body text"]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["editor-body-search", "--json", "--", String(repeating: "a", count: 1025)]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["editor-body-search", "--json", "--file", "/tmp/notes"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["editor-template", "--destination", noteID, "--json"]))
+        XCTAssertTrue(CapabilityHostPolicy.allows(["backlinks", "id:" + noteID, "--json"]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["editor"]))
+        XCTAssertFalse(CapabilityHostPolicy.allows(["palette", "--selected-note", noteID]))
+    }
+
     func testPermissionProbeAcceptsNoOptionsOrFilePath() {
         let command = CapabilityHostPolicy.notesAccessProbeArguments
         XCTAssertTrue(CapabilityHostPolicy.allows(command))
@@ -53,7 +68,7 @@ final class CapabilityHostTests: XCTestCase {
     func testRequestCarriesHostProtocolAndCLIRelease() {
         let request = CapabilityHostRequest(arguments: ["list"], workingDirectory: "/tmp")
         XCTAssertEqual(request.protocolVersion, 2)
-        XCTAssertEqual(request.clientVersion, "1.1.14")
+        XCTAssertEqual(request.clientVersion, notesCLIVersion)
     }
 
     func testVersionMismatchExplainsHowToUpgradeTheHost() {
@@ -168,6 +183,27 @@ final class CapabilityHostTests: XCTestCase {
         close(output[0])
         XCTAssertEqual(String(decoding: bytes.prefix(max(0, count)), as: UTF8.self), "forwarded\n")
         wait(for: [handled], timeout: 2)
+    }
+
+    func testDuplicateStartKeepsOriginalSocket() throws {
+        let root = URL(fileURLWithPath: "/tmp/nch-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let socket = root.appendingPathComponent("host.sock")
+        let active = CapabilityHostServer(socketURL: socket) { _, descriptors, connection in
+            descriptors.forEach { close($0) }
+            CapabilityHostServer.reply(CapabilityHostReply(exitCode: 0), socket: connection)
+            close(connection)
+        }
+        try active.start()
+        defer { active.stop() }
+        do {
+            let duplicate = CapabilityHostServer(socketURL: socket) { _, _, _ in XCTFail("Duplicate host received a request") }
+            XCTAssertThrowsError(try duplicate.start())
+        }
+        XCTAssertTrue(CapabilityHostClient.isAvailable(socketURL: socket))
+        XCTAssertEqual(try CapabilityHostClient.capture(arguments: ["list"], socketURL: socket,
+                                                         replyTimeoutSeconds: 2).exitCode, 0)
     }
 
     func testLargeRequestIsReadAcrossMultipleSocketReceives() throws {

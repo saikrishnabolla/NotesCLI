@@ -81,6 +81,6 @@ let package = Package(
         .testTarget(name: "NotesSyncTests", dependencies: ["NotesSync", "NotesCore"]),
         .testTarget(name: "NotesDiagramsTests", dependencies: ["NotesDiagrams", "NotesCore"]),
         .testTarget(name: "NotesHostTests", dependencies: ["NotesHost"]),
-        .testTarget(name: "NotesCLITests", dependencies: ["notescli"]),
+        .testTarget(name: "NotesCLITests", dependencies: ["notescli", "NotesStore"]),
     ]
 )

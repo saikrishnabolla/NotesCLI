@@ -1,7 +1,36 @@
 import Foundation
-import NotesCore
 
 public enum NotePresentation {
+    public static func clipboardMarkdown(_ note: Note, includeAttachments: Bool = true) throws -> String {
+        guard var document = note.document else {
+            throw NotesError("note_body_unavailable", "The note body is unavailable. Nothing was copied.")
+        }
+        guard includeAttachments else {
+            document.runs = document.runs.map { run in
+                var run = run
+                run.attachment = nil
+                return run
+            }
+            return document.markdown().replacingOccurrences(of: "\u{fffc}", with: "")
+        }
+        // Copy the visible note, not OCR, transcripts, or other indexed attachment data.
+        let attachments = note.attachments.map { attachment in
+            Attachment(id: attachment.id, typeUTI: attachment.typeUTI, filename: attachment.filename,
+                       filePath: attachment.filePath.map { $0.hasPrefix("/") ? "file://" + $0 : $0 },
+                       title: attachment.title, url: attachment.url, isDivider: attachment.isDivider)
+        }
+        var result = document.markdown(attachments: attachments).replacingOccurrences(of: "\u{fffc}", with: "[Attachment]")
+        var placed = Set(document.runs.compactMap { $0.attachment?.id })
+        for attachment in attachments where placed.insert(attachment.id).inserted {
+            let object = NoteDocument(text: "\u{fffc}", runs: [
+                AttributeRun(length: 1, attachment: InlineRef(id: attachment.id, typeUTI: attachment.typeUTI))
+            ])
+            if !result.isEmpty { result += result.hasSuffix("\n") ? "\n" : "\n\n" }
+            result += object.markdown(attachments: [attachment])
+        }
+        return result
+    }
+
     private struct Piece {
         var text: String
         var run: AttributeRun

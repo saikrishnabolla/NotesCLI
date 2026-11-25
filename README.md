@@ -16,7 +16,7 @@ notescli onboard
 From a release archive:
 
 ```bash
-tar -xzf notescli-1.1.14-macos-universal.tar.gz
+tar -xzf notescli-1.1.15-macos-universal.tar.gz
 mkdir -p "$HOME/.local/bin" "$HOME/Applications"
 install -m 755 notescli "$HOME/.local/bin/notescli"
 ditto "Notes CLI.app" "$HOME/Applications/Notes CLI.app"
@@ -46,6 +46,8 @@ notescli onboard
 Grant Full Disk Access to **Notes CLI** in System Settings. The helper runs in the background with no window or menu bar item. Grant Automation, Camera, or Speech Recognition only when you need those features.
 
 Commands that open or save local files run in the calling app so the host never receives arbitrary paths. Those commands need that app's own file access.
+
+For a formatting bar, typing shortcuts, and quick search inside Apple Notes, run `notescli editor --help`.
 
 ## Common commands
 

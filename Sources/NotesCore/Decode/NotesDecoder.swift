@@ -3,14 +3,28 @@ import Foundation
 /// Field numbers follow apple_cloud_notes_parser/notestore.proto and icloud-md/topotext.proto.
 public enum NotesDecoder {
     public static func decode(_ data: Data) throws -> NoteDocument {
+        try decodeNote(noteMessage(data))
+    }
+
+    public static func plainText(_ data: Data) throws -> String {
+        try text(noteMessage(data))
+    }
+
+    private static func noteMessage(_ data: Data) throws -> ProtobufMessage {
         let root = try ProtobufMessage(NotesInflate.decompressIfNeeded(data))
         let versions = try root.messages(2)
         guard versions.count == 1 else { throw DecodeError.invalidProtobuf }
-        return try decodeNote(versions[0].required(3))
+        return try versions[0].required(3)
     }
-    static func decodeNote(_ note: ProtobufMessage) throws -> NoteDocument {
+
+    private static func text(_ note: ProtobufMessage) throws -> String {
         guard let bytes = note.data(2) else { throw DecodeError.missingField }
         guard let text = String(data: bytes, encoding: .utf8) else { throw DecodeError.invalidUTF8 }
+        return text
+    }
+
+    static func decodeNote(_ note: ProtobufMessage) throws -> NoteDocument {
+        let text = try text(note)
         let textLength = text.utf16.count
         var total = 0
         let runs = try note.messages(5).map { run -> AttributeRun in

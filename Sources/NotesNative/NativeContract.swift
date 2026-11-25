@@ -416,17 +416,23 @@ private final class LiveNativeContractRuntime: NativeContractRuntime {
             if let cls: AnyClass = NSClassFromString(name) { index(cls) }
         }
 
-        let expected = objc_getClassList(nil, 0)
-        guard expected > 0 else { return }
-        let values = UnsafeMutablePointer<AnyClass?>.allocate(capacity: Int(expected))
-        defer { values.deallocate() }
-        let actual = objc_getClassList(AutoreleasingUnsafeMutablePointer(values), expected)
-        for offset in 0..<Int(actual) {
-            guard let cls = values[offset] else { continue }
-            let name = String(cString: class_getName(cls))
-            if name.hasPrefix("IC") || name.hasPrefix("CH") || name.hasPrefix("SY") ||
-                name.hasPrefix("AK") || name.hasPrefix("MU") || name.contains("NotesShared") {
-                index(cls)
+        // Enumerate names first. objc_getClassList realizes unrelated classes, which
+        // can stall in a long-lived process that has loaded other Apple frameworks.
+        var imageCount: UInt32 = 0
+        let images = objc_copyImageNames(&imageCount)
+        defer { free(images) }
+        for image in 0..<Int(imageCount) {
+            var count: UInt32 = 0
+            guard let names = objc_copyClassNamesForImage(images[image], &count) else { continue }
+            defer { free(names) }
+            for offset in 0..<Int(count) {
+                let raw = names[offset]
+                let name = String(cString: raw)
+                if name.hasPrefix("IC") || name.hasPrefix("CH") || name.hasPrefix("SY") ||
+                    name.hasPrefix("AK") || name.hasPrefix("MU") || name.contains("NotesShared"),
+                   let cls = objc_lookUpClass(raw) {
+                    index(cls)
+                }
             }
         }
     }
